@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.serena/
+.work/
+test-results/
+playwright-report/
+.env*
+!.env.example
+*.local
+*.log

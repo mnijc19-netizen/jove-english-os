@@ -1,0 +1,286 @@
+{
+    "schemaVersion":  1,
+    "generator":  "Windows System.Speech; original reviewed demo / synthetic speech",
+    "sampleRate":  22050,
+    "channels":  1,
+    "bitsPerSample":  16,
+    "sentenceIndexBase":  0,
+    "materials":  [
+                      {
+                          "id":  "cafe-delay",
+                          "file":  "audio/cafe-delay.wav",
+                          "duration":  22.118775510204081,
+                          "voice":  "Microsoft Zira Desktop",
+                          "rate":  0,
+                          "transcriptSha256":  "3a4dff77a324f6a14bde09ba4ab1afc1b3a6de779c86b007dcfd392896b6d477",
+                          "sha256":  "0a1e4b7fcb48e72f06213d16c3d354514f1b073ad7c141086f6dce0db5467e5c",
+                          "sentences":  [
+                                            {
+                                                "index":  0,
+                                                "file":  "audio/cafe-delay-0.wav",
+                                                "duration":  5.2037188208616776,
+                                                "textSha256":  "bee6cecc2c8a950bbcd524fa9b768aff91528e9e9d078a54b41a04e331f45c0a",
+                                                "sha256":  "72ccda75046502c52a3dc2e421c8a9d926c461fd3cd47078d3ba63ad8bb62278"
+                                            },
+                                            {
+                                                "index":  1,
+                                                "file":  "audio/cafe-delay-1.wav",
+                                                "duration":  4.1337868480725621,
+                                                "textSha256":  "5d1b979746ba10853ce29b1cbbf4a119bf571f02fb56d3ceed14cea05c2c0358",
+                                                "sha256":  "a822960d4bc42502d0fabfcd5053580b41f5bc7bd4b84a3e138549835a845ad6"
+                                            },
+                                            {
+                                                "index":  2,
+                                                "file":  "audio/cafe-delay-2.wav",
+                                                "duration":  3.1390476190476191,
+                                                "textSha256":  "906a3ff01c42ba7de3e2e869b28741da197a6f5f811894e637d5fa0a18bff4f0",
+                                                "sha256":  "1a30329def861cf512ae681b1ab432c354fd7f3f88b8165cd2ec155fafcd778c"
+                                            },
+                                            {
+                                                "index":  3,
+                                                "file":  "audio/cafe-delay-3.wav",
+                                                "duration":  4.6986848072562362,
+                                                "textSha256":  "75baac9919c0cb8b668c03ab9db10db735a929d9e85c780ee6042948af7a872b",
+                                                "sha256":  "218c78ef05b4472e724efb45cacadd69e47427decc53665e95a5fb444bf34ebd"
+                                            },
+                                            {
+                                                "index":  4,
+                                                "file":  "audio/cafe-delay-4.wav",
+                                                "duration":  4.9435374149659861,
+                                                "textSha256":  "c7e3abc80bc67919fe768a84712927001608bcc040bec5ea600365bd87602c2f",
+                                                "sha256":  "0f95b969b1d325456a02b162a43c4199aeae497067c58e333a08c496a83ebaaf"
+                                            }
+                                        ]
+                      },
+                      {
+                          "id":  "notification-reset",
+                          "file":  "audio/notification-reset.wav",
+                          "duration":  22.633514739229025,
+                          "voice":  "Microsoft David Desktop",
+                          "rate":  0,
+                          "transcriptSha256":  "866207d3b012a7886e6da57132356be9785f5251af07b1911e2983cf4ec54e75",
+                          "sha256":  "98146fdf55b61591b0c7dcd509830de349fe4eb1966c9f61351c94839f6f4160",
+                          "sentences":  [
+                                            {
+                                                "index":  0,
+                                                "file":  "audio/notification-reset-0.wav",
+                                                "duration":  4.1838095238095239,
+                                                "textSha256":  "85ff625e3c2f676cd9142df00e89e171b3967e43aa59f94735b32d49ca01b9f0",
+                                                "sha256":  "8b64fb2dd532f56301afad018123ef2e38876aac0b1d2923541876cc83f336ab"
+                                            },
+                                            {
+                                                "index":  1,
+                                                "file":  "audio/notification-reset-1.wav",
+                                                "duration":  4.9385034013605438,
+                                                "textSha256":  "aef33325d1c9f7d77f892408f5500b2b503773bc72caa22441fc21cadd722446",
+                                                "sha256":  "a9e65689df92997f827e927e2fc89794a8c3f60f1c69c7c29a5e8ff5d527ee99"
+                                            },
+                                            {
+                                                "index":  2,
+                                                "file":  "audio/notification-reset-2.wav",
+                                                "duration":  4.8787301587301588,
+                                                "textSha256":  "abea30a2f7a38d99d6d339545f32e1949dc8ac981e1f4cf8e76f6a64fd9f1189",
+                                                "sha256":  "fb4d5e725b6555e49c6579d73962240a1f7c36b79d69cf48c39b5a510b9797e5"
+                                            },
+                                            {
+                                                "index":  3,
+                                                "file":  "audio/notification-reset-3.wav",
+                                                "duration":  4.7685260770975058,
+                                                "textSha256":  "a1ea8b4170abef52eec6265224bd32a1ae6bfe8026b58159b55b077772f062f6",
+                                                "sha256":  "772ca16fb692e4eb2309ced4b858776321c8b1ebc7f25aeb86702f49132d557b"
+                                            },
+                                            {
+                                                "index":  4,
+                                                "file":  "audio/notification-reset-4.wav",
+                                                "duration":  3.8639455782312924,
+                                                "textSha256":  "87f0adbbc5e37e454e674fc9f1da1f9c2f9fc92aa61adfd1a8eb858af9a86da2",
+                                                "sha256":  "e82a67dfd93f87b7ff48cef02b7b5212437413b94c825b5144aa7b1dd5f59e7c"
+                                            }
+                                        ]
+                      },
+                      {
+                          "id":  "shared-kitchen",
+                          "file":  "audio/shared-kitchen.wav",
+                          "duration":  21.838321995464852,
+                          "voice":  "Microsoft Zira Desktop",
+                          "rate":  0,
+                          "transcriptSha256":  "b54686ab42142da2cd6594d20a2b33fc74c498423ec79e77717bbaa98f50a949",
+                          "sha256":  "92e89e6acccbc8fbee10764e33a1ae495b2e96418df622bfab01424508df3ae1",
+                          "sentences":  [
+                                            {
+                                                "index":  0,
+                                                "file":  "audio/shared-kitchen-0.wav",
+                                                "duration":  4.3935147392290252,
+                                                "textSha256":  "901dacc7e4cf6867b9fca131c31d59a7823ee1395460ef20e2bc07996d797f69",
+                                                "sha256":  "b92131a97b6065f075d2515635e149737be7029bc5b202cdfb11c14b0a71827f"
+                                            },
+                                            {
+                                                "index":  1,
+                                                "file":  "audio/shared-kitchen-1.wav",
+                                                "duration":  4.5536507936507933,
+                                                "textSha256":  "489595cce1b0984ea43cf4a4e3ff17cb5df1a915b8359d02ebf4636279548995",
+                                                "sha256":  "3d6bf92fbea64426b14ddb67e8683358d5481eeeb617e7873d460e56b7714854"
+                                            },
+                                            {
+                                                "index":  2,
+                                                "file":  "audio/shared-kitchen-2.wav",
+                                                "duration":  4.1237188208616784,
+                                                "textSha256":  "0bdd177e3cb3bd3a3aa2920476eb207af9f6b1978dd5ee2d21d81a427722bb12",
+                                                "sha256":  "681aa961059235d7c6aafb2e3991b859d505eac7d4e002157e7d052566799a36"
+                                            },
+                                            {
+                                                "index":  3,
+                                                "file":  "audio/shared-kitchen-3.wav",
+                                                "duration":  4.8736961451247165,
+                                                "textSha256":  "8eb7cc43ae476e5b73b932c2bedd53e2fc93c69f5430237b03d52c043fe55148",
+                                                "sha256":  "781c9d16487a487a1c7afb2a082ff5c20c51cba04ef572fa210b2f32862771f8"
+                                            },
+                                            {
+                                                "index":  4,
+                                                "file":  "audio/shared-kitchen-4.wav",
+                                                "duration":  3.8937414965986394,
+                                                "textSha256":  "ddecc5eedc606bc29522659a24f6a4edbb0360878f3e5609b00b82bcb1f2edc0",
+                                                "sha256":  "40303d6dce4876a8332ce4571f2ba7222bec95b3bcc6d19e62099a0afb6b40a8"
+                                            }
+                                        ]
+                      },
+                      {
+                          "id":  "lunch-order",
+                          "file":  "audio/lunch-order.wav",
+                          "duration":  24.368435374149659,
+                          "voice":  "Microsoft David Desktop",
+                          "rate":  0,
+                          "transcriptSha256":  "a690115ef3cf76cfdbbad9d8fe6331da03bdb3ae2b9cda3c0c81aad6ce9a91e7",
+                          "sha256":  "42ad8c93fd4448cb1fa589b3db6bc6e68e8e9ac838a40a0e9ed865e0b88d1eb6",
+                          "sentences":  [
+                                            {
+                                                "index":  0,
+                                                "file":  "audio/lunch-order-0.wav",
+                                                "duration":  4.3987755102040813,
+                                                "textSha256":  "95a249c8f25d60d7ec9b90f54bdac083d501bdbaee122f7559552422f04ab260",
+                                                "sha256":  "11bf140c43ebd2f434a7a33b0213e17abf9732b4885b89da3c1fb5001517a5f3"
+                                            },
+                                            {
+                                                "index":  1,
+                                                "file":  "audio/lunch-order-1.wav",
+                                                "duration":  4.863537414965986,
+                                                "textSha256":  "c8d8997062ae83b808f094d8ee0aabdff38b219fe0ba6d177a3e5547e64ad571",
+                                                "sha256":  "32ec1112d7b11053925e8e840cbdfad648df0d1476ba734cd409d447f7d6eaf6"
+                                            },
+                                            {
+                                                "index":  2,
+                                                "file":  "audio/lunch-order-2.wav",
+                                                "duration":  5.04875283446712,
+                                                "textSha256":  "486c6f7d3e77d1dbfedf5bd0b0f72f0e54fd72421fb30402a131794ddc3c3112",
+                                                "sha256":  "7d1ead0d2f9ad77d950d5a0995015cdff4f34852390e6c23c24fedacc9cdec8a"
+                                            },
+                                            {
+                                                "index":  3,
+                                                "file":  "audio/lunch-order-3.wav",
+                                                "duration":  4.4737414965986391,
+                                                "textSha256":  "ac8530a79aa8de5bd3c763242f7070e4b841842461b21992327a7e6136202fbd",
+                                                "sha256":  "e9ad6ce571e313d50fcf4602b20cf39dd78674a5e934255e31d82214df696958"
+                                            },
+                                            {
+                                                "index":  4,
+                                                "file":  "audio/lunch-order-4.wav",
+                                                "duration":  5.5836281179138325,
+                                                "textSha256":  "eb474754805794a203b68a468d2dc2b485883352744abcc559d31a602722e21d",
+                                                "sha256":  "585fd09348f483af274d0cc03c3a741c455419439fd9f76573dfb1104ed292a3"
+                                            }
+                                        ]
+                      },
+                      {
+                          "id":  "train-change",
+                          "file":  "audio/train-change.wav",
+                          "duration":  23.553151927437643,
+                          "voice":  "Microsoft Zira Desktop",
+                          "rate":  0,
+                          "transcriptSha256":  "2cb23b38a12a097bc251b3426e5b6db87d81c4c1477f3fcc1d75d1db9767b1ed",
+                          "sha256":  "54af0c81c76217c24c10a447fb0d4800dfc9c5e9688335558fcdf2a9e3b09765",
+                          "sentences":  [
+                                            {
+                                                "index":  0,
+                                                "file":  "audio/train-change-0.wav",
+                                                "duration":  5.9185487528344671,
+                                                "textSha256":  "0d6442438074f4673fab70d8a330e8c3ea2a9c02ea9b704ee21d0386cd2e2275",
+                                                "sha256":  "36af33dd051e8e65d3f6da0867e7836ad10a274b4609e39d8db30048653e576e"
+                                            },
+                                            {
+                                                "index":  1,
+                                                "file":  "audio/train-change-1.wav",
+                                                "duration":  4.2285714285714286,
+                                                "textSha256":  "5417b0ac3368377e2580bd0ade95d3a0234f2affa57e45e8354745789d4558b6",
+                                                "sha256":  "237d7245bf7f4d238b0793e4de4771bce0573caf6d73f22da69e848ad6c02c9a"
+                                            },
+                                            {
+                                                "index":  2,
+                                                "file":  "audio/train-change-2.wav",
+                                                "duration":  4.3685714285714283,
+                                                "textSha256":  "8304a7f8b2def3142dd86aac8a74fd35c11b0c2728c53507083391a5b8d4318b",
+                                                "sha256":  "ebe1aff44fcb001d78ea65a7271533c4d6b5d121273c4c180b7d874a70e3be33"
+                                            },
+                                            {
+                                                "index":  3,
+                                                "file":  "audio/train-change-3.wav",
+                                                "duration":  4.9737414965986391,
+                                                "textSha256":  "b86afe8c27fc631ea8853050841aceec371ba88d22905f70e1a9c1fa0364ca5b",
+                                                "sha256":  "657dbd0b4d59b45b04bda52c0e42baef6f678295870e891d2f7748f0d817edf2"
+                                            },
+                                            {
+                                                "index":  4,
+                                                "file":  "audio/train-change-4.wav",
+                                                "duration":  4.0637188208616779,
+                                                "textSha256":  "3221bda54fb7674cd877db7a38d14d122779f5f0ec08765cd28ea84754d29780",
+                                                "sha256":  "f83780f87c469317810d4aaed2fb53f920cd5c2973d35e7be505d1e0d4f76ad9"
+                                            }
+                                        ]
+                      },
+                      {
+                          "id":  "team-demo",
+                          "file":  "audio/team-demo.wav",
+                          "duration":  24.238140589569159,
+                          "voice":  "Microsoft David Desktop",
+                          "rate":  0,
+                          "transcriptSha256":  "69b58d620b774db768be80e21c84d630de79a2c693773fef46e8f89c88b91426",
+                          "sha256":  "886a23e3618382eee8035c9b3caa94ed0fd4d0cc41a963d55e2a4285e4b7a8fb",
+                          "sentences":  [
+                                            {
+                                                "index":  0,
+                                                "file":  "audio/team-demo-0.wav",
+                                                "duration":  5.143673469387755,
+                                                "textSha256":  "a5bdc180eb4bf5150d1e7c523c67e28888e21746731c1f40a22e1fdb1d497caf",
+                                                "sha256":  "8183f758f27fa0e50d8aa2d5ef72f788ec6244bfdd0d33d9fa81b3f23ca3a467"
+                                            },
+                                            {
+                                                "index":  1,
+                                                "file":  "audio/team-demo-1.wav",
+                                                "duration":  4.4487074829931972,
+                                                "textSha256":  "9a36e07ad1455b24eeeb0c0012cdeb347b7257cda0fed2546c66c53c527d0aca",
+                                                "sha256":  "b3230c757bdacd5d066b126886c5e1c069c54d0af5089db2d4598e61dd49841f"
+                                            },
+                                            {
+                                                "index":  2,
+                                                "file":  "audio/team-demo-2.wav",
+                                                "duration":  5.2985034013605441,
+                                                "textSha256":  "d20f4255f39563973d5dcc16054ff0ebdbc9724d770158e2840537d064232943",
+                                                "sha256":  "c34d06ecd412172dd4663de3173cbcbfced74d71de083534fc07984d75c7e41e"
+                                            },
+                                            {
+                                                "index":  3,
+                                                "file":  "audio/team-demo-3.wav",
+                                                "duration":  5.6186394557823132,
+                                                "textSha256":  "7a86d5cda78875d4c9144da5aacfcbfdfeba2b119bd80b60bd4a4be5aa38ad4a",
+                                                "sha256":  "89420cea4207493b48bda3d5ea048a3a3b9a68c218b89fb082b5af14b78f8827"
+                                            },
+                                            {
+                                                "index":  4,
+                                                "file":  "audio/team-demo-4.wav",
+                                                "duration":  3.7286167800453516,
+                                                "textSha256":  "1f413bdc8bd8da06dd167ed7c4ed3e9da1345621068268f6ce09bb0471a37a1d",
+                                                "sha256":  "1a22bf419886e943409616419934099e913146910d4c4b6c6a8662bd35e4f4d3"
+                                            }
+                                        ]
+                      }
+                  ]
+}

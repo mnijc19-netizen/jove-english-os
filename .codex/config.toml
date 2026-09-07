@@ -1,0 +1,3 @@
+# Jove English OS only. Preserve the owner's explicitly selected quality tier.
+model = "gpt-6-astra"
+model_reasoning_effort = "ultra"
