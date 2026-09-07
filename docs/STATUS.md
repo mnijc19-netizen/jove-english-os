@@ -1,17 +1,20 @@
 # Current status
 
-Active full-delivery goal. 2026-09-08 release candidate: project-only Astra/Ultra and active branched rollout metadata verified; global Sol/max unchanged. New public source repository `mnijc19-netizen/jove-english-os` retains its original visibility. Main branch and verified GitHub noreply author set. Full specification and execution attachment retained without scope reduction. Initial commit `fcd60edc09c1cd0c322d82f374eee3277c56c79a` passed Actions run `34151664306` and deployed successfully. An additional keyboard fix has passed narrow local/independent checks; its expanded suite and final public production acceptance remain required.
+Active full-delivery goal. 2026-09-08: project-only Astra/Ultra and active branched rollout metadata verified; global Sol/max unchanged. Public source repository `mnijc19-netizen/jove-english-os` retains its original visibility. Full specification and execution attachment retained without scope reduction. Corrected application commit `61bfaa09056f96ad5ade9ba99ee5920676bd92d1` passed Actions run `34152152846` and deployed successfully. Fresh production core acceptance passed. An HTML application-name metadata release is being used to conclusively repeat the production update lifecycle check; final evidence synchronization/delivery remain.
 
 ## Evidence obtained
 
 - Working Vue application with all pages, database/FSRS, provider/audio, six audited original demo materials and 36 real synthesized WAV assets.
 - Clean `npm ci` succeeded. Latest main run at 02:23 Asia/Shanghai: 265 unit/integration tests passed, one optional public-catalog test skipped. The live public model catalog separately passed at 02:24; no credential or paid request was used.
-- Baseline built-app desktop/mobile suite: 76/76 passed, including Recorder active-state guards, delayed evaluation identity, cross-modality transfer novelty, read-only transcript disclosure, and storage/error/reload regressions. Two added keyboard regressions pass independently; the expanded 78-test suite is running on the corrected `index-B0x6hL0R.js` bundle.
-- All nine pages visually inspected in desktop/mobile and light/dark; no document overflow or uncaught errors. Recording, saved audio, import, pending request, API error and offline states captured separately. Compact playback and a scrollable readable weekly table added; screenshots are local QA, not production evidence.
+- Final built-app desktop/mobile suite: 78/78 passed, including Recorder active-state guards, delayed evaluation identity, cross-modality transfer novelty, read-only transcript disclosure, keyboard skip navigation, and storage/error/reload regressions. GitHub's clean Ubuntu verification also passed before deploying `index-B0x6hL0R.js`.
+- All nine pages visually inspected in desktop/mobile and light/dark. The same 36-view capture was repeated on production, with no document overflow or uncaught/console errors. Recording, saved audio, import, pending request, API error and offline states also passed on production in both viewports. Compact playback and a scrollable readable weekly table remain intact.
 - Final lint/typecheck/build passed, dependency audit reports zero vulnerabilities, and source/build secret-pattern scan passed across 89 text files. Third-party Rollup comment-annotation and npm deprecation notices are nonfatal; no runtime issue or audited vulnerability is claimed from them.
 - Independent read-only review: APPROVED. All nine later findings below closed; the last disclosure regression and cold reload each passed desktop/mobile independent verification.
 - Additional keyboard audit caught the skip-link `#main` fragment being interpreted as a router path and returning to Today. The link now prevents route navigation and focuses a programmatically focusable main landmark. Independent desktop/mobile verification confirms route preservation and subsequent Tab navigation.
 - Extra local desktop/mobile audit actually completed a queued review while offline, reloaded, and verified the persisted FSRS repetition/due date. It also verified manifest/icon HTTP responses, SW scope, no stored credentials, no uncaught/console errors, and form typing not triggering recording shortcuts.
+- Fresh public production browser journeys: 10/10 passed on desktop/mobile Chromium. Coverage: onboarding/demo, listening/recall/review, real browser recording with synthetic microphone input, backup/restore and corrupt-file rejection, no-key behavior, intercepted API error with retained audio, hash routes/reload, dark theme, offline shell and actual cached audio.
+- Extra production audit passed desktop/mobile: HTTP 200, manifest/start URL/icons/SW scope, actual public provider model refresh (415 text models plus placeholder), offline review completion and durable FSRS due/repetition after reload, no credentials, no uncaught/console errors or horizontal overflow.
+- Actual local old-to-current two-artifact SW upgrade passed with fresh and clock-aged registrations: deliberate Update now loaded the new bundle and retained the saved response. The first public upgrade probe timed out without a diagnostic snapshot; it is inconclusive, not a confirmed application defect. Independent source approval stands. The repeat public probe retains failure snapshots and tolerates transient execution-context destruction during reload.
 
 ## Independent review on 2026-09-08 — approved after fixes
 
@@ -35,14 +38,15 @@ Actual-date midnight rollover and all corrected regression assertions pass on de
 - DOMAIN/DATA: 24 domain and 69 database tests cover adaptive plans, evidence boundaries, six independent FSRS cards, idempotency, delayed repair, migrations and atomic secret-free backups.
 - CONTENT/PROVIDER: 16 content and 101 provider tests; six reviewed demos/36 WAVs, import provenance, contextual lookup, dynamic catalogs, structured evaluation, streaming, retry/cancel/budget and STT/TTS contracts. Public catalog separately tested live.
 - AUDIO: 20 audio and 35 component tests plus browser MediaRecorder playback/storage/error journeys.
-- ONBOARDING/LISTEN/SPEAK/REVIEW/PROGRESS: 76 baseline desktop/mobile E2E cases plus two keyboard cases across learning, listening-attempts, regressions and retrieval-integrity suites; source review checks named modes/missions and evidence-based assessments.
+- ONBOARDING/LISTEN/SPEAK/REVIEW/PROGRESS: 78 desktop/mobile E2E cases across learning, listening-attempts, regressions and retrieval-integrity suites; source review checks named modes/missions and evidence-based assessments. Ten core journeys passed again on the actual public site.
 - SECURITY/UX/PWA: secret/dependency scans, independent review, nine-route light/dark desktop/mobile visual checks, browser keyboard/record/error/offline states, scoped manifest/SW and real cached-audio replay.
 - LOCAL/REVIEWER: clean install and all local gates passed; independent source approval obtained.
-- RELEASE: initial automated verification/deployment successful, Pages uses workflow builds and HTTPS, public response is HTTP 200 with the expected initial bundle. The keyboard correction must pass the same deployment gate.
-- PRODUCTION/DELIVERY: fresh final public-browser acceptance pending; no completion claim yet.
+- RELEASE: both initial and keyboard-corrected commits passed automatic verification/deployment. Pages uses workflow builds and HTTPS; public HTTP 200 and exact deployment SHA match the corrected application bundle.
+- PRODUCTION: core fresh-browser, visual, offline review and public-model checks passed. Conclusive public old-to-new update handoff is being repeated through the metadata-only release.
+- DELIVERY: final evidence synchronization and direct URL handoff remain; no completion claim yet.
 
 ## Remaining before release
 
-1. Finish the expanded 78-test local suite for the independently approved keyboard correction. Final local visual-state checks and whole-source readiness audit have passed.
-2. Push the correction, complete Actions deployment and exact-commit Pages read-back. Operational README includes first-use, maintenance, privacy and recovery instructions.
-3. Fresh public desktop/mobile production browser acceptance, then concise URL delivery. Paid-provider smoke remains conditional on a legitimate available key; no such key has been supplied or discovered, and none is requested for the unconditional gates.
+1. Deploy the standard application-name metadata addition and finish the instrumented public update handoff in preserved desktop/mobile browser contexts. No speculative update-logic change is planned.
+2. Synchronize final evidence, verify the active deployment and clean repository, then deliver the public URL. Operational README includes first-use, maintenance, privacy and recovery instructions.
+3. Paid-provider smoke remains conditional on a legitimate available key; no such key has been supplied or discovered. Contract/failure tests and actual public catalog access do not certify paid chat/STT/TTS execution.
