@@ -12,6 +12,8 @@ Website: [Jove English OS](https://mnijc19-netizen.github.io/jove-english-os/). 
 4. For personalized AI, open **Settings**, enter a dedicated limited OpenRouter key, test the connection, refresh the model list and choose text/STT/TTS models. Keys are entered only in your browser, never in a source file or build environment.
 5. Export a JSON backup regularly. Download important recordings from **Library** separately. Install through your browser's app / Add to Home Screen menu where supported.
 
+On the first visit, stay online until **Ready for offline practice** appears in the footer. The app needs to download its bundled audio before offline playback is available. If you kept an early pre-release tab open, save your work and refresh it once to load the corrected update handler.
+
 The six original demo scripts use clearly labeled synthetic speech. They are useful offline practice, not a validated measure of natural-speaker comprehension. Import recordings you have permission to use to practice authentic speech. URL access is best-effort; paste the text when retrieval is restricted. No paywall, login or DRM bypass is provided.
 
 ## Run locally
