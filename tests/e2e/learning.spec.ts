@@ -261,11 +261,14 @@ test("all routes, dark theme and offline shell with real cached audio", async ({
   page,
   context,
 }) => {
+  // A fresh public-origin install downloads the real offline audio library.
+  // Wait for actual control, not localhost-speed precaching, before disconnecting.
+  test.setTimeout(90000);
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await open(page);
   await expect
-    .poll(() => page.evaluate(() => !!navigator.serviceWorker.controller))
+    .poll(() => page.evaluate(() => !!navigator.serviceWorker.controller), { timeout: 60000 })
     .toBe(true);
   for (const route of [
     "today",

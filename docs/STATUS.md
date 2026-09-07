@@ -1,6 +1,6 @@
 # Current status
 
-Active full-delivery goal. 2026-09-08: project-only Astra/Ultra and active branched rollout metadata verified; global Sol/max unchanged. Public source repository `mnijc19-netizen/jove-english-os` retains its original visibility. Full specification and execution attachment retained without scope reduction. Application commit `61bfaa09056f96ad5ade9ba99ee5920676bd92d1` and metadata commit `b2e011185370d5151002e1297f9d311e99972528` passed Actions/deployment. Fresh production core acceptance passed. The instrumented production update probe confirmed a first-install handoff defect; its minimal fix and real-worker regression are now the final release gate.
+Active full-delivery goal. 2026-09-08: project-only Astra/Ultra and active branched rollout metadata verified; global Sol/max unchanged. Public source repository `mnijc19-netizen/jove-english-os` retains its original visibility. Full specification and execution attachment retained without scope reduction. Corrected application `5eecfcc87b712ec0db070ea2c6d705f7a568ac11` passed Actions `34155555000` and exact-SHA Pages deployment `6315019149`; the public site serves `index-CviBBF9R.js`. A version-only HTML release now enables the real public first-install upgrade probe; broad production regression is in progress.
 
 ## Evidence obtained
 
@@ -50,6 +50,6 @@ Actual-date midnight rollover and all corrected regression assertions pass on de
 
 ## Remaining before release
 
-1. Finish the expanded 84-test local/CI suite and deploy the independently approved controller-handoff/recovery correction.
+1. The expanded 84-test suite passed locally (2.8m) and in clean Ubuntu CI (3.2m). The correction is deployed. Finish the version-only production upgrade proof and broader public browser recheck. One public offline case exceeded the old 10s initial-controller wait while downloading the audio library; it now waits up to 60s for actual control before disconnecting, with the same assertions and a bounded 90s case timeout.
 2. Synchronize final evidence, verify the active deployment and clean repository, then deliver the public URL. Operational README includes first-use, maintenance, privacy and recovery instructions.
 3. Paid-provider smoke remains conditional on a legitimate available key; no such key has been supplied or discovered. Contract/failure tests and actual public catalog access do not certify paid chat/STT/TTS execution.
