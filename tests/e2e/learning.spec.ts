@@ -48,6 +48,19 @@ async function play(page: Page, complete = false) {
   }
 }
 
+test("keyboard skip link focuses practice without changing a hash route", async ({ page }) => {
+  await open(page, "review");
+  await expect(page.locator("main h1")).toBeFocused();
+  const currentUrl = page.url();
+  await page.locator(".skip-link").focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("main")).toBeFocused();
+  await expect(page).toHaveURL(currentUrl);
+  await expect(page.locator("h1")).toContainText("Bring it back");
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("combobox", { name: "Practice type" })).toBeFocused();
+});
+
 test("first setup measures listening, vocabulary and reading, persists the profile", async ({
   page,
 }) => {

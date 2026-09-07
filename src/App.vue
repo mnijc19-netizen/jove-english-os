@@ -34,9 +34,12 @@ watch(
   },
 );
 onMounted(app.init);
+function focusPractice() {
+  document.getElementById("main")?.focus();
+}
 </script>
 <template>
-  <a class="skip-link" href="#main">Skip to practice</a>
+  <a class="skip-link" href="#main" @click.prevent="focusPractice">Skip to practice</a>
   <div v-if="app.fatal" class="fatal">
     <h1 tabindex="-1">Let’s recover your workspace.</h1>
     <p>{{ app.fatal }}</p>
@@ -154,7 +157,7 @@ onMounted(app.init);
           <Icon name="close" />
         </button>
       </div>
-      <main id="main"><RouterView /></main>
+      <main id="main" tabindex="-1"><RouterView /></main>
       <footer class="app-footer">
         <span>Small practice. Real-world confidence.</span
         ><span>{{
