@@ -1,6 +1,6 @@
 # Current status
 
-Active full-delivery goal. 2026-09-08: project-only Astra/Ultra and active branched rollout metadata verified; global Sol/max unchanged. Public source repository `mnijc19-netizen/jove-english-os` retains its original visibility. Full specification and execution attachment retained without scope reduction. Corrected application commit `61bfaa09056f96ad5ade9ba99ee5920676bd92d1` passed Actions run `34152152846` and deployed successfully. Fresh production core acceptance passed. An HTML application-name metadata release is being used to conclusively repeat the production update lifecycle check; final evidence synchronization/delivery remain.
+Active full-delivery goal. 2026-09-08: project-only Astra/Ultra and active branched rollout metadata verified; global Sol/max unchanged. Public source repository `mnijc19-netizen/jove-english-os` retains its original visibility. Full specification and execution attachment retained without scope reduction. Application commit `61bfaa09056f96ad5ade9ba99ee5920676bd92d1` and metadata commit `b2e011185370d5151002e1297f9d311e99972528` passed Actions/deployment. Fresh production core acceptance passed. The instrumented production update probe confirmed a first-install handoff defect; its minimal fix and real-worker regression are now the final release gate.
 
 ## Evidence obtained
 
@@ -14,7 +14,9 @@ Active full-delivery goal. 2026-09-08: project-only Astra/Ultra and active branc
 - Extra local desktop/mobile audit actually completed a queued review while offline, reloaded, and verified the persisted FSRS repetition/due date. It also verified manifest/icon HTTP responses, SW scope, no stored credentials, no uncaught/console errors, and form typing not triggering recording shortcuts.
 - Fresh public production browser journeys: 10/10 passed on desktop/mobile Chromium. Coverage: onboarding/demo, listening/recall/review, real browser recording with synthetic microphone input, backup/restore and corrupt-file rejection, no-key behavior, intercepted API error with retained audio, hash routes/reload, dark theme, offline shell and actual cached audio.
 - Extra production audit passed desktop/mobile: HTTP 200, manifest/start URL/icons/SW scope, actual public provider model refresh (415 text models plus placeholder), offline review completion and durable FSRS due/repetition after reload, no credentials, no uncaught/console errors or horizontal overflow.
-- Actual local old-to-current two-artifact SW upgrade passed with fresh and clock-aged registrations: deliberate Update now loaded the new bundle and retained the saved response. The first public upgrade probe timed out without a diagnostic snapshot; it is inconclusive, not a confirmed application defect. Independent source approval stands. The repeat public probe retains failure snapshots and tolerates transient execution-context destruction during reload.
+- Local two-artifact SW upgrade passed on pages reloaded after the initial controller was installed. The instrumented public probe then captured activated controller/worker, no waiting worker, retained draft, but an unchanged old document. Reproducing without the local pre-update reload confirmed the defect: Workbox captures isUpdate=false on initial uncontrolled registration and its later controlling callback does not reload. This is a first-install-document lifecycle bug, not data loss or an AI failure.
+- The correction gates a native controllerchange reload on the user's explicit Update now request, uses the same guard for the plugin callback, and handles a worker already activated by another tab. Bounded recovery restores both flags and retry after cancelled reload (2s) or stalled activation (15s). Independent review approved both the handoff and recovery fix. Local lint/typecheck/build, 265 unit/integration tests and secret scan pass; bundle is `index-CviBBF9R.js`.
+- Six new real-worker browser cases pass desktop/mobile: first uncontrolled document, controlled page after reload, and real beforeunload cancellation followed by save/retry. The last case verifies the same original audio ID, byte size and SHA-256 after update. Tests use actual built SW/workbox assets served as two document revisions; no lifecycle events or reload functions are mocked. The expanded 84-test suite is running.
 
 ## Independent review on 2026-09-08 — approved after fixes
 
@@ -42,11 +44,11 @@ Actual-date midnight rollover and all corrected regression assertions pass on de
 - SECURITY/UX/PWA: secret/dependency scans, independent review, nine-route light/dark desktop/mobile visual checks, browser keyboard/record/error/offline states, scoped manifest/SW and real cached-audio replay.
 - LOCAL/REVIEWER: clean install and all local gates passed; independent source approval obtained.
 - RELEASE: both initial and keyboard-corrected commits passed automatic verification/deployment. Pages uses workflow builds and HTTPS; public HTTP 200 and exact deployment SHA match the corrected application bundle.
-- PRODUCTION: core fresh-browser, visual, offline review and public-model checks passed. Conclusive public old-to-new update handoff is being repeated through the metadata-only release.
+- PRODUCTION: 14 core fresh-browser journeys (10 learning + 4 assessment/repair), visual, offline review and public-model checks passed. Assessment/repair provider responses are intercepted contract fixtures, not paid-provider validation. The identified first-install SW handoff correction still needs deployment and production recheck.
 - DELIVERY: final evidence synchronization and direct URL handoff remain; no completion claim yet.
 
 ## Remaining before release
 
-1. Deploy the standard application-name metadata addition and finish the instrumented public update handoff in preserved desktop/mobile browser contexts. No speculative update-logic change is planned.
+1. Finish the expanded 84-test local/CI suite and deploy the independently approved controller-handoff/recovery correction.
 2. Synchronize final evidence, verify the active deployment and clean repository, then deliver the public URL. Operational README includes first-use, maintenance, privacy and recovery instructions.
 3. Paid-provider smoke remains conditional on a legitimate available key; no such key has been supplied or discovered. Contract/failure tests and actual public catalog access do not certify paid chat/STT/TTS execution.

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { registerSW } from "virtual:pwa-register";
 import { useApp } from "./stores/app";
@@ -8,7 +8,30 @@ const app = useApp(),
   route = useRoute(),
   menu = ref(false),
   updateAvailable = ref(false),
+  applyingUpdate = ref(false),
   offlineReady = ref(false);
+let updateReloadStarted = false;
+let updateRecoveryTimer: number | undefined;
+function clearUpdateRecovery() {
+  if (updateRecoveryTimer !== undefined) window.clearTimeout(updateRecoveryTimer);
+  updateRecoveryTimer = undefined;
+}
+function armUpdateRecovery(delay: number) {
+  clearUpdateRecovery();
+  updateRecoveryTimer = window.setTimeout(() => {
+    updateRecoveryTimer = undefined;
+    updateReloadStarted = false;
+    applyingUpdate.value = false;
+    app.notice = "The page did not refresh. Save any current work, then try Update now again.";
+  }, delay);
+}
+function reloadAfterUpdate() {
+  if (!applyingUpdate.value || updateReloadStarted) return;
+  updateReloadStarted = true;
+  // beforeunload can cancel a reload without throwing. Keep retry available.
+  armUpdateRecovery(2000);
+  window.location.reload();
+}
 const nav = [
   "Today",
   "Listen",
@@ -20,6 +43,7 @@ const nav = [
 ];
 const page = computed(() => route.path.slice(1) || "today");
 const update = registerSW({
+  onNeedReload: reloadAfterUpdate,
   onNeedRefresh: () => {
     updateAvailable.value = true;
   },
@@ -27,13 +51,41 @@ const update = registerSW({
     offlineReady.value = true;
   },
 });
+async function applyUpdate() {
+  if (applyingUpdate.value) return;
+  applyingUpdate.value = true;
+  armUpdateRecovery(15000);
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    // Another tab may already have activated the offered worker.
+    if (!registration?.waiting) {
+      reloadAfterUpdate();
+      return;
+    }
+    await update(true);
+  } catch {
+    clearUpdateRecovery();
+    updateReloadStarted = false;
+    applyingUpdate.value = false;
+    app.notice = "The update could not be applied. Save your practice, then try again or refresh.";
+  }
+}
 watch(
   () => route.path,
   () => {
     menu.value = false;
   },
 );
-onMounted(app.init);
+onMounted(() => {
+  // A first-install Workbox instance keeps isUpdate=false even on a later
+  // controller handoff. Reload on that native event only after explicit consent.
+  navigator.serviceWorker?.addEventListener("controllerchange", reloadAfterUpdate);
+  return app.init();
+});
+onUnmounted(() => {
+  clearUpdateRecovery();
+  navigator.serviceWorker?.removeEventListener("controllerchange", reloadAfterUpdate);
+});
 function focusPractice() {
   document.getElementById("main")?.focus();
 }
@@ -138,7 +190,7 @@ function focusPractice() {
         <span
           >A new version is ready. Save your current practice before
           refreshing.</span
-        ><button class="text-button" @click="update(true)">Update now</button
+        ><button class="text-button" :disabled="applyingUpdate" @click="applyUpdate">Update now</button>
         ><button
           class="icon-button"
           aria-label="Dismiss update"
