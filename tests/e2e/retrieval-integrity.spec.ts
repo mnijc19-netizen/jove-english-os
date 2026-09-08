@@ -277,14 +277,15 @@ test("Recall strips legacy hidden context from drafts, response events and sched
   expect((await records<ReviewCard>(page, "cards")).find(c => c.id === "integrity-recall")?.contextIds).toEqual([]);
 });
 
-test("Empty Learn navigation skips without completion; a saved retrieval completes only its task", async ({ page }) => {
+test("Empty Learn skips without completion; only saved chunk and written responses complete its assignment", async ({ page }) => {
   await open(page, "today");
-  const task = page.locator('.task-row[href*="/learn?"]').first();
+  const task = page.locator('.task-row[href*="/learn?"][href*="mode=chunks"]').first();
   await expect(task).toBeVisible();
   const href = (await task.getAttribute("href"))!;
   const query = new URLSearchParams(href.split("?")[1]);
   const taskId = query.get("task")!;
   const materialId = query.get("material")!;
+  expect(taskId).toMatch(/:chunks$/);
   await task.click();
   const complete = page.getByRole("button", { name: "Use these in conversation" });
   await expect(complete).toBeDisabled();
@@ -293,8 +294,10 @@ test("Empty Learn navigation skips without completion; a saved retrieval complet
   await expect(input).toBeEnabled();
   await input.fill("An unsaved practice sentence is not completion evidence.");
   await expect(complete).toBeDisabled();
+  const startedBeforeSkip = (await records<StudyEvent>(page, "events")).filter(event => event.type === "TASK_STARTED").map(event => event.id);
   await page.getByRole("link", { name: "Skip practice for now" }).click();
-  await expect(page).toHaveURL(/#\/speak/);
+  await expect(page).toHaveURL(/#\/today$/);
+  expect((await records<StudyEvent>(page, "events")).filter(event => event.type === "TASK_STARTED").map(event => event.id)).toEqual(startedBeforeSkip);
   expect((await records<StudyEvent>(page, "events")).some(e => e.type === "TASK_COMPLETED" && e.data?.kind === "learn")).toBe(false);
   expect((await records<DailyPlan>(page, "plans")).flatMap(plan => plan.tasks).find(t => t.id === taskId)?.done).toBe(false);
   await page.goto(href);
@@ -303,9 +306,23 @@ test("Empty Learn navigation skips without completion; a saved retrieval complet
   const savedResponse = `I can use ${expression} when I talk about my own plans.`;
   await input.fill(savedResponse);
   await page.getByRole("button", { name: "Save my example & practice later" }).first().click();
+  await expect(complete).toBeDisabled();
+  const written = "I explained the important idea in a different way for a friend.";
+  await page.locator("#rephrase").fill(written);
+  await expect(complete).toBeDisabled();
+  await page.getByRole("button", { name: "Save & check my rephrasing" }).click();
   await expect(complete).toBeEnabled();
+  const before = (await records<DailyPlan>(page, "plans")).find(plan => plan.tasks.some(task => task.id === taskId))!;
+  const index = before.tasks.findIndex(task => task.id === taskId);
+  const next = [...before.tasks.slice(index + 1), ...before.tasks.slice(0, index)].find(task => !task.done && task.minutes > 0)!;
   await complete.click();
-  await expect(page).toHaveURL(/#\/speak/);
+  await expect.poll(() => {
+    const [path, query] = new URL(page.url()).hash.split("?");
+    const params = new URLSearchParams(query);
+    return { path, task: params.get("task"), material: params.get("material"), mode: params.get("mode") };
+  }).toEqual({ path: next.kind === "shadow" ? "#/listen" : ["repair", "retell"].includes(next.kind) ? "#/speak" : next.kind === "assessment" ? "#/progress" : `#/${next.kind}`,
+    task: next.id, material: next.materialId ?? null,
+    mode: next.kind === "learn" ? next.id.endsWith(":reading") ? "reading" : "chunks" : ["shadow", "repair", "retell"].includes(next.kind) ? next.kind : null });
   const events = await records<StudyEvent>(page, "events");
   const response = events.find(e => e.type === "CHUNK_RECALL" && e.data?.taskId === taskId)!;
   const completion = events.filter(e => e.type === "TASK_COMPLETED" && e.data?.kind === "learn");
@@ -313,6 +330,11 @@ test("Empty Learn navigation skips without completion; a saved retrieval complet
   expect(completion).toHaveLength(1);
   expect(completion[0]).toMatchObject({ source: "objective", data: { taskId, materialId } });
   expect(completion[0]!.timestamp).toBeGreaterThanOrEqual(response.timestamp);
+  const writing = events.find(event => event.type === "WRITTEN_RESPONSE" && event.data?.taskId === taskId)!;
+  expect(writing).toMatchObject({ source: "text", sessionId: response.sessionId, data: { taskId, materialId, response: written } });
+  expect(completion[0]!.timestamp).toBeGreaterThanOrEqual(writing.timestamp);
+  const after = (await records<DailyPlan>(page, "plans")).find(plan => plan.id === before.id)!;
+  for (const task of before.tasks) expect(after.tasks.find(saved => saved.id === task.id)?.done).toBe(task.id === taskId ? true : task.done);
 });
 
 test("Learn chunk pronunciation stays compact with meaning and retrieval controls intact", async ({ page, isMobile }) => {

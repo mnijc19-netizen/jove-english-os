@@ -496,6 +496,14 @@ describe('actual integratable task adjustments', () => {
     expect(rebalanced.adjustments.fluencyMinutes).toBeGreaterThan(baseline.adjustments.fluencyMinutes)
     expect(rebalanced.adjustments.inputMinutes).toBeLessThan(baseline.adjustments.inputMinutes)
   })
+  it('puts a measured language deficit into the distinct Today language task, not the reader', () => {
+    const baseline = makePlan(profile, [], [], [practice('today', NOW)], baselineMaterials, undefined, NOW)
+    const plan = makePlan(profile, [], [], [...logs('input'), practice('today', NOW)], baselineMaterials, undefined, NOW)
+    expect(plan.tasks.find(t => t.id.endsWith(':chunks'))!.minutes).toBeGreaterThan(baseline.tasks.find(t => t.id.endsWith(':chunks'))!.minutes)
+    expect(plan.tasks.find(t => t.id.endsWith(':reading'))!.minutes).toBeGreaterThan(0)
+    expect(plan.minutes).toBeLessThanOrEqual(profile.dailyMinutes)
+    expect(analyzeLongitudinal(logs('input'), NOW).balance.underrepresented).toContain('language')
+  })
   it('responds to possible speaking avoidance with a smaller supported start while retaining speaking', () => {
     const baseline = planLongitudinal(input())
     const plan = planLongitudinal(input({ events: offers('speak', 'too-hard') }))

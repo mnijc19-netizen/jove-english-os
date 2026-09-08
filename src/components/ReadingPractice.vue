@@ -12,7 +12,8 @@ const props = defineProps<{ material: Material; taskId?: string; assessmentId?: 
 const emit = defineEmits<{ saved: [evidence: ReadingSavedEvidence] }>();
 const app = useApp(), router = useRouter(), ai = useRequest(), lookupAI = useRequest();
 const source = JSON.parse(JSON.stringify(props.material)) as Material;
-const sessionId = `reading:${props.assessmentId ?? props.taskId ?? `${new Date(app.clock).toLocaleDateString('en-CA')}:${source.id}`}`;
+const taskId = props.taskId, assessmentId = props.assessmentId;
+const sessionId = `reading:${assessmentId ?? taskId ?? `${new Date(app.clock).toLocaleDateString('en-CA')}:${source.id}`}`;
 const fit = assessReadingFit(source, app.profile, app.events, app.materials, app.clock);
 const tokenCount = (text: string) => text.match(/\p{L}+(?:['’-]\p{L}+)*/gu)?.length ?? 0;
 const draft = reactive({ passage: source.transcript, segmentWords: Math.max(40, Math.min(fit.recommendedSegmentWords, props.segmentWords ?? 250)), stage: 'ready',
@@ -20,6 +21,7 @@ const draft = reactive({ passage: source.transcript, segmentWords: Math.max(40, 
   activeMs: 0, sectionMs: [] as number[], lookupTokens: [] as string[], response: '', submittedResponse: '', retell: '', audioId: '', audioSeconds: 0,
   feedback: '', priorExposure: true, startedAt: Date.now(), observationAt: 0, completedAt: 0 });
 function notifySaved() {
+  if (!currentAssignment() || draft.stage !== 'saved') return;
   const evaluated = app.events.find(e => e.id === `${sessionId}:evaluated` && e.source === 'ai');
   emit('saved', { sessionId, materialId: source.id, observationAt: draft.observationAt,
     response: draft.submittedResponse, retell: draft.retell, ...(draft.audioId ? { audioId: draft.audioId } : {}),
@@ -48,6 +50,9 @@ const meaningful = (value: string) => value.trim().length >= 15 && tokenCount(va
 const canFinish = computed(() => draft.stage === 'respond' && meaningful(draft.response) &&
   (meaningful(draft.retell) || !!draft.audioId && draft.audioSeconds >= 2) && !recorderActive.value && !saving.value);
 let disposed = false, timer: ReturnType<typeof setInterval> | undefined;
+function currentAssignment() {
+  return !disposed && props.material.id === source.id && props.taskId === taskId && props.assessmentId === assessmentId;
+}
 let lastTick = 0, lastInteraction = 0;
 let writes: Promise<boolean> = Promise.resolve(true);
 let unsaved = false, writeVersion = 0;
@@ -66,6 +71,15 @@ function persist(): Promise<boolean> {
     } catch { if (!disposed) saveError.value = 'Could not save your reading. Keep this page open and retry saving.'; return false; }
   });
   writes = write; return write;
+}
+async function retrySave() {
+  if (saving.value || !currentAssignment()) return;
+  saving.value = true;
+  // persist captures this stage synchronously. Only that successfully committed
+  // saved snapshot can release the parent's continuation gate; no evidence replay.
+  const savedSnapshot = draft.stage === 'saved';
+  try { if (await persist() && savedSnapshot) notifySaved(); }
+  finally { saving.value = false; }
 }
 function tick() {
   if (!running.value) return;
@@ -91,9 +105,9 @@ async function start() {
     draft.priorExposure = app.events.some(e => e.data?.materialId === source.id &&
       !['TASK_OFFERED', 'TASK_STARTED', 'TASK_COMPLETED'].includes(e.type));
     if (!await persist()) return;
-    if (props.taskId) await app.beginTask(props.taskId);
+    if (taskId) await app.beginTask(taskId);
     await app.evidence({ id: `${sessionId}:started`, type: 'READING_STARTED', source: 'objective', sessionId,
-      data: { materialId: source.id, ...(props.taskId ? { taskId: props.taskId } : {}), priorExposure: draft.priorExposure } });
+      data: { materialId: source.id, ...(taskId ? { taskId } : {}), priorExposure: draft.priorExposure } });
     draft.stage = 'reading';
     if (!await persist()) { draft.stage = 'ready'; return; }
   } catch { saveError.value = 'Could not save the start of this reading. Please retry.'; }
@@ -149,28 +163,28 @@ async function saveWork() {
     const sampled = checkedRead.reduce((n, i) => n + tokenCount(parts.value[i] ?? ''), 0);
     const unknown = draft.unknownTokens.filter(id => checkedRead.includes(Number(id.split(':')[0]))).length;
     await app.evidence({ id: `${sessionId}:observation`, type: 'READING_OBSERVATION', source: 'objective', sessionId,
-      timestamp: draft.observationAt, data: { materialId: source.id, ...(props.taskId ? { taskId: props.taskId } : {}),
+      timestamp: draft.observationAt, data: { materialId: source.id, ...(taskId ? { taskId } : {}),
         firstPass: true, priorExposure: draft.priorExposure, wordsRead: wordsRead.value, activeSeconds: readingSeconds.value,
         lookupCount: draft.lookupTokens.length, wordsReadBasis: 'learner-confirmed-sections',
         ...(sampled ? { coverageMethod: 'checked-word-sample', coverageSource: 'learner-checked-recognition',
           sampledWordCount: sampled, knownWordCount: Math.max(0, sampled - unknown) } : {}) } });
     await app.evidence({ id: `${sessionId}:response`, type: 'READING_RESPONSE', source: 'text', sessionId, timestamp: draft.observationAt,
-      data: { materialId: source.id, ...(props.taskId ? { taskId: props.taskId } : {}), response: draft.submittedResponse } });
+      data: { materialId: source.id, ...(taskId ? { taskId } : {}), response: draft.submittedResponse } });
     await app.evidence({ id: `${sessionId}:retell`, type: 'READING_RETELL', source: audio ? 'objective' : 'text', sessionId,
       timestamp: draft.observationAt, prompted: true,
-      data: { materialId: source.id, ...(props.taskId ? { taskId: props.taskId } : {}), response: draft.retell.trim(),
+      data: { materialId: source.id, ...(taskId ? { taskId } : {}), response: draft.retell.trim(),
         ...(audio ? { audioId: audio.id, audioObserved: true, durationSeconds: audio.duration } : {}),
         textOnly: !audio, task: 'meaning-focused retell; no spontaneous or acoustic score inferred' } });
     if (readingSeconds.value >= 30) await app.evidence({ id: `${sessionId}:practice`, type: 'PRACTICE_LOGGED', source: 'objective', sessionId,
       timestamp: draft.observationAt, data: { strand: 'input', activeSeconds: Math.min(7200, readingSeconds.value), materialId: source.id } });
-    if (props.taskId) {
-      await app.completeTask('learn', { taskId: props.taskId, materialId: source.id });
+    if (taskId) {
+      await app.completeTask('learn', { taskId, materialId: source.id });
       // A stale/foreign task link can save practice, but cannot fabricate completion of today's assignment.
       // Name the actual activity only after the store attests that this exact learn task was completed.
-      if (app.events.some(e => e.id === `completed:${props.taskId}` && e.type === 'TASK_COMPLETED'
-        && e.data?.taskId === props.taskId && e.data?.kind === 'learn' && e.data?.materialId === source.id)) {
+      if (app.events.some(e => e.id === `completed:${taskId}` && e.type === 'TASK_COMPLETED'
+        && e.data?.taskId === taskId && e.data?.kind === 'learn' && e.data?.materialId === source.id)) {
         await app.evidence({ id: `${sessionId}:completed`, type: 'TASK_COMPLETED', source: 'objective', sessionId,
-          data: { kind: 'reading', taskId: props.taskId, materialId: source.id } });
+          data: { kind: 'reading', taskId, materialId: source.id } });
       }
     }
     draft.stage = 'saved'; draft.completedAt = Math.max(draft.observationAt, Date.now()); if (await persist()) notifySaved();
@@ -208,8 +222,8 @@ async function defer(reason: 'too-hard' | 'not-interested' | 'busy') {
   pause();
   if (!await persist()) return;
   try {
-    if (props.taskId) await app.evidence({ id: `${sessionId}:skipped:${reason}`, type: 'TASK_SKIPPED', source: 'objective', sessionId,
-      data: { taskId: props.taskId, kind: 'reading', reason, materialId: source.id } });
+    if (taskId) await app.evidence({ id: `${sessionId}:skipped:${reason}`, type: 'TASK_SKIPPED', source: 'objective', sessionId,
+      data: { taskId, kind: 'reading', reason, materialId: source.id } });
     await router.push('/');
   } catch { saveError.value = 'Your reading is saved, but this change could not be saved. Try again.'; }
 }
@@ -240,8 +254,7 @@ onMounted(async () => {
     }
     loaded.value = true;
     if (!draft.feedback && typeof savedEvaluation.value?.data?.feedback === 'string') draft.feedback = savedEvaluation.value.data.feedback;
-    await persist();
-    if (draft.stage === 'saved') notifySaved();
+    if (await persist() && draft.stage === 'saved') notifySaved();
     timer = setInterval(() => { tick(); if (running.value) void persist(); }, 1000);
     document.addEventListener('visibilitychange', visibility);
     window.addEventListener('blur', pause); window.addEventListener('beforeunload', beforeUnload);
@@ -260,7 +273,7 @@ onBeforeUnmount(() => {
       <h1 tabindex="-1">A story worth <span class="serif">sharing.</span></h1>
       <p class="lede">{{ source.title }} · {{ source.topic }}</p></div></div>
     <p class="help-text">{{ source.sourceLabel }} · {{ fit.confidence === 'unknown' ? 'Reading fit is still unknown. Start with a small section.' : 'Reading fit is an estimate from observed practice.' }}</p>
-    <p v-if="saveError" class="error" role="alert">{{ saveError }} <button class="text-button" @click="persist">Retry saving</button></p>
+    <p v-if="saveError" class="error" role="alert">{{ saveError }} <button class="text-button" :disabled="saving" @click="retrySave">Retry saving</button></p>
     <div v-if="draft.stage === 'ready'" class="panel">
       <p>Read at your own pace. Tap unfamiliar words, then share the main idea and something it makes you think about.</p>
       <button class="button primary" :disabled="!loaded || saving" @click="start">Start reading</button>

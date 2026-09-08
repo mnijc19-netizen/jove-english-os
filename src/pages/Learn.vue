@@ -8,7 +8,8 @@ import AudioPlayer from "../components/AudioPlayer.vue";
 import { useRequest } from "../composables/useRequest";
 import Icon from "../components/Icon.vue";
 import ReadingPractice from "../components/ReadingPractice.vue";
-import { planLongitudinal } from "../domain/longitudinal";
+import { planLongitudinal, type ReadingSavedEvidence } from "../domain/longitudinal";
+import { taskActivity } from "../domain/engine";
 const app = useApp(),
   route = useRoute(),
   router = useRouter(),
@@ -27,19 +28,36 @@ const material = computed(
       ? app.materials.find((m) => m.id === route.query.material && m.approved)
       : app.materials.find(m => m.approved),
 );
-const draftId = computed(() => "learn-draft-" + material.value?.id);
 const taskId = computed(() => typeof route.query.task === "string" ? route.query.task : undefined);
+const draftId = computed(() => "learn-draft-" + (taskId.value?.endsWith(':chunks') ? taskId.value : material.value?.id));
+const assignment = computed(() => app.plan.tasks.find(task => task.id === taskId.value));
 const readingPlan = computed(() => planLongitudinal({ profile: app.profile, skills: app.skills, events: app.events,
   cards: app.cards, materials: app.materials, now: app.clock }));
-const readingMode = computed(() => route.query.mode === 'reading' || taskId.value?.endsWith(':reading'));
+const readingMode = computed(() => taskId.value
+  ? taskActivity(assignment.value ?? { kind: 'learn', id: taskId.value }) === 'reading'
+  : route.query.mode === 'reading');
+const deliberateTask = computed(() => taskId.value?.endsWith(':chunks'));
 const hasSavedResponse = computed(() => {
   const dayStart = new Date();
   dayStart.setHours(0, 0, 0, 0);
-  return app.events.some(event => ["CHUNK_RECALL", "WRITTEN_RESPONSE"].includes(event.type)
+  const proof = app.events.filter(event => ["CHUNK_RECALL", "WRITTEN_RESPONSE"].includes(event.type)
     && event.sessionId === draftId.value && event.data?.materialId === material.value?.id
     && typeof event.data?.response === "string" && !!event.data.response.trim()
     && (taskId.value ? event.data.taskId === taskId.value : event.timestamp >= dayStart.getTime()));
+  return deliberateTask.value
+    ? proof.some(event => event.type === 'WRITTEN_RESPONSE') && (!material.value?.chunks.length || proof.some(event => event.type === 'CHUNK_RECALL'))
+    : proof.length > 0;
 });
+const savedReading = ref('');
+watch([taskId, () => material.value?.id, readingMode], () => { savedReading.value = ''; }, { flush: 'sync' });
+function readingSaved(evidence: ReadingSavedEvidence) {
+  if (readingMode.value && taskId.value && evidence.sessionId === `reading:${taskId.value}`
+    && evidence.materialId === material.value?.id) savedReading.value = evidence.sessionId;
+}
+// Plan completion can precede the final session write. The child emits only
+// after that write (including on reload); never navigate away from a partial save.
+const readingComplete = computed(() => readingMode.value && savedReading.value === `reading:${taskId.value}` && assignment.value?.done
+  && assignment.value.materialId === material.value?.id);
 let startedAt = Date.now();
 let loadVersion = 0;
 async function persist() {
@@ -107,8 +125,8 @@ async function recordReadingDisclosure(event: Event) {
   if (!details.open || !details.dataset.materialId) return;
   // Capture the displayed element's identity: toggle can run after a route change.
   const materialId = details.dataset.materialId;
-  const sessionId = "learn-draft-" + materialId;
   const disclosedTask = details.dataset.taskId;
+  const sessionId = "learn-draft-" + (disclosedTask?.endsWith(':chunks') ? disclosedTask : materialId);
   const timestamp = Date.now();
   try {
     // Disclosure is exposure even without editing. Preserve an existing writing draft,
@@ -203,13 +221,27 @@ async function recall(text: string) {
 }
 async function completeAndContinue() {
   if (!loaded.value || !hasSavedResponse.value || completing.value || writingSaving.value || recallSaving.value) return;
-  const identity = { taskId: taskId.value, materialId: material.value?.id };
+  const identity = { taskId: taskId.value, materialId: material.value?.id, activity: 'chunks' as const };
   completing.value = true;
   try {
     if (!await persist()) return;
-    await app.completeTask("learn", identity);
-    if (identity.materialId === material.value?.id && identity.taskId === taskId.value) await router.push("/speak");
+    const completed = await app.completeTask("learn", identity);
+    if (identity.taskId && !completed) { saveError.value = "Your writing is saved. This assignment could not be completed; return to Today to check it."; return; }
+    if (identity.materialId === material.value?.id && identity.taskId === taskId.value) {
+      const next = identity.taskId ? await app.continueAssignment(identity.taskId) : '/speak';
+      if (identity.materialId === material.value?.id && identity.taskId === taskId.value) await router.push(next);
+    }
   } catch { saveError.value = "Could not finish this task. Your responses are saved; try again."; }
+  finally { completing.value = false; }
+}
+async function continueReading() {
+  if (!readingComplete.value || completing.value) return;
+  const id = taskId.value;
+  completing.value = true;
+  try {
+    const next = await app.continueAssignment(id);
+    if (id === taskId.value) await router.push(next);
+  } catch { saveError.value = 'Your reading is saved. Retry continuing to the next task.'; }
   finally { completing.value = false; }
 }
 </script>
@@ -217,8 +249,10 @@ async function completeAndContinue() {
   <div v-if="readingMode" class="page task-page">
     <ReadingPractice
       v-if="material?.approved" :key="`${taskId ?? 'free'}:${material.id}`" :material="material" :task-id="taskId"
-      :segment-words="Math.min(readingPlan.reading.segmentWords, readingPlan.adjustments.segmentSeconds * 2)" />
+      :segment-words="Math.min(readingPlan.reading.segmentWords, readingPlan.adjustments.segmentSeconds * 2)" @saved="readingSaved" />
     <div v-else class="empty-state"><h1>Reading is waiting for a suitable passage.</h1><p>Choose an approved reader from your library when one is available.</p><RouterLink to="/library">Open library</RouterLink></div>
+    <button v-if="readingComplete" class="button primary mt" :disabled="completing" @click="continueReading">Continue to next task <Icon name="arrow" :size="17" /></button>
+    <p v-if="saveError" role="alert" class="error">{{ saveError }}</p>
   </div>
   <div v-else class="page">
     <div class="page-heading">
@@ -300,8 +334,9 @@ async function completeAndContinue() {
       <span class="muted">{{ app.chunks.length }} expressions</span>
     </div>
     <details
-      :key="material?.id"
+      :key="draftId"
       class="panel section"
+      :open="deliberateTask || undefined"
       :data-material-id="material?.id"
       :data-task-id="taskId"
       @toggle="recordReadingDisclosure"
@@ -346,7 +381,7 @@ async function completeAndContinue() {
       @click="completeAndContinue"
       >Use these in conversation <Icon name="arrow" :size="17"
     /></button>
-    <p v-if="!hasSavedResponse" class="help-text">Save a written example or a rephrasing before completing this practice.</p>
-    <RouterLink to="/speak" class="text-button">Skip practice for now</RouterLink>
+    <p v-if="!hasSavedResponse" class="help-text">{{ deliberateTask ? 'Save a rephrasing and, when an expression is offered, your own example before completing this practice.' : 'Save a written example or a rephrasing before completing this practice.' }}</p>
+    <RouterLink :to="taskId ? '/' : '/speak'" class="text-button">Skip practice for now</RouterLink>
   </div>
 </template>

@@ -1,5 +1,5 @@
 import { skillNames, type DailyPlan, type Material, type Profile, type ReviewCard, type Skill, type SkillName, type StudyEvent, type PlanTask } from './types'
-import { planLongitudinal } from './longitudinal'
+import { hasTaskStarted, planLongitudinal } from './longitudinal'
 
 // Scores, strengths, confidence and fatigue use 0..1, matching the shared UI/provider contract.
 const day = 86_400_000
@@ -85,6 +85,26 @@ function fingerprint(value: unknown): string {
   return (hash >>> 0).toString(36)
 }
 
+/** Legacy learn IDs remain language assignments; never rename persisted work. */
+export function taskActivity(task: Pick<PlanTask, 'kind'> & { id?: string }): string {
+  return task.kind === 'learn' ? task.id?.endsWith(':reading') ? 'reading' : 'chunks' : task.kind
+}
+
+export function taskPath(task: PlanTask): { path: string; query: Record<string, string> } {
+  return {
+    path: task.kind === 'shadow' ? '/listen' : ['repair', 'retell'].includes(task.kind) ? '/speak'
+      : task.kind === 'assessment' ? '/progress' : `/${task.kind}`,
+    query: { task: task.id, ...(task.materialId ? { material: task.materialId } : {}),
+      ...(task.kind === 'learn' ? { mode: taskActivity(task) } : ['shadow', 'repair', 'retell'].includes(task.kind) ? { mode: task.kind } : {}),
+      ...(task.kind === 'assessment' ? { assess: '1' } : {}) },
+  }
+}
+
+export function nextAssignedTask(plan: DailyPlan, afterId?: string): PlanTask | undefined {
+  const index = plan.tasks.findIndex(task => task.id === afterId)
+  return [...plan.tasks.slice(index + 1), ...plan.tasks.slice(0, index + 1)].find(task => !task.done && task.minutes > 0)
+}
+
 export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[], events: StudyEvent[], materials: Material[], previous?: DailyPlan, now = Date.now()): DailyPlan {
   const date = localDate(now)
   const today = previous?.date === date ? previous : undefined
@@ -144,11 +164,15 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   const readingMaterial = profile.onboarded ? readingOptions.find(m => m.id !== material?.id && !ordered.some(e =>
     e.data?.materialId === m.id && !['TASK_OFFERED', 'TASK_STARTED', 'TASK_COMPLETED'].includes(e.type)))
     ?? readingOptions[0] : undefined
-  candidates.push({ kind: 'learn', title: readingMaterial ? 'Read something worth sharing' : 'Make a chunk your own',
-    reason: readingMaterial ? 'Read at a comfortable pace, check useful words, then explain the meaning and retell it. Fit is provisional until observed.' : 'Recall complete expressions, then use them in a short written response.',
-    weight: (adjustment.readingMinutes + adjustment.languageMinutes) / 4,
-    materialId: readingMaterial?.id ?? material?.id,
-    ...(readingMaterial ? { id: `${date}:learn:${readingMaterial.id}:reading` } : {}) })
+  if (readingMaterial) candidates.push({ kind: 'learn', title: 'Read something worth sharing',
+    reason: 'Read at a comfortable pace, check useful words, then explain the meaning and retell it. Fit is provisional until observed.',
+    weight: adjustment.readingMinutes / 3, materialId: readingMaterial.id, id: `${date}:learn:${readingMaterial.id}:reading` })
+  const languageMaterial = material?.chunks.length ? material : [...approved].filter(m => m.chunks.length)
+    .sort((a, b) => rank(b) - rank(a) || order(a.id, b.id))[0] ?? material
+  candidates.push({ kind: 'learn', title: 'Make a chunk your own',
+    reason: 'Use a useful expression in your own sentence, save it for spaced retrieval, then write a short rephrasing.',
+    weight: (adjustment.languageMinutes + (readingMaterial ? 0 : adjustment.readingMinutes)) / 3,
+    materialId: languageMaterial?.id, id: `${date}:learn:${languageMaterial?.id ?? 'practice'}:chunks` })
   candidates.push({ kind: 'speak', title: adjustment.speakingMode === 'guided-familiar' ? 'Start with a familiar situation' : 'Say it in your own words',
     reason: adjustment.speakingMode === 'guided-familiar' ? 'Keep it short: use a familiar topic and a full sentence, then try again with less help.' : adjustment.speakingMode === 'new-context-transfer' ? 'Try a new situation at familiar difficulty. Express a real meaning, then get focused feedback.' : 'Daily speaking: express your meaning independently, then get feedback.',
     weight: adjustment.speakingMinutes / 3 + (spoken.has(focus) ? 1 : 0) + (inputCount > outputCount ? 1 : 0) })
@@ -163,8 +187,8 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   // The persisted plan is an assignment, not a fresh recommendation on every render.
   // Exposure, interests and fatigue may change priorities/minutes, never an active task's route.
   for (const candidate of candidates) {
-    const assigned = today?.tasks.find(task => !task.done && task.kind === candidate.kind)
-      ?? (candidate.kind !== 'review' && candidate.kind !== 'repair' ? today?.tasks.find(task => task.kind === candidate.kind) : undefined)
+    const assigned = today?.tasks.find(task => !task.done && taskActivity(task) === taskActivity(candidate))
+      ?? (candidate.kind !== 'review' && candidate.kind !== 'repair' ? today?.tasks.find(task => taskActivity(task) === taskActivity(candidate)) : undefined)
     if (!assigned) continue
     candidate.id = assigned.id
     candidate.materialId = assigned.materialId
@@ -173,7 +197,7 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   }
   // A queue can drain before the UI commits completion. Keep its task addressable until that commit.
   for (const assigned of today?.tasks ?? []) {
-    if (!assigned.done && !candidates.some(candidate => candidate.kind === assigned.kind)) {
+    if (!assigned.done && !candidates.some(candidate => taskActivity(candidate) === taskActivity(assigned))) {
       candidates.push({ ...assigned, weight: 1 })
     }
   }
@@ -187,7 +211,7 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
     return `${date}:${c.kind}:${c.materialId ?? 'practice'}${queue ? `:${queue}` : ''}`
   }
   const outstanding = candidates.filter(c => !completed.some(t => t.id === taskId(c)
-    || (t.kind === c.kind && c.kind !== 'review' && c.kind !== 'repair')))
+    || (taskActivity(t) === taskActivity(c) && c.kind !== 'review' && c.kind !== 'repair')))
   const spent = completed.reduce((n, t) => n + t.minutes, 0)
   const remaining = Math.max(0, budget - spent)
   // Completed time is historical; never inflate today's budget to fit new arrivals.
@@ -196,12 +220,19 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   const allocations = outstanding.map(() => 0)
   let available = remaining
   const nonReview = outstanding.map((_, i) => i).filter(i => i !== reviewIndex)
+  // A newly introduced activity must not displace an already begun assignment
+  // when only a small part of today's unchanged budget remains.
+  for (let i = 0; i < outstanding.length && available > 0; i++) {
+    const id = taskId(outstanding[i])
+    if (hasTaskStarted(id, ordered.filter(event => event.data?.taskId === id), now)) { allocations[i] = 1; available-- }
+  }
   if (reviewIndex >= 0) {
-    allocations[reviewIndex] = Math.min(Math.max(1, adjustment.reviewMinutes), Math.max(0, available - nonReview.length))
-    available -= allocations[reviewIndex]
+    const extra = Math.min(Math.max(1, adjustment.reviewMinutes) - allocations[reviewIndex], Math.max(0, available - nonReview.filter(i => !allocations[i]).length))
+    allocations[reviewIndex] += extra
+    available -= extra
   }
   const priorityOrder = [...nonReview].sort((a, b) => Number(outstanding[b].kind === 'speak') - Number(outstanding[a].kind === 'speak') || a - b)
-  for (const i of priorityOrder) if (available > 0) { allocations[i]++; available-- }
+  for (const i of priorityOrder) if (available > 0 && !allocations[i]) { allocations[i]++; available-- }
   const weights = nonReview.reduce((n, i) => n + outstanding[i].weight, 0)
   const extras = nonReview.map(i => ({ i, value: weights ? available * outstanding[i].weight / weights : 0 }))
   for (const { i, value } of extras) allocations[i] += Math.floor(value)
@@ -219,6 +250,13 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
     return [{ ...task, id: taskId(c), minutes, done: false }]
   })
   const priorOrder = new Map(today?.tasks.map((task, index) => [task.id, index]))
+  const nextOutput = today?.tasks.findIndex(task => ['speak', 'repair', 'retell', 'shadow', 'assessment'].includes(task.kind) && !task.done) ?? -1
+  if (nextOutput >= 0) {
+    // Fit a newly added learning activity into the automatic chain without
+    // renaming/reordering any previously assigned or completed task.
+    for (const task of pending.filter(t => t.kind === 'learn' && !priorOrder.has(t.id)))
+      priorOrder.set(task.id, nextOutput - (taskActivity(task) === 'reading' ? 0.2 : 0.1))
+  }
   const tasks = [...completed, ...pending].sort((a, b) => (priorOrder.get(a.id) ?? Infinity) - (priorOrder.get(b.id) ?? Infinity))
   return { id: today?.id ?? date, date, minutes: tasks.reduce((n, t) => n + t.minutes, 0), focus, tasks, evidenceFingerprint: planFingerprint, createdAt: today?.createdAt ?? now }
 }

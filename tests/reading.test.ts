@@ -7,11 +7,23 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import * as longitudinal from '../src/domain/longitudinal'
 import { aggregateSkills } from '../src/domain/engine'
 import { useRequest } from '../src/composables/useRequest'
-import { defaultSettings, type AudioAsset, type Evaluation, type Material, type StudyEvent, type StudySession } from '../src/domain/types'
+import { defaultSettings, type AudioAsset, type Evaluation, type Material, type PlanTask, type StudyEvent, type StudySession } from '../src/domain/types'
 import { chromium, type Page } from '@playwright/test'
 import { createEmptyCard } from 'ts-fsrs'
 import { OpenRouterProvider } from '../src/ai/provider'
 import { aiRequestSchema } from '../src/server/ai'
+import 'fake-indexeddb/auto'
+import Dexie from 'dexie'
+import { createPinia, setActivePinia } from 'pinia'
+import { db as learningDb } from '../src/db/db'
+import { addChunk, initialize } from '../src/db/repository'
+import { useApp } from '../src/stores/app'
+import * as engine from '../src/domain/engine'
+
+// No auth, backend, provider, or media fixture: the assigned loop uses real
+// Pinia/repository/IndexedDB and compiled Vue handlers, with offline services.
+vi.mock('../src/stores/cloud', () => ({ useCloud: () => ({ configured: false, userId: '' }) }))
+vi.mock('../src/cloud/client', () => ({ cloudClient: null, publicCloudConfig: { url: '', publishableKey: '' } }))
 
 // Render the actual compiled component with Vue lifecycle and event handlers.
 // Browser acceptance below separately exercises the real IndexedDB/router/DOM.
@@ -70,7 +82,7 @@ function makeState() {
         .mockResolvedValue({ summary: 'Your main idea is clear.', comprehension: 0.8, provenance: { provider: 'fixture', model: 'actual-fixture-evaluator' } }) },
   })
 }
-function loadComponent() {
+function loadComponent(overrides: Record<string, unknown> = {}) {
   const filename = 'ReadingPractice.vue', source = readFileSync(new URL('../src/components/' + filename, import.meta.url), 'utf8')
   const { descriptor } = parse(source, { filename })
   const script = compileScript(descriptor, { id: filename, inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } })
@@ -81,6 +93,7 @@ function loadComponent() {
     './Recorder.vue': { default: Vue.defineComponent({ emits: ['recorded', 'active'], setup: (_props, { emit }) => () => Vue.h('button', {
       onClick: () => emit('recorded', { audioId: 'retell-audio', duration: 4 }),
     }, 'Record test retell') }) },
+    ...overrides,
   }
   const exports: { default?: Vue.Component } = {}
   new Function('require', 'exports', code)((id: string) => { if (!(id in modules)) throw new Error(`Unknown test import ${id}`); return modules[id] }, exports)
@@ -118,6 +131,232 @@ beforeEach(() => {
 afterEach(async () => {
   for (const app of mounted.splice(0)) app.unmount()
   await flush(); vi.useRealTimers(); vi.unstubAllGlobals()
+})
+
+describe('assigned learning loop with real local persistence', () => {
+  let learning: ReturnType<typeof useApp>, Learn: Vue.Component
+  const route = Vue.reactive({ query: {} as Record<string, string> })
+  const chunkMaterial = { ...material, chunks: [{ text: 'give me a hand', meaningEn: 'help me', meaningZh: '', example: 'Could you give me a hand?' }] }
+  beforeEach(async () => {
+    await learningDb.delete(); await learningDb.open(); setActivePinia(createPinia())
+    Object.assign(window, { setInterval: vi.fn(() => 1) })
+    Object.assign(document, { visibilityState: 'visible', documentElement: { dataset: {} } })
+    vi.stubGlobal('navigator', { onLine: false }); vi.stubGlobal('matchMedia', () => ({ matches: false }))
+    await initialize([chunkMaterial]); await learningDb.profiles.update('main', { onboarded: true })
+    learning = useApp(); await learning.refresh()
+    const modules: Record<string, unknown> = {
+      vue: Vue, 'vue-router': { useRoute: () => route, useRouter: () => router },
+      '../stores/app': { useApp: () => learning }, '../db/db': { db: learningDb }, '../db/repository': { addChunk },
+      '../domain/engine': engine, '../domain/longitudinal': longitudinal, '../composables/useRequest': { useRequest },
+      '../components/ReadingPractice.vue': { default: loadComponent({ '../stores/app': { useApp: () => learning }, '../db/db': { db: learningDb } }) },
+      '../components/AudioPlayer.vue': { default: Vue.defineComponent({ render: () => null }) },
+      '../components/Icon.vue': { default: Vue.defineComponent({ render: () => null }) },
+    }
+    const filename = 'Learn.vue', { descriptor } = parse(readFileSync(new URL('../src/pages/Learn.vue', import.meta.url), 'utf8'), { filename })
+    const script = compileScript(descriptor, { id: filename, inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } })
+    const code = transpileModule(script.content, { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText
+    const exports: { default?: Vue.Component } = {}
+    new Function('require', 'exports', code)((id: string) => { if (!(id in modules)) throw new Error(`Unknown learning import ${id}`); return modules[id] }, exports)
+    Learn = exports.default!
+  })
+  afterEach(async () => { for (const app of mounted.splice(0)) app.unmount(); await flush(); vi.restoreAllMocks(); learning.$dispose(); await learningDb.delete() })
+  async function mountTask(activity: 'chunks' | 'reading' | PlanTask) {
+    const task = typeof activity === 'string' ? learning.plan.tasks.find(t => t.id.endsWith(':' + activity))! : activity
+    await learning.beginTask(task.id); route.query = engine.taskPath(task).query
+    const root = new HostNode('root'), app = renderer.createApp(Learn)
+    app.component('RouterLink', { render: () => null }); app.mount(root); mounted.push(app); await flush()
+    return { root, task, unmount: () => { app.unmount(); mounted.splice(mounted.indexOf(app), 1) } }
+  }
+  it('requires an actual chunk and writing, persists six cards, and continues the assigned material', async () => {
+    const view = await mountTask('chunks')
+    await answer(view.root, 'give me a hand', 'Could you give me a hand with dinner?')
+    await invoke(button(view.root, 'Save my example & practice later'))
+    expect(await learningDb.chunks.count()).toBe(1); expect(await learningDb.cards.count()).toBe(6)
+    expect(button(view.root, 'Use these in conversation').props.disabled).toBe(true)
+    await answer(view.root, 'rephrase', 'Sharing stories and asking kind questions helps people understand one another.')
+    await invoke(button(view.root, 'Save & check my rephrasing'))
+    expect((await learningDb.events.toArray()).filter(e => e.type === 'WRITTEN_RESPONSE')).toHaveLength(1)
+    expect((await learningDb.events.toArray()).filter(e => e.type === 'WRITING_EVALUATED')).toHaveLength(0)
+    await invoke(button(view.root, 'Use these in conversation'))
+    const speak = learning.plan.tasks.find(t => t.kind === 'speak')!
+    expect(router.push).toHaveBeenLastCalledWith(engine.taskPath(speak))
+    expect(learning.plan.tasks.find(t => t.id === view.task.id)?.done).toBe(true)
+    expect(learning.plan.tasks.find(t => t.id.endsWith(':reading'))?.done).toBe(false)
+    expect(await learningDb.sessions.get('learn-draft-' + view.task.id)).toBeDefined()
+  })
+  it('keeps a saved reading task reachable through reload and explicitly continues to chunks', async () => {
+    const view = await mountTask('reading')
+    expect(content(view.root)).not.toContain('Reading is waiting for a suitable passage')
+    await readToResponse(view.root)
+    await answer(view.root, 'reading-response', 'Sharing stories helps us understand each other.')
+    await answer(view.root, 'reading-retell', 'A good friend listens and asks a kind question.')
+    await invoke(button(view.root, 'Save reading & retell'))
+    expect(learning.plan.tasks.find(t => t.id === view.task.id)?.done).toBe(true)
+    view.unmount(); await flush()
+    const restored = await mountTask('reading')
+    await learning.refresh(); await flush()
+    expect(!!find(restored.root, n => n.type === 'button' && content(n).includes('Continue to next task'))).toBe(true)
+    await invoke(button(restored.root, 'Continue to next task'))
+    expect(router.push).toHaveBeenLastCalledWith(engine.taskPath(learning.plan.tasks.find(t => t.id.endsWith(':chunks'))!))
+    expect(await learningDb.chunks.count()).toBe(0)
+  })
+  it('does not expose Continue until the reading session is durably saved and recovers an interrupted final write', async () => {
+    const view = await mountTask('reading'); await readToResponse(view.root)
+    await answer(view.root, 'reading-response', 'Sharing stories helps us understand each other.')
+    await answer(view.root, 'reading-retell', 'A good friend listens and asks a kind question.')
+    const putSession = learningDb.sessions.put.bind(learningDb.sessions)
+    const failed = vi.spyOn(learningDb.sessions, 'put').mockImplementation((row, ...rest) => {
+      if (row.kind === 'reading' && row.stage === 'saved') return Dexie.Promise.reject(new Error('interrupted final session commit'))
+      return putSession(row, ...rest)
+    })
+    await invoke(button(view.root, 'Save reading & retell'))
+    expect(learning.plan.tasks.find(t => t.id === view.task.id)?.done).toBe(true)
+    expect(!!find(view.root, n => n.type === 'button' && content(n).includes('Continue to next task'))).toBe(false)
+    const original = (await learningDb.events.toArray()).filter(e => ['READING_RESPONSE', 'READING_RETELL'].includes(e.type))
+    expect(original).toHaveLength(2)
+    expect((await learningDb.sessions.get('reading:' + view.task.id))?.stage).toBe('respond')
+    // A fresh component after a crash reads the saved, immutable first response.
+    view.unmount(); await flush(); failed.mockRestore()
+    const restored = await mountTask('reading')
+    expect(!!find(restored.root, n => n.type === 'button' && content(n).includes('Continue to next task'))).toBe(false)
+    await invoke(button(restored.root, 'Save reading & retell'))
+    expect((await learningDb.sessions.get('reading:' + view.task.id))?.stage).toBe('saved')
+    expect((await learningDb.events.toArray()).filter(e => ['READING_RESPONSE', 'READING_RETELL'].includes(e.type))).toEqual(original)
+    await invoke(button(restored.root, 'Continue to next task'))
+    expect(router.push).toHaveBeenLastCalledWith(engine.taskPath(learning.plan.tasks.find(t => t.id.endsWith(':chunks'))!))
+  })
+  it('recovers same-page final-save retries without reload, duplicate evidence, or an early Continue', async () => {
+    const view = await mountTask('reading'); await readToResponse(view.root)
+    await answer(view.root, 'reading-response', 'Sharing stories helps us understand each other.')
+    await answer(view.root, 'reading-retell', 'A good friend listens and asks a kind question.')
+    const putSession = learningDb.sessions.put.bind(learningDb.sessions)
+    let failFinal = true
+    vi.spyOn(learningDb.sessions, 'put').mockImplementation((row, ...rest) => row.kind === 'reading' && row.stage === 'saved' && failFinal
+      ? Dexie.Promise.reject(new Error('final session commit unavailable')) : putSession(row, ...rest))
+    await invoke(button(view.root, 'Save reading & retell'))
+    const original = await learningDb.events.toArray()
+    expect(original.filter(e => ['READING_RESPONSE', 'READING_RETELL'].includes(e.type))).toHaveLength(2)
+    expect(learning.plan.tasks.find(t => t.id === view.task.id)?.done).toBe(true)
+    await invoke(button(view.root, 'Retry saving'))
+    expect((await learningDb.sessions.get('reading:' + view.task.id))?.stage).toBe('respond')
+    expect(!!find(view.root, n => n.type === 'button' && content(n).includes('Continue to next task'))).toBe(false)
+    failFinal = false
+    await invoke(button(view.root, 'Retry saving'))
+    expect((await learningDb.sessions.get('reading:' + view.task.id))?.stage).toBe('saved')
+    expect(content(view.root)).not.toContain('Could not save your reading')
+    expect(await learningDb.events.toArray()).toEqual(original)
+    await invoke(button(view.root, 'Continue to next task'))
+    expect(router.push).toHaveBeenLastCalledWith(engine.taskPath(learning.plan.tasks.find(t => t.id.endsWith(':chunks'))!))
+  })
+  it.each((['task', 'material', 'unmount'] as const).flatMap(change => (['save', 'retry'] as const).map(action => ({ change, action }))))('fences a late $action receipt after $change changes', async ({ change, action }) => {
+    const task = learning.plan.tasks.find(t => t.id.endsWith(':reading'))!
+    await learning.beginTask(task.id)
+    const props = Vue.reactive({ taskId: task.id, material: copy(chunkMaterial) }), onSaved = vi.fn()
+    const ActualReading = loadComponent({ '../stores/app': { useApp: () => learning }, '../db/db': { db: learningDb } })
+    const root = new HostNode('root'), component = renderer.createApp({ setup: () => () => Vue.h(ActualReading, { ...props, onSaved }) })
+    component.mount(root); mounted.push(component); await flush(); await readToResponse(root)
+    await answer(root, 'reading-response', 'My original response describes sharing stories.')
+    await answer(root, 'reading-retell', 'My original retell describes a kind question.')
+    const putSession = learningDb.sessions.put.bind(learningDb.sessions)
+    let release: (() => void) | undefined
+    let failFinal = action === 'retry'
+    vi.spyOn(learningDb.sessions, 'put').mockImplementation((row, ...rest) => {
+      if (row.kind === 'reading' && row.stage === 'saved') {
+        if (failFinal) return Dexie.Promise.reject(new Error('final session commit unavailable'))
+        if (!release) return new Dexie.Promise<string>((resolve, reject) => { release = () => { void putSession(row, ...rest).then(resolve, reject) } })
+      }
+      return putSession(row, ...rest)
+    })
+    if (action === 'retry') { await invoke(button(root, 'Save reading & retell')); failFinal = false }
+    const save = (button(root, action === 'retry' ? 'Retry saving' : 'Save reading & retell').props.onClick as () => Promise<void>)()
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    const original = await learningDb.events.toArray()
+    if (change === 'task') props.taskId = 'another-reading-task'
+    else if (change === 'material') props.material = { ...copy(chunkMaterial), id: 'another-material' }
+    else { component.unmount(); mounted.splice(mounted.indexOf(component), 1) }
+    await flush(); release!(); await save; await flush()
+    expect((await learningDb.sessions.get('reading:' + task.id))?.stage).toBe('saved')
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(await learningDb.events.toArray()).toEqual(original)
+  })
+  it('does not let free writing or mismatched identity complete the reader', async () => {
+    const reading = learning.plan.tasks.find(t => t.id.endsWith(':reading'))!
+    await learning.beginTask(reading.id)
+    expect(await learning.completeTask('learn', { taskId: reading.id, materialId: 'wrong' })).toBe(false)
+    expect(await learning.completeTask('learn', { taskId: reading.id, materialId: material.id })).toBe(false)
+    expect(await learning.completeTask('learn', { materialId: material.id })).toBe(false)
+    expect(learning.plan.tasks.find(t => t.id === reading.id)?.done).toBe(false)
+  })
+  it('restores writing after a failed completion and retries without losing the original responses', async () => {
+    const view = await mountTask('chunks')
+    await answer(view.root, 'give me a hand', 'Can you give me a hand with the bags?')
+    await invoke(button(view.root, 'Save my example & practice later'))
+    await answer(view.root, 'rephrase', 'A useful detail and a kind question make sharing helpful.')
+    await invoke(button(view.root, 'Save & check my rephrasing'))
+    const before = (await learningDb.events.toArray()).filter(e => ['CHUNK_RECALL', 'WRITTEN_RESPONSE'].includes(e.type))
+    const failure = vi.spyOn(learningDb.plans, 'put').mockRejectedValueOnce(new Error('disk temporarily unavailable'))
+    await invoke(button(view.root, 'Use these in conversation'))
+    expect(router.push).not.toHaveBeenCalled(); expect(content(view.root)).toContain('Could not finish')
+    failure.mockRestore(); view.unmount(); await flush()
+    const restored = await mountTask('chunks')
+    expect(find(restored.root, n => n.props.id === 'rephrase')?.props['onUpdate:modelValue']).toBeTypeOf('function')
+    expect(button(restored.root, 'Use these in conversation').props.disabled).toBe(false)
+    await invoke(button(restored.root, 'Use these in conversation'))
+    expect((await learningDb.events.toArray()).filter(e => ['CHUNK_RECALL', 'WRITTEN_RESPONSE'].includes(e.type))).toEqual(before)
+    expect(learning.plan.tasks.find(t => t.id === view.task.id)?.done).toBe(true)
+  })
+  it('restores a legacy language assignment and draft without renaming work or reopening completed tasks', async () => {
+    const plan = copy(learning.plan), language = plan.tasks.find(t => t.id.endsWith(':chunks'))!
+    language.id = `${plan.date}:learn:${material.id}`
+    const listening = plan.tasks.find(t => t.kind === 'listen')!; listening.done = true
+    await learningDb.plans.put(plan)
+    const originalText = 'My original saved rephrasing about sharing stories.'
+    const session: StudySession = { id: 'learn-draft-' + material.id, kind: 'learn', materialId: material.id,
+      startedAt: Date.now() - 3000, stage: 'practice', draft: { rephrase: originalText, recalled: {}, revealed: [] } }
+    await learningDb.sessions.put(session)
+    const original: StudyEvent = { id: 'legacy-writing', type: 'WRITTEN_RESPONSE', source: 'text', timestamp: Date.now() - 1000,
+      sessionId: session.id, data: { materialId: material.id, taskId: language.id, response: originalText } }
+    await learning.evidence(original)
+    const view = await mountTask(language)
+    expect((await learningDb.sessions.get(session.id))?.draft.rephrase).toBe(session.draft.rephrase)
+    expect(button(view.root, 'Use these in conversation').props.disabled).toBe(false)
+    await invoke(button(view.root, 'Use these in conversation'))
+    const saved = (await learningDb.plans.get(plan.id))!
+    expect(saved.tasks.find(t => t.id === listening.id)).toEqual(listening)
+    expect(saved.tasks.find(t => t.id === language.id)?.done).toBe(true)
+    expect(saved.tasks.some(t => t.id.endsWith(':chunks'))).toBe(false)
+    expect(saved.tasks.find(t => t.id.endsWith(':reading'))?.done).toBe(false)
+    expect(await learningDb.events.get(original.id)).toEqual(original)
+    expect((await learningDb.sessions.toArray()).filter(s => s.kind === 'learn').map(s => s.id)).toEqual([session.id])
+  })
+  it('uses fresh daily drafts for sixty low-language-backlog days without initial cards or invented writing growth', async () => {
+    expect(await learningDb.cards.count()).toBe(0)
+    const start = Date.now(), ids = new Set<string>()
+    for (let day = 0; day < 60; day++) {
+      vi.setSystemTime(start + day * 86_400_000); await learning.refresh()
+      const view = await mountTask('chunks'); ids.add(view.task.id)
+      expect(learning.plan.tasks.some(t => t.id.endsWith(':reading') && t.minutes > 0)).toBe(true)
+      expect(learning.plan.minutes).toBeLessThanOrEqual(learning.profile.dailyMinutes)
+      expect(learning.plan.tasks.every(t => t.minutes > 0)).toBe(true)
+      await answer(view.root, 'give me a hand', `Could you give me a hand with plan number ${day + 1}?`)
+      expect(button(view.root, 'Save my example & practice later').props.disabled).toBe(false)
+      await invoke(button(view.root, 'Save my example & practice later'))
+      await answer(view.root, 'rephrase', `In attempt ${day + 1}, I explain that people understand each other through listening and sharing.`)
+      await invoke(button(view.root, 'Save & check my rephrasing'))
+      await invoke(button(view.root, 'Use these in conversation'))
+      expect(learning.plan.tasks.find(t => t.id === view.task.id)?.done).toBe(true)
+      if (day > 0) expect(learning.plan.tasks.some(t => t.kind === 'review')).toBe(true)
+      view.unmount(); await flush()
+    }
+    const events = await learningDb.events.toArray()
+    expect(ids.size).toBe(60)
+    expect(events.filter(e => e.type === 'WRITTEN_RESPONSE')).toHaveLength(60)
+    expect(events.filter(e => e.type === 'CHUNK_RECALL')).toHaveLength(60)
+    expect(await learningDb.chunks.count()).toBe(1) // One actual source expression, not 60 fabricated acquisitions.
+    expect(await learningDb.cards.count()).toBe(6)
+    expect(events.filter(e => e.type === 'WRITING_EVALUATED')).toHaveLength(0)
+    expect(learning.skills.find(s => s.id === 'writing')?.evidenceCount).toBe(0)
+  }, 60000)
 })
 
 describe('real ReadingPractice component behavior', () => {

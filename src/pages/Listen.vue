@@ -518,10 +518,15 @@ function finish() {
     const assignment = app.plan.tasks.find(t => t.id === taskId);
     if (assignment?.materialId && assignment.materialId !== id) {
       app.notice = "Practice saved. This route's assignment belongs to another material, so it was not marked complete.";
+      return;
     } else {
-      await app.completeTask(taskKind === "shadow" ? "shadow" : "listen", { taskId: taskId || undefined, materialId: id });
+      const completed = await app.completeTask(taskKind === "shadow" ? "shadow" : "listen", { taskId: taskId || undefined, materialId: id });
+      if (taskId && !completed) { app.notice = "Practice saved. This assignment is no longer in today's plan."; return; }
     }
-    if (token === generation && !disposed) await router.push({ path: "/learn", query: { material: id, sourceSession: sessionId } });
+    if (token === generation && !disposed) {
+      const next = taskId ? await app.continueAssignment(taskId) : { path: "/learn", query: { material: id, sourceSession: sessionId } };
+      if (token === generation && !disposed) await router.push(next);
+    }
   });
 }
 async function restart() {

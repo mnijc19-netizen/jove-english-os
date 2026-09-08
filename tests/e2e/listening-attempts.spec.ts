@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { demoMaterials } from "../../src/content/materials";
-import type { MaterialChunk, StudyEvent, StudySession } from "../../src/domain/types";
+import type { DailyPlan, MaterialChunk, StudyEvent, StudySession } from "../../src/domain/types";
 
 async function open(page: Page, route: string) {
   await page.goto("#/" + route);
@@ -266,7 +266,7 @@ test("pending listening evidence survives a failed write, reload and idempotent 
   expect((await rows<StudyEvent>(page, "events")).find(e => e.id === first!.id)).toEqual(first);
 });
 
-test("completion carries the selected assignment and keeps the source attempt on the recall route", async ({ page }) => {
+test("completion starts the exact next assignment and retains the original listening attempt", async ({ page }) => {
   await open(page, "today");
   await page.evaluate(async () => {
     await new Promise<void>((resolve, reject) => {
@@ -287,12 +287,60 @@ test("completion carries the selected assignment and keeps the source attempt on
   await page.reload();
   await reveal(page);
   const source = (await attempt(page))!;
+  const before = (await rows<DailyPlan>(page, "plans")).find(plan => plan.tasks.some(task => task.id === "pinned-listen-cafe"))!;
+  const index = before.tasks.findIndex(task => task.id === "pinned-listen-cafe");
+  const next = [...before.tasks.slice(index + 1), ...before.tasks.slice(0, index)]
+    .find(task => !task.done && task.minutes > 0)!;
+  expect(next.kind).toBe("learn");
+  const sourceEvents = (await rows<StudyEvent>(page, "events")).filter(event => event.sessionId === source.id);
+  expect(sourceEvents.length).toBeGreaterThan(0);
   await page.getByRole("button", { name: "Continue to active recall", exact: true }).click();
-  await expect(page).toHaveURL(/learn\?material=cafe-delay&sourceSession=/);
-  expect(new URL(page.url()).hash).toContain(source.id);
-  const completion = (await rows<StudyEvent>(page, "events")).find(e => e.id === "completed:pinned-listen-cafe");
+  await expect.poll(() => {
+    const [path, query] = new URL(page.url()).hash.split("?");
+    const params = new URLSearchParams(query);
+    return { path, task: params.get("task"), material: params.get("material"), mode: params.get("mode") };
+  }).toEqual({ path: "#/learn", task: next.id, material: next.materialId, mode: next.id.endsWith(":reading") ? "reading" : "chunks" });
+  const events = await rows<StudyEvent>(page, "events");
+  const completion = events.find(e => e.id === "completed:pinned-listen-cafe");
   expect(completion?.data).toMatchObject({ taskId: "pinned-listen-cafe", materialId: "cafe-delay", kind: "listen" });
+  expect(events.find(event => event.id === `started:${next.id}`)?.data).toMatchObject({ taskId: next.id, materialId: next.materialId });
+  for (const event of sourceEvents) expect(events.find(saved => saved.id === event.id)).toEqual(event);
+  const saved = (await attempt(page))!;
+  expect(saved).toMatchObject({ id: source.id, materialId: "cafe-delay", draft: { taskId: "pinned-listen-cafe" } });
+  expect(saved.draft.first).toEqual(source.draft.first);
+  expect(saved.completedAt).toBeGreaterThan(0);
+  const persistedNext = (await rows<DailyPlan>(page, "plans")).find(plan => plan.id === before.id)!.tasks.find(task => task.id === next.id)!;
+  expect(persistedNext).toMatchObject({ id: next.id, materialId: next.materialId, done: false });
+});
+
+test("optional listening retains the source-session recall route without creating extra assigned work", async ({ page }) => {
+  await open(page, "today");
+  await page.evaluate(() => new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open("jove-english-os");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const database = request.result, date = new Date().toLocaleDateString("en-CA");
+      const tx = database.transaction("plans", "readwrite");
+      tx.objectStore("plans").put({ id: date, date, minutes: 150, focus: "listeningSentences", evidenceFingerprint: "completed-budget", createdAt: Date.now(),
+        tasks: [{ id: "completed-optional-baseline", kind: "listen", materialId: "cafe-delay", title: "Completed assigned work", minutes: 150, reason: "Optional practice baseline", done: true }] });
+      tx.oncomplete = () => { database.close(); resolve(); };
+      tx.onerror = () => { database.close(); reject(tx.error); };
+    };
+  }));
+  await open(page, "listen?material=cafe-delay");
+  await page.reload(); await reveal(page);
+  const source = (await attempt(page))!;
+  expect(source.draft.taskId ?? "").toBe("");
+  const before = await rows<DailyPlan>(page, "plans");
+  await page.getByRole("button", { name: "Continue to active recall", exact: true }).click();
+  await expect.poll(() => {
+    const [path, query] = new URL(page.url()).hash.split("?"), params = new URLSearchParams(query);
+    return { path, material: params.get("material"), sourceSession: params.get("sourceSession"), task: params.get("task") };
+  }).toEqual({ path: "#/learn", material: "cafe-delay", sourceSession: source.id, task: null });
+  expect((await attempt(page))?.id).toBe(source.id);
   expect((await attempt(page))?.completedAt).toBeGreaterThan(0);
+  expect((await rows<StudyEvent>(page, "events")).filter(event => ["TASK_STARTED", "TASK_COMPLETED"].includes(event.type))).toEqual([]);
+  expect(await rows<DailyPlan>(page, "plans")).toEqual(before);
 });
 
 test("complete baseline retains objective first responses and records an audio-only sample without a score", async ({ page }) => {

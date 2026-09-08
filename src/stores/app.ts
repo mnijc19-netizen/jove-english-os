@@ -2,7 +2,7 @@ import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { db } from "../db/db";
 import { initialize, recordEvent } from "../db/repository";
-import { makePlan } from "../domain/engine";
+import { makePlan, nextAssignedTask, taskActivity, taskPath } from "../domain/engine";
 import { hasTaskStarted, planLongitudinal } from "../domain/longitudinal";
 import {
   defaultProfile,
@@ -312,16 +312,26 @@ export const useApp = defineStore("app", () => {
     await db.plans.put(JSON.parse(JSON.stringify(plan.value)));
     plans.value = await db.plans.toArray();
     await evidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
-      data: { taskId: task.id, kind: task.kind, ...(task.materialId ? { materialId: task.materialId } : {}) } })
+      data: { taskId: task.id, kind: taskActivity(task) === 'reading' ? 'reading' : task.kind, ...(task.materialId ? { materialId: task.materialId } : {}) } })
+  }
+  async function continueAssignment(afterTaskId?: string) {
+    const next = nextAssignedTask(plan.value, afterTaskId);
+    if (!next) return { path: '/', query: {} };
+    await beginTask(next.id);
+    return taskPath(next);
   }
   async function completeTask(
     kind: string,
-    identity: { taskId?: string; materialId?: string } = {},
+    identity: { taskId?: string; materialId?: string; activity?: 'reading' | 'chunks' } = {},
   ) {
     const p = structuredClone(
       JSON.parse(JSON.stringify(plan.value)),
     ) as DailyPlan;
-    const eligible = p.tasks.filter((t) => t.kind === kind && !t.done);
+    const eligible = p.tasks.filter((t) => t.kind === kind && (!t.done || t.id === identity.taskId)
+      && (!identity.materialId || t.materialId === identity.materialId)
+      && (!identity.activity || taskActivity(t) === identity.activity)
+      // A legacy/free writing page may match a language task, never a reader.
+      && (kind !== 'learn' || identity.taskId || taskActivity(t) === 'chunks'));
     const task = identity.taskId
       ? eligible.find((t) => t.id === identity.taskId)
       : identity.materialId
@@ -330,6 +340,19 @@ export const useApp = defineStore("app", () => {
           ? eligible[0]
           : undefined;
     if (task) {
+      if (kind === 'learn' && task.id.endsWith(':reading')) {
+        const proof = events.value.filter(e => e.data?.taskId === task.id && e.data?.materialId === task.materialId);
+        if (!proof.some(e => e.type === 'READING_RESPONSE' && typeof e.data?.response === 'string' && !!e.data.response.trim()
+          && proof.some(retell => retell.type === 'READING_RETELL' && retell.sessionId === e.sessionId
+            && (typeof retell.data?.response === 'string' && !!retell.data.response.trim() || typeof retell.data?.audioId === 'string')))) return false;
+      }
+      if (kind === 'learn' && task.id.endsWith(':chunks')) {
+        const proof = events.value.filter(e => e.data?.taskId === task.id && e.data?.materialId === task.materialId);
+        if (!proof.some(e => e.type === 'WRITTEN_RESPONSE' && typeof e.data?.response === 'string' && !!e.data.response.trim())) return false;
+        const source = materials.value.find(m => m.id === task.materialId);
+        if (source?.chunks.length && !proof.some(e => e.type === 'CHUNK_RECALL' && e.chunkId
+          && chunks.value.some(chunk => chunk.id === e.chunkId && chunk.sourceIds.includes(source.id)))) return false;
+      }
       task.done = true;
       await db.plans.put(p);
       await evidence({
@@ -337,13 +360,16 @@ export const useApp = defineStore("app", () => {
         source: "objective",
         id: "completed:" + task.id,
         data: {
-          kind,
+          kind: taskActivity(task) === 'reading' ? 'reading' : kind,
           minutes: task.minutes,
           taskId: task.id,
           ...(task.materialId ? { materialId: task.materialId } : {}),
         },
       });
+      plans.value = await db.plans.toArray();
+      return true;
     }
+    return false;
   }
   const localProvider = new OpenRouterProvider({
     getKey: async () => (await db.secrets.get("openrouter"))?.value ?? "",
@@ -400,6 +426,7 @@ export const useApp = defineStore("app", () => {
     evidence,
     completeTask,
     beginTask,
+    continueAssignment,
     provider,
     generatedSpeech,
     contentState,

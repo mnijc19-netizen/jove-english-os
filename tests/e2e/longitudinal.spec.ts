@@ -1,7 +1,8 @@
 import { test, expect } from './browser-fixtures'
 import type { Page } from '@playwright/test'
 import { createEmptyCard } from 'ts-fsrs'
-import type { Assessment, DailyPlan, Material, StudyEvent } from '../../src/domain/types'
+import type { Assessment, DailyPlan, Material, Profile, StudyEvent, StudySession } from '../../src/domain/types'
+import { demoMaterials } from '../../src/content/materials'
 
 const passage = 'People share stories because they want to understand one another. A good friend listens carefully and asks a kind question. We can learn from ordinary moments and small surprises. Try to explain your idea using familiar words and a useful detail. Then ask your friend what they think about it.'
 const reader = (now: number): Material => ({ id: 'reading-check-fixture', title: 'A story to share', topic: 'Everyday life', difficulty: 0.3,
@@ -23,6 +24,128 @@ async function put(page: Page, table: string, values: unknown[]) {
   }), { table, values })
 }
 
+test('Today automatically connects assigned listening, separate reading, durable chunk writing and speaking', async ({ page }) => {
+  // Real router, DOM, media playback, store and IndexedDB. Bundled synthetic
+  // speech verifies the learning path, not human-content or acoustic quality.
+  await page.goto('#/'); await page.getByRole('heading', { level: 1 }).waitFor()
+  const now = await page.evaluate(() => Date.now())
+  const listening = { ...demoMaterials[0]!, topic: 'Assigned listening fixture' }, reading = reader(now)
+  await put(page, 'materials', [...(await rows<Material>(page, 'materials')).map(m => ({ ...m, approved: false })), listening, reading])
+  const profile = (await rows<Profile>(page, 'profiles'))[0]!
+  await put(page, 'profiles', [{ ...profile, onboarded: true, fatigue: 0, dailyMinutes: 45, interests: [listening.topic], createdAt: now }])
+  await page.reload()
+  expect(await rows(page, 'cards')).toHaveLength(0)
+  await page.getByRole('button', { name: 'Start today’s practice' }).click()
+  const plan = (await rows<DailyPlan>(page, 'plans'))[0]!
+  const listenTask = plan.tasks.find(t => t.kind === 'listen')!, readTask = plan.tasks.find(t => t.id.endsWith(':reading'))!
+  const chunkTask = plan.tasks.find(t => t.id.endsWith(':chunks'))!, speakTask = plan.tasks.find(t => t.kind === 'speak')!
+  expect(listenTask.materialId).toBe(listening.id); expect(readTask.materialId).toBe(reading.id)
+  expect(chunkTask.materialId).toBe(listening.id)
+  expect(plan.minutes).toBeLessThanOrEqual(45); expect(plan.tasks.every(t => t.minutes > 0)).toBe(true)
+  await page.getByRole('button', { name: 'Play audio', exact: true }).click()
+  await expect.poll(() => page.locator('.audio-player audio').evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(0)
+  await page.getByRole('button', { name: 'Pause audio', exact: true }).click()
+  await page.locator('#meaning').fill('The bus is slow, so the friend should get a table or meet at the bakery.')
+  await page.getByRole('button', { name: 'Check my understanding', exact: true }).click()
+  await page.getByRole('button', { name: 'Main idea + details', exact: true }).click()
+  await page.getByRole('button', { name: 'Reveal English transcript', exact: true }).click()
+  await page.getByRole('button', { name: 'Continue to active recall' }).click()
+  await expect.poll(() => new URLSearchParams(page.url().split('?')[1]).get('task')).toBe(readTask.id)
+  await expect(page.getByRole('button', { name: 'Start reading', exact: true })).toBeVisible()
+  await page.clock.install()
+  await page.getByRole('button', { name: 'Start reading', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Pause reading', exact: true })).toBeVisible()
+  await page.clock.runFor(4000)
+  await page.getByRole('button', { name: 'I read this section', exact: false }).click()
+  await page.locator('#reading-response').fill('Sharing stories and asking kind questions helps people understand one another.')
+  await page.reload(); await expect(page.locator('#reading-response')).toHaveValue(/Sharing stories/)
+  await page.locator('#reading-retell').fill('A good friend listens carefully and asks a question, then shares a useful detail.')
+  await page.getByRole('button', { name: 'Save reading & retell' }).click()
+  // A click starts async writes, it is not a durability acknowledgement.
+  // Separate failure/retry tests cover interruption before this boundary.
+  await expect.poll(async () => (await rows<StudySession>(page, 'sessions')).find(s => s.id === `reading:${readTask.id}`)?.stage).toBe('saved')
+  await expect.poll(async () => (await rows<StudyEvent>(page, 'events')).filter(e => e.data?.taskId === readTask.id && ['READING_RESPONSE', 'READING_RETELL'].includes(e.type)).length).toBe(2)
+  await expect(page.getByRole('button', { name: 'Continue to next task', exact: true })).toBeVisible()
+  await page.reload()
+  await page.getByRole('button', { name: 'Continue to next task', exact: true }).click()
+  await expect.poll(() => new URLSearchParams(page.url().split('?')[1]).get('task')).toBe(chunkTask.id)
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('Make the expression')
+  const expression = listening.chunks[0]!
+  await page.locator('.chunk-card textarea').first().fill(`I am ${expression.text} to help a friend.`)
+  await page.getByRole('button', { name: 'Save my example & practice later' }).first().click()
+  await expect(page.getByRole('button', { name: 'Use these in conversation' })).toBeDisabled()
+  await page.locator('#rephrase').fill('A slow bus delays the speaker. The friend can get a cafe table or try the bakery instead.')
+  await page.getByRole('button', { name: 'Save & check my rephrasing' }).click()
+  await expect.poll(async () => (await rows<StudyEvent>(page, 'events')).filter(e => e.type === 'WRITTEN_RESPONSE').length).toBe(1)
+  await page.reload(); await expect(page.locator('#rephrase')).toHaveValue(/A slow bus/)
+  await page.getByRole('button', { name: 'Use these in conversation' }).click()
+  await expect.poll(() => new URLSearchParams(page.url().split('?')[1]).get('task')).toBe(speakTask.id)
+  expect(page.url()).toContain('#/speak?')
+  const completed = (await rows<DailyPlan>(page, 'plans')).find(p => p.id === plan.id)!
+  for (const task of [listenTask, readTask, chunkTask]) expect(completed.tasks.find(t => t.id === task.id)?.done).toBe(true)
+  expect(await rows(page, 'chunks')).toHaveLength(1); expect(await rows(page, 'cards')).toHaveLength(6)
+  const events = await rows<StudyEvent>(page, 'events')
+  expect(events.find(e => e.type === 'WRITTEN_RESPONSE')?.data).toMatchObject({ taskId: chunkTask.id, materialId: listening.id })
+  expect(events.find(e => e.id === `completed:${readTask.id}`)?.data?.kind).toBe('reading')
+  expect(events.filter(e => e.type === 'WRITING_EVALUATED')).toHaveLength(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true)
+})
+
+test('same-page reading retry survives two real aborted commits and continues its assigned chunks', async ({ page }) => {
+  await page.clock.install()
+  await page.goto('#/'); await page.getByRole('heading', { level: 1 }).waitFor()
+  const now = await page.evaluate(() => Date.now()), date = await page.evaluate(() => new Date().toLocaleDateString('en-CA'))
+  const material = reader(now), taskId = `${date}:learn:${material.id}:reading`, chunkMaterial = demoMaterials[0]!
+  const chunkId = `${date}:learn:${chunkMaterial.id}:chunks`
+  await put(page, 'materials', [material])
+  await put(page, 'plans', [{ id: date, date, minutes: 45, focus: 'reading', evidenceFingerprint: 'retry-fixture', createdAt: now,
+    tasks: [
+      { id: taskId, kind: 'learn', title: 'Read something worth sharing', materialId: material.id, minutes: 15, reason: 'Saved reading assignment', done: false },
+      { id: chunkId, kind: 'learn', title: 'Make a chunk your own', materialId: chunkMaterial.id, minutes: 15, reason: 'Saved language assignment', done: false },
+      { id: `${date}:speak:practice`, kind: 'speak', title: 'Speak', minutes: 15, reason: 'Saved speaking assignment', done: false },
+    ] }])
+  await page.reload(); await page.getByRole('button', { name: 'Start today’s practice' }).click()
+  await page.getByRole('button', { name: 'Start reading', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Pause reading', exact: true })).toBeVisible()
+  await page.clock.runFor(4000)
+  await page.getByRole('button', { name: 'I read this section', exact: false }).click()
+  await page.locator('#reading-response').fill('Sharing stories helps people understand one another.')
+  await page.locator('#reading-retell').fill('A good friend listens carefully and asks a kind question.')
+  // Exercise real native transaction rollback, not a mocked successful put.
+  // This hook is confined to this disposable browser profile and these two writes.
+  await page.evaluate(() => {
+    const nativePut = IDBObjectStore.prototype.put
+    let failures = 2
+    IDBObjectStore.prototype.put = function (value, key) {
+      const request = key === undefined ? nativePut.call(this, value) : nativePut.call(this, value, key)
+      if (this.name === 'sessions' && value?.kind === 'reading' && value?.stage === 'saved' && failures > 0) {
+        failures--; this.transaction.abort()
+      }
+      return request
+    }
+  })
+  await page.getByRole('button', { name: 'Save reading & retell' }).click()
+  await expect(page.getByRole('button', { name: 'Retry saving', exact: true })).toBeEnabled()
+  const original = (await rows<StudyEvent>(page, 'events')).filter(e => e.data?.taskId === taskId && ['READING_RESPONSE', 'READING_RETELL'].includes(e.type))
+  expect(original).toHaveLength(2)
+  for (let failure = 0; failure < 2; failure++) {
+    expect((await rows<StudySession>(page, 'sessions')).find(s => s.id === `reading:${taskId}`)?.stage).toBe('respond')
+    await expect(page.getByRole('button', { name: 'Continue to next task', exact: true })).toHaveCount(0)
+    if (!failure) {
+      await page.getByRole('button', { name: 'Retry saving', exact: true }).click()
+      await expect(page.getByRole('button', { name: 'Retry saving', exact: true })).toBeEnabled()
+    }
+  }
+  await page.getByRole('button', { name: 'Retry saving', exact: true }).click()
+  await expect.poll(async () => (await rows<StudySession>(page, 'sessions')).find(s => s.id === `reading:${taskId}`)?.stage).toBe('saved')
+  await expect(page.getByRole('button', { name: 'Retry saving', exact: true })).toHaveCount(0)
+  expect((await rows<StudyEvent>(page, 'events')).filter(e => e.data?.taskId === taskId && ['READING_RESPONSE', 'READING_RETELL'].includes(e.type))).toEqual(original)
+  expect((await rows<StudyEvent>(page, 'events')).filter(e => e.id === `completed:${taskId}`)).toHaveLength(1)
+  await page.getByRole('button', { name: 'Continue to next task', exact: true }).click()
+  await expect.poll(() => Object.fromEntries(new URLSearchParams(page.url().split('?')[1]))).toEqual({ task: chunkId, material: chunkMaterial.id, mode: 'chunks' })
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('Make the expression')
+})
+
 test('five-part assessment preserves reading through reload without inventing improvement', async ({ page }) => {
   // Install before component timers exist; installing later can orphan native intervals.
   await page.clock.install()
@@ -40,9 +163,10 @@ test('five-part assessment preserves reading through reload without inventing im
   await page.getByRole('button', { name: 'Start reading', exact: true }).waitFor()
   expect((await rows<Assessment>(page, 'assessments')).find(a => a.id === 'five-part-fixture')?.completedAt).toBeUndefined()
   await page.getByRole('button', { name: 'Start reading', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Pause reading', exact: true })).toBeVisible()
   await page.clock.runFor(32000)
   await page.locator('.assessment-card').scrollIntoViewIfNeeded()
-  await page.screenshot({ path: `.work/reading-check-in-${test.info().project.name}.png` })
+  await page.screenshot({ path: test.info().outputPath('reading-check-in.png') })
   await page.getByRole('button', { name: 'I read this section', exact: false }).click()
   await page.locator('#reading-response').fill('Sharing a story helps people understand each other; asking a kind question makes listening useful.')
   await page.reload(); await page.locator('#reading-response').waitFor()
@@ -97,6 +221,7 @@ test('changing goals and interests preserves a begun reading task and its respon
   await page.reload()
   await page.getByRole('button', { name: 'Start today’s practice' }).click()
   await page.getByRole('button', { name: 'Start reading', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Pause reading', exact: true })).toBeVisible()
   await page.clock.runFor(4000)
   await page.getByRole('button', { name: 'I read this section', exact: false }).click()
   await page.locator('#reading-response').fill('Preserve my first thought while I change my learning preferences.')

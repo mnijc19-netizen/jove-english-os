@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useApp } from "../stores/app";
-import { skillLabel } from "../domain/engine";
+import { skillLabel, taskPath } from "../domain/engine";
 import Icon from "../components/Icon.vue";
 import type { PlanTask } from "../domain/types";
 import { planRecovery, selectMeaningfulReviews } from "../domain/longitudinal";
@@ -22,25 +22,7 @@ const date = computed(() =>
 );
 const completed = computed(() => app.plan.tasks.filter((t) => t.done).length);
 const next = computed(() => app.plan.tasks.find((t) => !t.done && t.minutes > 0));
-const path = (task: PlanTask) => ({
-  path:
-    task.kind === "shadow"
-      ? "/listen"
-      : ["repair", "retell"].includes(task.kind)
-        ? "/speak"
-        : task.kind === "assessment"
-          ? "/progress"
-          : "/" + task.kind,
-  query: {
-    task: task.id,
-    ...(task.materialId ? { material: task.materialId } : {}),
-    ...(["shadow", "repair", "retell"].includes(task.kind)
-      ? { mode: task.kind }
-      : {}),
-    ...(task.kind === "assessment" ? { assess: "1" } : {}),
-    ...(task.kind === "learn" && task.id.endsWith(":reading") ? { mode: "reading" } : {}),
-  },
-});
+const path = taskPath;
 const material = computed(
   () =>
     app.materials.find(

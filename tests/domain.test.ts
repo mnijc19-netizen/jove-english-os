@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyCard } from 'ts-fsrs'
-import { aggregateSkills, makePlan, skillLabel } from '../src/domain/engine'
+import { aggregateSkills, makePlan, nextAssignedTask, skillLabel, taskPath } from '../src/domain/engine'
 import { defaultProfile, skillNames, type Material, type Profile, type ReviewCard, type SkillName, type StudyEvent } from '../src/domain/types'
 
 const now = new Date(2026, 8, 7, 12).getTime()
@@ -13,6 +13,68 @@ const material = (id: string, topic = 'Technology', approved = true): Material =
 const event = (id: string, skill: SkillName, score: number, extra: Partial<StudyEvent> = {}): StudyEvent => ({ id, type: 'test', timestamp: now, skill, score, source: 'objective', ...extra })
 const card = (id: string): ReviewCard => ({ id, chunkId: id, modality: 'recognition', card: createEmptyCard(now - 1), contextIds: [] })
 const find = (events: StudyEvent[], skill: SkillName) => aggregateSkills(events).find(s => s.id === skill)!
+
+describe('distinct assigned reading and deliberate language', () => {
+  const learner = { ...profile, onboarded: true }
+  const readers = [material('a'), material('b')].map(m => ({ ...m, chunks: [
+    { text: 'give me a hand', meaningEn: 'help me', meaningZh: '', example: 'Could you give me a hand?' },
+  ] }))
+  it('budgets both activities with empty review stock for sixty consecutive days', () => {
+    const events: StudyEvent[] = []
+    for (let day = 0; day < 60; day++) {
+      const clock = now + day * 86_400_000
+      const plan = makePlan(learner, [], [], events, readers, undefined, clock)
+      expect(plan.tasks.filter(t => t.kind === 'learn' && t.id.endsWith(':reading'))).toHaveLength(1)
+      expect(plan.tasks.filter(t => t.kind === 'learn' && t.id.endsWith(':chunks'))).toHaveLength(1)
+      expect(plan.minutes).toBeLessThanOrEqual(45)
+      expect(plan.tasks.every(t => t.minutes > 0)).toBe(true)
+      events.push({ id: `reading-${day}`, type: 'PRACTICE_LOGGED', source: 'objective', timestamp: clock,
+        sessionId: `reader-${day}`, data: { strand: 'input', activeSeconds: 600 } })
+    }
+  })
+  it('preserves restored legacy and reading identities without one suppressing the other', () => {
+    const original = makePlan(learner, [], [], [], readers, undefined, now)
+    const reading = original.tasks.find(t => t.id.endsWith(':reading'))!
+    const legacy = { id: `${original.date}:learn:a`, kind: 'learn' as const, materialId: 'a',
+      title: 'Original language assignment', reason: 'Saved before the upgrade', minutes: 5, done: true }
+    const restored = { ...original, tasks: [legacy, { ...reading, done: false }] }
+    const next = makePlan(learner, [], [], [], readers, restored, now + 1)
+    expect(next.tasks.find(t => t.id === legacy.id)).toEqual(legacy)
+    expect(next.tasks.find(t => t.id === reading.id)).toMatchObject({ materialId: reading.materialId, done: false })
+    expect(next.tasks.filter(t => t.kind === 'learn')).toHaveLength(2)
+    expect(new Set(next.tasks.map(t => t.id)).size).toBe(next.tasks.length)
+  })
+  it.each([10, 15, 45])('keeps reading and chunks within a %i minute recovery budget', dailyMinutes => {
+    const plan = makePlan({ ...learner, dailyMinutes, fatigue: 0.9 }, [], Array.from({ length: 100 }, (_, i) => card(`due-${i}`)), [], readers, undefined, now)
+    expect(plan.minutes).toBeLessThanOrEqual(dailyMinutes)
+    expect(plan.tasks.every(t => Number.isInteger(t.minutes) && t.minutes > 0)).toBe(true)
+    expect(plan.tasks.filter(t => t.kind === 'learn')).toHaveLength(2)
+  })
+  it('routes distinct listening/reading/language materials and preserves restored active legacy work', () => {
+    const plan = makePlan(learner, [], [], [], readers, undefined, now)
+    const listening = plan.tasks.find(t => t.kind === 'listen')!, reading = plan.tasks.find(t => t.id.endsWith(':reading'))!
+    expect(listening.materialId).not.toBe(reading.materialId)
+    expect(taskPath(nextAssignedTask({ ...plan, tasks: plan.tasks.map(t => ({ ...t, done: t.id === listening.id })) }, listening.id)!))
+      .toEqual({ path: '/learn', query: { task: reading.id, material: reading.materialId, mode: 'reading' } })
+    const legacy = { ...plan.tasks.find(t => t.id.endsWith(':chunks'))!, id: `${plan.date}:learn:a` }
+    const restored = { ...plan, tasks: plan.tasks.map(t => t.id.endsWith(':chunks') ? legacy : t) }
+    const events: StudyEvent[] = [{ id: 'started-legacy', type: 'TASK_STARTED', source: 'objective', timestamp: now,
+      data: { taskId: legacy.id, kind: 'learn' } }]
+    const replan = makePlan({ ...learner, interests: ['Different'], fatigue: 0.5 }, [], [], events, [...readers].reverse(), restored, now)
+    expect(replan.tasks.find(t => t.id === legacy.id)).toMatchObject({ materialId: legacy.materialId, done: false })
+    expect(taskPath(legacy)).toEqual({ path: '/learn', query: { task: legacy.id, material: legacy.materialId, mode: 'chunks' } })
+  })
+  it('uses the final available minute for already started language instead of a newly introduced reader', () => {
+    const plan = makePlan(learner, [], [], [], readers, undefined, now)
+    const language = { ...plan.tasks.find(t => t.id.endsWith(':chunks'))!, id: `${plan.date}:learn:a`, minutes: 1 }
+    const done = { ...plan.tasks.find(t => t.kind === 'listen')!, done: true, minutes: 44 }
+    const restored = { ...plan, tasks: [done, language] }
+    const started: StudyEvent = { id: 'started', type: 'TASK_STARTED', source: 'objective', timestamp: now, data: { taskId: language.id, kind: 'learn' } }
+    const next = makePlan(learner, [], [], [started], readers, restored, now)
+    expect(next.tasks).toEqual([done, language])
+    expect(next.minutes).toBe(45)
+  })
+})
 
 describe('evidence projection', () => {
   it('keeps all unobserved skills unknown without a fabricated prior', () => {
