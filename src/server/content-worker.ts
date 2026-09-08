@@ -2,17 +2,62 @@ import {
   assessSegment, bindAnalysis, createAnalysisRequest, contentTranscriptUrn, ContentPipelineError, parseRssFeed, parseOpenYapPreviewManifest,
   parseTimedTranscript, PIPELINE_LIMITS, rightsReasons, sliceTranscript, textMetrics, toMaterial, validateSourceUrl,
 } from '../content/pipeline'
-import { ALLOWLISTED_CONTENT_SOURCES } from '../content/sources'
+import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, VOA_LESSON_CANDIDATES, type ContentLifeTask } from '../content/sources'
 import type { ContentSource, FeedEpisode, LearnerContentProfile, TimedTranscript, TranscriptReference } from '../content/pipeline-types'
 import { ContentNetworkError, fetchContentResource, type ContentFetchResult } from './content-network'
 import { CONTENT_POLICY_EVIDENCE, revalidateContentRights } from './content-rights'
 import { contentAudioWindow } from './content-audio'
+import { auditVoaLessonCandidates, type VoaCandidateAudit } from './content-voa'
 import type {
   ContentAdminClient, ContentAudioInput, ContentAudioResult, ContentAudioStore, ContentRefreshOptions, ContentRefreshSummary,
   ContentRightsRecord, ContentUsage, EligibleContentLesson, PersistedContentSegment, SelectContentOptions,
 } from './content-contracts'
 
 export type * from './content-contracts'
+
+/** Trusted system reviewer output, separate from acoustic facts and candidate intent labels.
+ * A classifier must assess the interaction, not merely find a task word. The binding and
+ * exact aligned quotations are checked here; they do not make an untrusted caller a reviewer. */
+export interface ContentLifeTaskReview {
+  evidenceId: string; reviewer: string; version: string; reviewedAt: number
+  segmentId: string; contentFingerprint: string; timingFingerprint: string
+  audioSha256: string; sourcePolicyHash: string
+  assessments: { task: ContentLifeTask; outcome: 'supported' | 'not-supported' | 'unknown'; reason: string
+    quotes: { sentenceIndex: number; text: string }[] }[]
+}
+export interface ContentTaskRefreshOptions extends ContentRefreshOptions {
+  /** Bounded archive audit under the existing VOA source; never a fresh-publication claim. */
+  voaPilot?: 'metadata' | 'probe-audio' | 'disabled'
+  /** Diagnostic metadata persistence only: no provider, retention, RSS, recommendation or Storage writes. */
+  voaPilotOnly?: boolean
+  analyzeAudio?: (input: ContentAudioInput) => Promise<ContentAudioResult & { lifeTaskReview?: ContentLifeTaskReview }>
+  inventoryLowWater?: number
+}
+type TaskContentRecord = PersistedContentSegment & { lifeTaskReview?: ContentLifeTaskReview }
+interface CandidateWindow {
+  candidates: { id: string; record: TaskContentRecord; config: ContentSource }[]
+  recent: { id: string; request_id: string; segment_id: string; lesson: EligibleContentLesson }[]
+}
+export interface OwnerContentTaskInventory {
+  version: 'life-tasks-v1'; ownerId: string; observedAt: number
+  scope: 'owner-selectable-unseen-window'; windowLimit: 100; windowComplete: boolean
+  candidateAuditStatus: 'observed' | 'unknown'; eligibleTaskUnknown: number
+  lowWater: number; lowWaterBasis: 'provisional-distinct-clip-count'
+  tasks: { task: ContentLifeTask; configuredCandidateIds: string[]; auditedCandidateCount: number | null
+    reviewedUsableCount: number; countBasis: 'exact' | 'lower-bound'
+    state: 'gap' | 'low' | 'sufficient' | 'unknown'; needsAttention: boolean }[]
+  notices: string[]
+  /** Neither archive length nor poll cadence establishes future publication or depletion. */
+  nextExpectedSupplyAt: null; estimatedDaysRemaining: null
+}
+export interface ContentRefreshSelection {
+  sourceIds: string[]; basis: 'life-task-deficit-and-source-rotation-v1'; notices: string[]
+}
+export interface ContentTaskRefreshSummary extends ContentRefreshSummary {
+  inventory: OwnerContentTaskInventory | null
+  refreshSelection: ContentRefreshSelection
+  voaPilot: { id: string; checkedAt: number; transcriptSha256: string; audioProbed: boolean; eligible: false }[]
+}
 export { createContentFetcher, fetchContentResource, isPublicContentAddress } from './content-network'
 export class ContentWorkerError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ContentWorkerError' }
@@ -35,6 +80,198 @@ async function rpc<T>(client: ContentAdminClient, action: string, args: Record<s
   const response = await client.rpc('content_worker', { action, args })
   if (response.error) fail(response.error.code === '40001' ? 'content-lease-or-revision-lost' : response.error.code === '53000' ? 'content-storage-capacity-required' : 'content-persistence-failed')
   return response.data as T
+}
+
+const normalizeQuote = (text: string) => text.normalize('NFKC').replace(/[’‘]/gu, "'").replace(/\s+/gu, ' ').trim().toLowerCase()
+function pilotRightsGate(episode: FeedEpisode): string | null {
+  if (!episode.guid.startsWith('voa-pilot:')) return null
+  const audit = (episode as FeedEpisode & { candidateAudit?: { candidate?: { thirdPartyNotices?: unknown } } }).candidateAudit
+  if (!Array.isArray(audit?.candidate?.thirdPartyNotices)) return 'voa-pilot-audit-required'
+  return audit.candidate.thirdPartyNotices.length ? 'publisher-third-party-rights-review-required' : null
+}
+function validTaskReview(record: TaskContentRecord, now: number): ContentLifeTaskReview | null {
+  const review = record.lifeTaskReview
+  if (!review || !record.artifact || !record.rightsRecord || review.segmentId !== record.segment.id ||
+      review.contentFingerprint !== record.segment.contentFingerprint || review.timingFingerprint !== record.segment.timingFingerprint ||
+      review.audioSha256 !== record.artifact.sha256 || review.sourcePolicyHash !== record.rightsRecord.sourcePolicyHash ||
+      !finite(review.reviewedAt) || review.reviewedAt <= 0 || review.reviewedAt > now ||
+      [review.evidenceId, review.reviewer, review.version].some(value => typeof value !== 'string' || !value.trim() || value.length > 200) ||
+      !Array.isArray(review.assessments) || review.assessments.length > CONTENT_LIFE_TASKS.length) return null
+  const seen = new Set<string>()
+  for (const assessment of review.assessments) {
+    if (!assessment || !CONTENT_LIFE_TASKS.includes(assessment.task) || seen.has(assessment.task) ||
+        !['supported', 'not-supported', 'unknown'].includes(assessment.outcome) || typeof assessment.reason !== 'string' ||
+        assessment.reason.trim().length < 20 || assessment.reason.length > 1000 || !Array.isArray(assessment.quotes) || assessment.quotes.length > 8) return null
+    seen.add(assessment.task)
+    const indices = new Set<number>()
+    for (const quote of assessment.quotes) {
+      const sentence = record.segment.sentences[quote?.sentenceIndex]
+      if (!quote || !Number.isInteger(quote.sentenceIndex) || !sentence || indices.has(quote.sentenceIndex) ||
+          typeof quote.text !== 'string' || normalizeQuote(quote.text).length < 12 || quote.text.length > 1000 ||
+          !normalizeQuote(sentence.text).includes(normalizeQuote(quote.text))) return null
+      if (assessment.outcome === 'supported' && !record.audioEvidence?.heard?.some(cue =>
+        finite(cue.startTime) && finite(cue.endTime) && cue.endTime > cue.startTime &&
+        cue.startTime >= record.segment.startSeconds && cue.endTime <= record.segment.endSeconds &&
+        // Same aligned sentence, not merely the same words heard elsewhere in a long clip.
+        cue.startTime >= sentence.startSeconds - 1.5 && cue.endTime <= sentence.endSeconds + 1.5 &&
+        cue.startTime < sentence.endSeconds && cue.endTime > sentence.startSeconds &&
+        typeof cue.body === 'string' && normalizeQuote(cue.body).includes(normalizeQuote(quote.text)))) return null
+      indices.add(quote.sentenceIndex)
+    }
+    // One isolated keyword or one sentence is not evidence of an interaction.
+    if (assessment.outcome === 'supported' && indices.size < 2) return null
+  }
+  return review
+}
+
+/** Narrow automatic semantic review for the fixed publisher scenes. No new audio claim:
+ * the same immutable clip must ALREADY pass all gates, and the independent audio analyzer
+ * must have heard both acts inside it. Other tasks and unmatched clips remain unknown. */
+export function reviewVoaLifeTaskDialogue(record: PersistedContentSegment, source: ContentSource, now: number): ContentLifeTaskReview | null {
+  const checked = eligibleRecord({ id: record.segment.id, record, config: source }, [source], screeningProfile, now)
+  const contract = VOA_LESSON_CANDIDATES.find(candidate => record.segment.episode.guid === pilotGuid(candidate.id) &&
+    record.segment.episode.pageUrl === candidate.pageUrl && record.segment.episode.audioUrl === candidate.audioUrl)
+  const audit = (record.segment.episode as FeedEpisode & { candidateAudit?: { transcriptSha256?: string } }).candidateAudit
+  if (!checked || !contract?.dialogueRules || record.segment.sourceId !== 'voa-everyday-grammar' ||
+      !contract.dialogueScriptSha256 || audit?.transcriptSha256 !== contract.dialogueScriptSha256 ||
+      !record.artifact || !record.rightsRecord || !record.audioEvidence?.heard?.length ||
+      record.audioEvidence.originalAudioSha256 !== record.artifact.sha256 || record.audioEvidence.submittedAudioSha256 !== record.clip?.audioSha256 ||
+      record.audioEvidence.inspectedStartSeconds !== record.segment.startSeconds || record.audioEvidence.inspectedEndSeconds !== record.segment.endSeconds) return null
+  const assessments: ContentLifeTaskReview['assessments'] = []
+  for (const rule of contract.dialogueRules) {
+    const quotes = rule.turns.map(text => ({ text,
+      sentenceIndex: record.segment.sentences.findIndex(sentence => normalizeQuote(sentence.text).includes(normalizeQuote(text))) }))
+    if (quotes.some(quote => quote.sentenceIndex < 0 || !record.audioEvidence!.heard.some(cue =>
+      finite(cue.startTime) && finite(cue.endTime) && cue.startTime >= record.segment.startSeconds && cue.endTime <= record.segment.endSeconds &&
+      cue.endTime > cue.startTime && normalizeQuote(cue.body).includes(normalizeQuote(quote.text)))) ||
+      quotes[0]!.sentenceIndex >= quotes[1]!.sentenceIndex) continue
+    for (const task of rule.tasks) assessments.push({ task, outcome: 'supported', reason: rule.rationale, quotes })
+  }
+  if (!assessments.length) return null
+  const review: ContentLifeTaskReview = { evidenceId: `voa-dialogue-rule:${contract.mediaId}`, reviewer: 'jove-audio-aligned-publisher-dialogue-rules',
+    version: '1', reviewedAt: now, segmentId: record.segment.id, contentFingerprint: record.segment.contentFingerprint,
+    timingFingerprint: record.segment.timingFingerprint, audioSha256: record.artifact.sha256, sourcePolicyHash: record.rightsRecord.sourcePolicyHash, assessments }
+  return validTaskReview({ ...record, lifeTaskReview: review }, now)
+}
+function eligibleRecord(row: CandidateWindow['candidates'][number], sources: readonly ContentSource[], profile: LearnerContentProfile, now: number) {
+  const record = row.record, configured = sources.find(source => source.id === record.segment.sourceId)
+  const source = configured && { ...configured, verifiedAt: row.config.verifiedAt }
+  if (!source || row.id !== record.segment.id || record.status !== 'eligible' || !record.inspection || !record.artifact || !record.lesson || !record.clip ||
+      pilotRightsGate(record.segment.episode) ||
+      !record.rightsRecord || record.rightsRecord.thirdParty === 'uncertain' ||
+      record.rightsRecord.sourceId !== source.id || record.rightsRecord.method !== 'trusted-source-policy-and-audio-screen' ||
+      !Array.isArray(record.rightsRecord.evidenceUrls) ||
+      !source.rights.evidenceUrls.every(url => record.rightsRecord!.evidenceUrls.includes(url)) ||
+      profile.recentContentFingerprints?.includes(record.segment.contentFingerprint)) return null
+  const clip = record.clip, audio = record.audioEvidence
+  if (clip.bucket !== contentBucket || !/^[a-f0-9]{64}$/u.test(clip.audioSha256) ||
+      clip.objectPath !== `clips/${record.segment.id.slice('authentic-'.length)}/${clip.audioSha256}` ||
+      clip.sourceAudioSha256 !== record.artifact.sha256 || clip.sourceStartSeconds !== record.segment.startSeconds ||
+      clip.sourceEndSeconds !== record.segment.endSeconds || clip.startSeconds !== record.segment.startSeconds - clip.clipOriginSeconds ||
+      clip.endSeconds !== record.segment.endSeconds - clip.clipOriginSeconds ||
+      !finite(clip.durationSeconds) || clip.durationSeconds < clip.endSeconds || clip.durationSeconds > record.segment.durationSeconds + 3 ||
+      !Number.isInteger(clip.byteLength) || clip.byteLength < 1 || clip.byteLength > 10 * 1024 * 1024 ||
+      !audio || audio.originalAudioSha256 !== record.artifact.sha256 || audio.submittedAudioSha256 !== clip.audioSha256 ||
+      audio.inspectedStartSeconds !== record.segment.startSeconds || audio.inspectedEndSeconds !== record.segment.endSeconds ||
+      audio.submittedStartSeconds !== clip.clipOriginSeconds || !finite(audio.submittedEndSeconds) ||
+      Math.abs(audio.submittedEndSeconds - (clip.clipOriginSeconds + clip.durationSeconds)) > 1e-6 ||
+      audio.timingBasis !== clip.timingBasis) return null
+  const context = { source, now, use, artifact: record.artifact, inspection: record.inspection, profile }
+  const quality = assessSegment(record.segment, context)
+  if (quality.status === 'quarantined' || quality.fit === null) return null
+  // Enrichment and exact segment binding must also remain usable after JSONB read-back.
+  try { toMaterial(record.segment, context, record.lesson, now) } catch { return null }
+  return { context, quality, review: validTaskReview(record, now) }
+}
+
+/** Pure projection of a service-verified, current owner candidate window, NOT browser input. */
+export function buildContentTaskInventory(options: {
+  ownerId: string; rows: CandidateWindow; sources?: readonly ContentSource[]; profile: LearnerContentProfile; now: number
+  auditedCandidateIds?: readonly string[]; lowWater?: number
+}): OwnerContentTaskInventory {
+  const lowWater = options.lowWater ?? 2
+  if (!Number.isInteger(lowWater) || lowWater < 1 || lowWater > 10 || !finite(options.now) || options.now <= 0 || !options.ownerId ||
+      !Array.isArray(options.rows.candidates) || options.rows.candidates.length > 100 || !Array.isArray(options.rows.recent)) fail('invalid-content-inventory')
+  const counts = new Map<ContentLifeTask, number>(CONTENT_LIFE_TASKS.map(task => [task, 0]))
+  const unknown = new Map<ContentLifeTask, number>(CONTENT_LIFE_TASKS.map(task => [task, 0]))
+  const fingerprints = new Set<string>()
+  let eligibleTaskUnknown = 0
+  for (const row of options.rows.candidates) {
+    const checked = eligibleRecord(row, options.sources ?? ALLOWLISTED_CONTENT_SOURCES, options.profile, options.now)
+    if (!checked || fingerprints.has(row.record.segment.contentFingerprint)) continue
+    fingerprints.add(row.record.segment.contentFingerprint)
+    if (!checked.review || CONTENT_LIFE_TASKS.some(task => !checked.review!.assessments.some(value => value.task === task && value.outcome !== 'unknown'))) eligibleTaskUnknown++
+    for (const task of CONTENT_LIFE_TASKS) {
+      const assessment = checked.review?.assessments.find(value => value.task === task)
+      if (assessment?.outcome === 'supported') counts.set(task, counts.get(task)! + 1)
+      else if (!assessment || assessment.outcome === 'unknown') unknown.set(task, unknown.get(task)! + 1)
+    }
+  }
+  const complete = options.rows.candidates.length < 100
+  const tasks = CONTENT_LIFE_TASKS.map(task => {
+    const configuredCandidateIds = VOA_LESSON_CANDIDATES.filter(row => row.taskIntents.includes(task)).map(row => row.id)
+    const count = counts.get(task)!
+    return { task, configuredCandidateIds,
+      auditedCandidateCount: options.auditedCandidateIds ? configuredCandidateIds.filter(id => options.auditedCandidateIds!.includes(id)).length : null,
+      reviewedUsableCount: count, countBasis: complete && !unknown.get(task) ? 'exact' as const : 'lower-bound' as const,
+      state: count >= lowWater ? 'sufficient' as const : !complete || unknown.get(task) ? 'unknown' as const : count ? 'low' as const : 'gap' as const,
+      needsAttention: count < lowWater }
+  })
+  return { version: 'life-tasks-v1', ownerId: options.ownerId, observedAt: options.now, scope: 'owner-selectable-unseen-window',
+    windowLimit: 100, windowComplete: complete, candidateAuditStatus: options.auditedCandidateIds ? 'observed' : 'unknown', eligibleTaskUnknown,
+    lowWater, lowWaterBasis: 'provisional-distinct-clip-count', tasks,
+    notices: [...(tasks.some(task => task.state === 'gap') ? ['life-task-reviewed-inventory-gap'] : []),
+      ...(tasks.some(task => task.state === 'low') ? ['life-task-inventory-low'] : []),
+      ...(tasks.some(task => task.state === 'unknown') ? ['life-task-inventory-unknown'] : []),
+      ...(!complete ? ['content-inventory-window-limited'] : []),
+      ...(options.auditedCandidateIds ? [] : ['candidate-audit-readback-unavailable'])],
+    nextExpectedSupplyAt: null, estimatedDaysRemaining: null }
+}
+
+interface PilotReadQuery extends PromiseLike<{ data: unknown; error: unknown }> {
+  eq(column: string, value: string): PilotReadQuery
+  in(column: string, values: readonly string[]): PilotReadQuery
+  limit(count: number): PilotReadQuery
+}
+const pilotGuid = (id: string) => `voa-pilot:${id}`
+async function readPilotIds(client: ContentAdminClient): Promise<string[] | undefined> {
+  const reader = client as ContentAdminClient & { from?: (table: string) => { select(columns: string): PilotReadQuery } }
+  if (!reader.from) return undefined // RPC-only diagnostic adapters must report unknown, never an invented zero.
+  const result = await reader.from('content_items').select('guid,episode').eq('source_id', 'voa-everyday-grammar')
+    .in('guid', VOA_LESSON_CANDIDATES.map(row => pilotGuid(row.id))).limit(6)
+  if (result.error || !Array.isArray(result.data)) return undefined
+  return result.data.flatMap((row: { guid?: string; episode?: { pageUrl?: string; audioUrl?: string; candidateAudit?: { candidate?: { id?: string }; transcriptSha256?: string } } }) => {
+    const contract = VOA_LESSON_CANDIDATES.find(candidate => pilotGuid(candidate.id) === row.guid)
+    return contract && row.episode?.pageUrl === contract.pageUrl && row.episode.audioUrl === contract.audioUrl &&
+      row.episode.candidateAudit?.candidate?.id === contract.id && /^[a-f0-9]{64}$/u.test(row.episode.candidateAudit.transcriptSha256 ?? '') ? [contract.id] : []
+  })
+}
+/** Server-only single-owner read. No profile/owner ID from source data; no DB or provider writes. */
+export async function readOwnerContentTaskInventory(options: {
+  adminClient: ContentAdminClient; ownerId: string; profile?: LearnerContentProfile; sources?: readonly ContentSource[]
+  lowWater?: number; now?: () => number
+}): Promise<OwnerContentTaskInventory> {
+  const owner = await rpc<{ ownerId: string | null }>(options.adminClient, 'owner', {})
+  if (!owner.ownerId || owner.ownerId !== options.ownerId) fail('content-single-owner-required')
+  // NULL cannot match a recommendation request ID, so the read never bypasses its cooldown.
+  const rows = await rpc<CandidateWindow>(options.adminClient, 'candidates', { ownerId: owner.ownerId, requestId: null })
+  return buildContentTaskInventory({ ownerId: owner.ownerId, rows, sources: options.sources, profile: options.profile ?? defaultOwnerProfile,
+    now: (options.now ?? Date.now)(), lowWater: options.lowWater, auditedCandidateIds: await readPilotIds(options.adminClient) })
+}
+
+/** Supply intent is only a dispatch heuristic. Neither archive polling nor topic tags certify future stock. */
+export function planContentSourceRefresh(options: { sources: readonly ContentSource[]; inventory?: OwnerContentTaskInventory | null; limit: number; now: number }): ContentRefreshSelection {
+  if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 10 || !finite(options.now) || options.now <= 0) fail('invalid-content-refresh-selection')
+  const eligible = options.sources.filter(source => source.enabled && source.rights.status === 'verified')
+  const everyday = eligible.filter(source => ['voa-everyday-grammar', 'open-yap-sample'].includes(source.id))
+  const mixed = eligible.filter(source => source.id === 'hacker-public-radio' || source.id === 'jb-the-launch')
+  const others = eligible.filter(source => !everyday.includes(source) && !mixed.includes(source))
+  const rotate = (rows: ContentSource[]) => rows.length ? [...rows.slice(Math.floor(options.now / 86_400_000) % rows.length), ...rows.slice(0, Math.floor(options.now / 86_400_000) % rows.length)] : []
+  const deficits = !options.inventory || options.inventory.tasks.some(task => task.needsAttention)
+  const ordered = deficits ? [...rotate(everyday), ...rotate(mixed), ...rotate(others)] : [...rotate(mixed), ...rotate(everyday), ...rotate(others)]
+  return { sourceIds: ordered.slice(0, options.limit).map(source => source.id), basis: 'life-task-deficit-and-source-rotation-v1',
+    notices: [...(!everyday.length ? ['everyday-source-dispatch-unavailable'] : []),
+      ...(deficits ? ['core-inventory-replenishment-required'] : []), 'nontechnical-continuing-supply-not-established'] }
 }
 interface StorageBucket {
   upload(path: string, body: Uint8Array, options: { contentType: string; upsert: boolean }): Promise<{ error: { statusCode?: string } | null }>
@@ -73,7 +310,7 @@ interface Claim {
   rightsDue?: boolean; rights_status?: string; rights_checked_at?: string | null
 }
 interface JobContext {
-  options: ContentRefreshOptions; source: ContentSource; sourcePolicyHash: string; ownerId: string | null
+  options: ContentTaskRefreshOptions; source: ContentSource; sourcePolicyHash: string; ownerId: string | null
   summary: ContentRefreshSummary; now: () => number; controller: AbortController
   audioStore: ContentAudioStore | null; maxAudio: number; maxSegments: number; processVersion: string
   call: <T>(action: string, args?: Record<string, unknown>) => Promise<T>
@@ -174,8 +411,10 @@ async function publisherTranscript(context: JobContext, item: PendingItem): Prom
   return null
 }
 async function processItem(context: JobContext, item: PendingItem): Promise<void> {
-  const reasons = rightsReasons(context.source, item.episode, use, context.now())
+  const publisherGate = pilotRightsGate(item.episode)
+  const reasons = [...rightsReasons(context.source, item.episode, use, context.now()), ...(publisherGate ? [publisherGate] : [])]
   if (reasons.length) {
+    context.summary.nextGates.push(...reasons)
     await context.call('finish-item', { itemId: item.id, revision: item.revision, status: 'quarantined', reasons, processVersion: context.processVersion })
     return
   }
@@ -230,7 +469,7 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
     if (context.controller.signal.aborted) fail('content-run-timeout-or-cancelled')
     const cached = item.saved_segments.find(saved => saved.segment.id === candidate.id && saved.status === 'eligible')
     if (cached && cached.artifact && cached.inspection && cached.lesson && cached.clip) { eligible++; continue }
-    let record: PersistedContentSegment = {
+    let record: TaskContentRecord = {
       segment: candidate, status: 'quarantined', inspection: null, artifact: null, objectPath: null, analysis: null,
       lesson: null, material: null, rightsRecord: null,
       quality: assessSegment(candidate, { source: context.source, now: context.now(), profile: screeningProfile, use }),
@@ -283,6 +522,15 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
       // This path means a clip everywhere outside the private episode-analysis cache.
       record.objectPath = record.clip.objectPath
       record.status = 'eligible'
+      if (result.lifeTaskReview) {
+        record.lifeTaskReview = structuredClone(result.lifeTaskReview)
+        if (!validTaskReview(record, context.now())) {
+          delete record.lifeTaskReview
+          context.summary.nextGates.push('life-task-review-invalid')
+        }
+      }
+      if (!record.lifeTaskReview) record.lifeTaskReview = reviewVoaLifeTaskDialogue(record, context.source, context.now()) ?? undefined
+      if (!record.lifeTaskReview) context.summary.nextGates.push('life-task-review-required')
       eligible++; context.summary.eligibleSegments++
     } else if (quality.status !== 'quarantined') itemGates.add('lesson-enrichment-required')
     await context.call('save-segment', { itemId: item.id, revision: item.revision, record })
@@ -294,7 +542,7 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
 }
 
 /** Entry for a server-authenticated scheduler. Never expose the supplied admin client or provider callbacks to browsers. */
-export async function runContentRefresh(options: ContentRefreshOptions): Promise<ContentRefreshSummary> {
+export async function runContentRefresh(options: ContentTaskRefreshOptions): Promise<ContentTaskRefreshSummary> {
   const now = options.now ?? Date.now
   if (!finite(now()) || now() <= 0) fail('invalid-content-clock')
   const bound = (value: number | undefined, fallback: number, max: number) => {
@@ -308,9 +556,11 @@ export async function runContentRefresh(options: ContentRefreshOptions): Promise
   const maxItems = bound(options.limits?.feedItems, 25, 100)
   const maxAudio = bound(options.limits?.audioBytes, 64 * 1024 * 1024, 64 * 1024 * 1024)
   const runMs = bound(options.limits?.runMs, 90_000, 120_000)
-  const summary: ContentRefreshSummary = { runId: crypto.randomUUID(), sourcesClaimed: 0, sourcesSkipped: 0, feedsFetched: 0,
+  if (options.voaPilot && !['metadata', 'probe-audio', 'disabled'].includes(options.voaPilot)) fail('invalid-voa-pilot-mode')
+  const summary: ContentTaskRefreshSummary = { runId: crypto.randomUUID(), sourcesClaimed: 0, sourcesSkipped: 0, feedsFetched: 0,
     feedsUnchanged: 0, itemsDiscovered: 0, itemsProcessed: 0, segmentsSaved: 0, eligibleSegments: 0,
-    nextGates: [], recommendations: [], errors: [], networkConstraints: [] }
+    nextGates: [], recommendations: [], errors: [], networkConstraints: [], inventory: null, voaPilot: [],
+    refreshSelection: { sourceIds: [], basis: 'life-task-deficit-and-source-rotation-v1', notices: [] } }
   const owner = await rpc<{ ownerId: string | null }>(options.adminClient, 'owner', { ownerId: options.ownerId })
   const audioStore = options.audioStore ?? createSupabaseContentAudioStore(options.adminClient)
   const controller = new AbortController()
@@ -319,8 +569,19 @@ export async function runContentRefresh(options: ContentRefreshOptions): Promise
   if (options.signal?.aborted) controller.abort()
   const timer = setTimeout(cancel, runMs)
   const processVersion = `${options.analyzerVersion ?? 'no-analyzer'}/${options.transcriberVersion ?? 'no-stt'}`
-  const sources = (options.sources ?? ALLOWLISTED_CONTENT_SOURCES).filter(source => !options.sourceIds || options.sourceIds.includes(source.id)).slice(0, maxSources)
+  const suppliedSources = (options.sources ?? ALLOWLISTED_CONTENT_SOURCES).filter(source =>
+    (!options.sourceIds || options.sourceIds.includes(source.id)) && (!options.voaPilotOnly || source.id === 'voa-everyday-grammar'))
+  const updateInventory = async () => {
+    if (!owner.ownerId) { summary.nextGates.push('content-single-owner-required'); return }
+    try {
+      summary.inventory = await readOwnerContentTaskInventory({ adminClient: options.adminClient, ownerId: owner.ownerId,
+        profile: options.profile, sources: options.sources, now, lowWater: options.inventoryLowWater })
+    } catch (error) { summary.inventory = null; summary.nextGates.push(codeOf(error)) }
+  }
   try {
+    await updateInventory()
+    summary.refreshSelection = planContentSourceRefresh({ sources: suppliedSources, inventory: summary.inventory, limit: maxSources, now: now() })
+    const sources = summary.refreshSelection.sourceIds.map(id => suppliedSources.find(source => source.id === id)!)
     for (const configuredSource of sources) {
       const source = structuredClone(configuredSource)
       if (controller.signal.aborted) { summary.nextGates.push('content-run-timeout-or-cancelled'); break }
@@ -339,15 +600,17 @@ export async function runContentRefresh(options: ContentRefreshOptions): Promise
           if (response.dnsPinning === 'deno-preflight-only') summary.networkConstraints.push('Deno fetch validates DNS before connecting but cannot pin that answer; deploy with controlled public-only egress or the Node pinned transport.')
           return response
         } }
-      const canAnalyze = !!options.analyzeAudio && !budgetReady(context, 'content-analysis')
+      const canAnalyze = !options.voaPilotOnly && !!options.analyzeAudio && !budgetReady(context, 'content-analysis')
       let claimed = false
       let failed = false
       let retrySeconds = 3_600
       try {
-        const claim = await call<Claim>('claim', { source, configHash: await digest(JSON.stringify([configuredSource, options.rightsPolicies ?? CONTENT_POLICY_EVIDENCE])), forcePoll: !!options.forcePoll, canAnalyze, processVersion })
+        const configuration: unknown[] = [configuredSource, options.rightsPolicies ?? CONTENT_POLICY_EVIDENCE]
+        if (source.id === 'voa-everyday-grammar') configuration.push(VOA_LESSON_CANDIDATES)
+        const claim = await call<Claim>('claim', { source, configHash: await digest(JSON.stringify(configuration)), forcePoll: !!options.forcePoll, canAnalyze, processVersion })
         if (!claim.acquired) { summary.sourcesSkipped++; continue }
         claimed = true; summary.sourcesClaimed++
-        if (audioStore) {
+        if (audioStore && !options.voaPilotOnly) {
           const expired = await call<string[]>('retention')
           if (expired.length) { await audioStore.remove(expired); await call('retention-finish', { paths: expired }) }
         }
@@ -367,6 +630,23 @@ export async function runContentRefresh(options: ContentRefreshOptions): Promise
           summary.nextGates.push('source-rights-recheck-required'); continue
         }
         source.verifiedAt = rightsCheckedAt
+        if (source.id === 'voa-everyday-grammar' && options.voaPilot !== 'disabled' && claim.feedDue) {
+          const audits = await auditVoaLessonCandidates({ fetcher: options.fetcher, now, signal: controller.signal,
+            rightsPolicies: options.rightsPolicies, probeAudio: options.voaPilot === 'probe-audio' })
+          const items = await Promise.all(audits.map(async audit => {
+            const episode = voaPilotEpisode(audit, source)
+            return { id: await digest(JSON.stringify([source.id, episode.guid])),
+              // Ignore retrieval time, optional probe mode and volatile page chrome. A changed script/audio URL/policy invalidates old segments.
+              revision: await digest(JSON.stringify([episode.guid, episode.audioUrl, audit.transcriptSha256,
+                [...new Set(audit.candidate.thirdPartyNotices.map(normalizeQuote))].sort(),
+                audit.rights.evidence.map(evidence => evidence.observedHash)])), episode }
+          }))
+          summary.itemsDiscovered += (await call<{ changed: number }>('ingest', { items })).changed
+          summary.voaPilot = audits.map(audit => ({ id: audit.candidate.id, checkedAt: audit.checkedAt,
+            transcriptSha256: audit.transcriptSha256, audioProbed: !!audit.audioProbe, eligible: false }))
+          summary.nextGates.push('voa-pilot-candidates-not-approved', ...audits.flatMap(audit => audit.nextGates))
+        }
+        if (options.voaPilotOnly) continue
         if (claim.feedDue) {
           const response = await context.fetch(source.feedUrl, 'feed', source.feedFormat === 'open-yap-preview-jsonl' ? 131_072 : PIPELINE_LIMITS.feedBytes, claim.etag, claim.last_modified)
           if (response.status === 429 || response.status === 503) {
@@ -389,7 +669,9 @@ export async function runContentRefresh(options: ContentRefreshOptions): Promise
               pollSeconds: source.cadenceHours * 3_600, heldItems: batch.quarantined.map(item => item.code) })
           }
         }
-        const pending = await call<PendingItem[]>('pending', { canAnalyze, processVersion, limit: maxEpisodes })
+        const pendingWindow = await call<PendingItem[]>('pending', { canAnalyze, processVersion, limit: 10 })
+        const pending = pendingWindow.sort((a, b) => Number(b.episode.guid.startsWith('voa-pilot:')) - Number(a.episode.guid.startsWith('voa-pilot:')))
+          .slice(0, maxEpisodes)
         for (const item of pending) {
           try { await processItem(context, item) }
           catch (error) {
@@ -412,52 +694,97 @@ export async function runContentRefresh(options: ContentRefreshOptions): Promise
         }
       }
     }
-    if (owner.ownerId && !controller.signal.aborted) {
+    if (owner.ownerId && !controller.signal.aborted && !options.voaPilotOnly) {
       summary.recommendations = await selectAndPersistContentLessons({ adminClient: options.adminClient, ownerId: owner.ownerId,
         profile: options.profile ?? defaultOwnerProfile, now, sources: options.sources, requestId: `refresh-${summary.runId}`, limit: 3 })
     }
+    if (!controller.signal.aborted) await updateInventory()
+    if (summary.inventory) summary.nextGates.push(...summary.inventory.notices)
+    summary.nextGates.push(...summary.refreshSelection.notices)
     summary.nextGates = [...new Set(summary.nextGates)]
     summary.networkConstraints = [...new Set(summary.networkConstraints)]
     return summary
   } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', cancel) }
 }
 
+function voaPilotEpisode(audit: VoaCandidateAudit, source: ContentSource): FeedEpisode & { candidateAudit: Omit<VoaCandidateAudit, 'rights'> } {
+  const candidate = audit.candidate
+  return { sourceId: source.id, guid: pilotGuid(candidate.id), title: candidate.title, pageUrl: candidate.pageUrl,
+    // Registry identity is retained; candidateAudit explicitly identifies exact-page discovery, NOT an RSS item.
+    feedUrl: source.feedUrl, audioUrl: candidate.audioUrl, audioMime: 'audio/mpeg',
+    audioBytes: audit.audioProbe?.sourceBytes ?? null, durationSeconds: audit.audioProbe?.originalDurationSeconds ?? null,
+    publishedAt: null, declaredLanguage: source.declaredLanguage, explicit: null,
+    licenseNotice: candidate.thirdPartyNotices.length ? candidate.thirdPartyNotices.join('\n') : null,
+    licenseDeclared: candidate.thirdPartyNotices.length > 0,
+    attribution: candidate.attribution, transcripts: [],
+    candidateAudit: { candidate, taskIntents: audit.taskIntents, taskCoverage: 'unknown', checkedAt: audit.checkedAt,
+      pageSha256: audit.pageSha256, transcriptSha256: audit.transcriptSha256, audioProbe: audit.audioProbe,
+      nextGates: audit.nextGates, networkConstraint: audit.networkConstraint } }
+}
+
+/** Executable no-paid pilot. It persists only the six exact metadata/script/probe snapshots,
+ * revalidates policy, and releases its lease. Provider callbacks are not accepted or forwarded. */
+export async function runVoaCandidatePilot(options: Pick<ContentTaskRefreshOptions, 'adminClient' | 'ownerId' | 'fetcher' | 'rightsPolicies' | 'now' | 'signal'> & { probeAudio?: boolean }): Promise<ContentTaskRefreshSummary> {
+  const owner = await rpc<{ ownerId: string | null }>(options.adminClient, 'owner', {})
+  if (!owner.ownerId || options.ownerId && options.ownerId !== owner.ownerId) fail('content-single-owner-required')
+  return runContentRefresh({ adminClient: options.adminClient, ownerId: owner.ownerId, fetcher: options.fetcher,
+    rightsPolicies: options.rightsPolicies, now: options.now, signal: options.signal, sourceIds: ['voa-everyday-grammar'],
+    voaPilotOnly: true, voaPilot: options.probeAudio ? 'probe-audio' : 'metadata', forcePoll: true,
+    limits: { sources: 1, runMs: 120_000 } })
+}
+
 export async function selectAndPersistContentLessons(options: SelectContentOptions): Promise<EligibleContentLesson[]> {
   const now = options.now ?? Date.now
   const count = options.limit ?? 3
   if (!Number.isInteger(count) || count < 1 || count > 10 || !options.requestId || options.requestId.length > 100) fail('invalid-recommendation-request')
-  const rows = await rpc<{ candidates: { id: string; record: PersistedContentSegment; config: ContentSource }[];
-    recent: { id: string; request_id: string; segment_id: string; lesson: EligibleContentLesson }[] }>(options.adminClient, 'candidates', { ownerId: options.ownerId, requestId: options.requestId })
+  const rows = await rpc<CandidateWindow>(options.adminClient, 'candidates', { ownerId: options.ownerId, requestId: options.requestId })
   const previous = rows.recent.filter(row => row.request_id === options.requestId)
   if (previous.length) return previous.map(row => ({ ...row.lesson, recommendationId: row.id }))
   const sources = options.sources ?? ALLOWLISTED_CONTENT_SOURCES
   const ranked: EligibleContentLesson[] = []
+  const priorities = new Map<string, number>()
+  const nontechnical = new Set<string>()
+  const inventory = buildContentTaskInventory({ ownerId: options.ownerId, rows, sources, profile: options.profile, now: now() })
   const fingerprints = new Set(options.profile.recentContentFingerprints ?? [])
   const recentSources = rows.recent.map(row => rows.candidates.find(candidate => candidate.id === row.segment_id)?.record.segment.sourceId).filter((id): id is string => !!id)
   for (const row of rows.candidates) {
     const record = row.record
-    const configured = sources.find(source => source.id === record.segment.sourceId)
-    const source = configured && { ...configured, verifiedAt: row.config.verifiedAt }
-    if (!source || !record.inspection || !record.artifact || !record.lesson || !record.clip || fingerprints.has(record.segment.contentFingerprint)) continue
-    const context = { source, now: now(), use, artifact: record.artifact, inspection: record.inspection,
-      profile: { ...options.profile, recentSourceIds: [...(options.profile.recentSourceIds ?? []), ...recentSources] } }
-    const quality = assessSegment(record.segment, context)
-    if (quality.status === 'quarantined' || quality.fit === null) continue
-    const converted = toMaterial(record.segment, context, record.lesson, now())
-    ranked.push({ recommendationId: '', segmentId: row.id, material: converted.material, fit: quality.fit,
-      playback: record.clip,
-      timedSentences: converted.timedSentences, reason: `Observed human audio; ${quality.metrics.topics.join(', ') || 'general English'}; difficulty/interest/fatigue and recent source exposure considered.` })
+    if (fingerprints.has(record.segment.contentFingerprint)) continue
+    const checked = eligibleRecord(row, sources, { ...options.profile,
+      recentSourceIds: [...(options.profile.recentSourceIds ?? []), ...recentSources] }, now())
+    if (!checked) continue
+    const { quality, context, review } = checked
+    const tasks = review?.assessments.filter(assessment => assessment.outcome === 'supported').map(assessment => assessment.task) ?? []
+    priorities.set(row.id, tasks.filter(task => inventory.tasks.find(stock => stock.task === task)?.needsAttention).length)
+    // Topic heuristics guide variety only. They never enter the reviewed task counters.
+    if (tasks.length || !quality.metrics.topics.includes('Technology') &&
+      quality.metrics.topics.some(topic => topic !== 'Work')) nontechnical.add(row.id)
+    const converted = toMaterial(record.segment, context, record.lesson!, now())
+    ranked.push({ recommendationId: '', segmentId: row.id, material: converted.material, fit: quality.fit!,
+      playback: record.clip!, timedSentences: converted.timedSentences,
+      reason: `Observed human audio; ${tasks.length ? `reviewed task exchanges: ${tasks.join(', ')}` : 'life-task coverage unknown'}; ${quality.metrics.topics.join(', ') || 'topic unknown'}; difficulty/interest/fatigue and recent exposure considered.` })
     fingerprints.add(record.segment.contentFingerprint)
   }
-  ranked.sort((a, b) => b.fit - a.fit || a.segmentId.localeCompare(b.segmentId))
+  ranked.sort((a, b) => priorities.get(b.segmentId)! - priorities.get(a.segmentId)! ||
+    Number(nontechnical.has(b.segmentId)) - Number(nontechnical.has(a.segmentId)) || b.fit - a.fit || a.segmentId.localeCompare(b.segmentId))
   const selected: EligibleContentLesson[] = []
   const usedSources = new Set<string>()
+  const technicalLimit = Math.max(1, Math.floor(count / 2))
+  let technicalCount = 0
+  const add = (lesson: EligibleContentLesson) => {
+    if (!nontechnical.has(lesson.segmentId)) {
+      if (technicalCount >= technicalLimit) return false
+      technicalCount++
+    }
+    selected.push(lesson)
+    return true
+  }
   for (const lesson of ranked) {
     const id = rows.candidates.find(row => row.id === lesson.segmentId)!.record.segment.sourceId
-    if (!usedSources.has(id)) { selected.push(lesson); usedSources.add(id) }
+    if (!usedSources.has(id) && add(lesson)) usedSources.add(id)
     if (selected.length === count) break
   }
-  for (const lesson of ranked) if (selected.length < count && !selected.includes(lesson)) selected.push(lesson)
+  for (const lesson of ranked) if (selected.length < count && !selected.includes(lesson)) add(lesson)
   if (!selected.length) return []
   const persisted = await rpc<{ id: string; lesson: EligibleContentLesson }[]>(options.adminClient, 'recommend', {
     ownerId: options.ownerId, requestId: options.requestId, lessons: selected,

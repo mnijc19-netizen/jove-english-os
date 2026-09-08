@@ -24,7 +24,7 @@ Material.sourceUrl, sourceLabel and license retain publisher page, attribution, 
 
 Additional bounded primary-source audit on September8:
 
-- VOA Let's Learn English now has an executable, exact-three-page candidate audit: `auditVoaLessonCandidates({ids?,fetcher?,probeAudio?,now?,signal?})` in src/server/content-voa.ts. [Current first-party usage guidance](https://learningenglish.voanews.com/p/6861.html) permits attributed reuse of Learning English works but excludes agency material; the broader copyright policy also excludes other licensed works. This does not clear background music or inserted recordings. Candidates are separate from ALLOWLISTED_CONTENT_SOURCES and never automatically approved or advertised as new feeds.
+- VOA Let's Learn English now has an executable, exact-six-page candidate audit: `auditVoaLessonCandidates({ids?,fetcher?,probeAudio?,now?,signal?})` in src/server/content-voa.ts. [Current first-party usage guidance](https://learningenglish.voanews.com/p/6861.html) permits attributed reuse of Learning English works but excludes agency material; the broader copyright policy also excludes other licensed works. This does not clear background music or inserted recordings. Candidates are separate from ALLOWLISTED_CONTENT_SOURCES and never automatically approved or advertised as new feeds. The final checkpoint below specifies six-item persistence and inventory semantics.
 - [Level1 Lesson11: This Is My Neighborhood](https://learningenglish.voanews.com/a/lets-learn-english-lesson-11-this-is-my-neighborhood/3293986.html) binds official audio media3294378 to25 dialogue lines; useful for asking directions/help and errands. Finding a bank/getting cash is NOT account-opening or a teller transaction; apartment location is NOT rental negotiation.
 - [Level2 Lesson2: The Interview](https://learningenglish.voanews.com/a/lets-learn-english-level-2-lesson-2/3960471.html) binds media4016512 to40 dialogue lines. Work-skills/interview candidate only; comedic framing and Professor Bot interludes require actual human-audio screening.
 - [Level1 Lesson47: How Can I Help?](https://learningenglish.voanews.com/a/lets-learn-english-lesson-47-how-can-i-help/3737352.html) binds media3748838 to39 dialogue lines. Offers help/cooperation, NOT emergency coverage. In-story online course/Master interludes require specific ownership/music review. [Lesson21](https://learningenglish.voanews.com/a/lets-learn-english-lesson-21-can-you-come-to-the-party/3406732.html) explicitly credits another songwriter: excluded, not inferred public domain from its host site.
@@ -168,7 +168,7 @@ Actual public default-network audio probes cover these3sources (earlier VOA/LUP2
 | LINUX Unplugged683 | 63898349 /3986.128979586 | 996414 /27.977142857–90.253061224 | Originalea900373fbeb1887b36544f3ddb047ccccf8f177bdd54a3528a2bdefe91cb669; clip3fad804825ce6425575cfabf2f671e12e5e9f50053443d7a49b66b3aa9131fc6 |
 | Open Yap travel/visa conversation conv_d4005da6db98 | 27467181 /1716.696 | 996480 /27.984–90.264 | Originalee95c93cbceb1af3c41b34656585177bda36ef43fd90aad45901e705eae46ed3; clip0164963d82d75eb74e777e74d6a98457286dc1d4655fa4282f4154bcbf0e72e4 |
 
-The separate actual VOA candidate/audio test passed for all3exact pages using the real default network. These are research probes, not SQL ingestion, Storage uploads or approvals. All requested30–90s clips contain498207actual bytes with frame/preroll coverage27.977142857–90.253061224s:
+The earlier actual VOA candidate/audio test passed for the first3exact pages using the real default network; the final six-item test below also passed. These are research probes, not SQL ingestion, Storage uploads or approvals. All requested30–90s clips contain498207actual bytes with frame/preroll coverage27.977142857–90.253061224s:
 
 | Candidate | Original bytes / seconds | Original SHA256 | Clip SHA256 |
 | --- | --- | --- | --- |
@@ -183,3 +183,77 @@ Publisher enclosure lengths differ from actual response bytes: hash actual media
 004+supabase/tests/content.test.sql previously executed on dedicated local Postgres inside BEGIN/ROLLBACK: readiness, whole removal preserving clip playback, expiry withdrawal, rights renewal/leases/role denials. Main has now persistently applied002–005 and reported RLS=true/versions001–005; this worker ran real persistence afterward. Stable004 SHA remains ada468eee3dd2d90f0b77655617405824801972ee9156b510a5ae458c4b3f003. This worker has not applied migrations, committed or deployed. Actual Storage upload/sign/HTTP download, budgeted real acoustic review, owner recommendation, scheduled dispatch and desktop/mobile production acceptance are still separate gates.
 
 Owned files: src/content/pipeline.ts,pipeline-types.ts,sources.ts; src/server/content.ts,content-contracts.ts,content-network.ts,content-rights.ts,content-audio.ts,content-worker.ts,content-voa.ts; tests/content-pipeline.test.ts,content-worker.test.ts; supabase/migrations/202609080004_content.sql; supabase/tests/content.test.sql; this guide. Main owns shared schema/types/browser/Today/player/docs/status. Independent sync review findings are sent to Franklin; this worker does not edit sync.
+
+## Final six-scene / 17-task checkpoint — September8
+
+This checkpoint changes only sources.ts, content-voa.ts, content-worker.ts, the two content tests and this guide. SQL004, shared types, UI and HTTP handler remain unchanged. Under src, sources.ts has only two runtime importers: server/content-worker.ts and server/content-voa.ts. No frontend import was found; no frontend rebuild or new artifact-hash claim is made. Earlier whole-project results above are historical; main owns the current full merge/CI evidence.
+
+The fixed batch adds the following three exact first-party pages to Neighborhood/Interview/Help, with no further source expansion:
+
+| Candidate | Publisher page / player | Actual MP3 bytes / frame duration | Original SHA256 / clip SHA256 |
+| --- | --- | --- | --- |
+| Food ordering, unavailability, change | [Lesson23](https://learningenglish.voanews.com/a/lets-learn-english-lesson-23-what-do-you-want/3413753.html),3437143 | 1419642 /177.449795918s | 42d83f7eb8126e78eba8c7b97efc5855de2ff000d741b81fe17d67828eafdda6 / a69d7336a473513103dd85e670db44454c101b7db3cea0a0b913d612fbe1aed6 |
+| Opposing views / disagreement | [Lesson37](https://learningenglish.voanews.com/a/lets-learn-english-lesson-37-lets-agree-to-disagree/3574029.html),3601381 | 1743560 /217.939591837s | f68b68c6db0f2ce8c94c04501615f9809656dd3279d5e8ac3ab63d07b3c40882 / 957fa2e5516996d48564798b5e1c16dc830069e152335924e3c0068d86f62a8f |
+| Wallet loss / requests to friends | [Lesson43](https://learningenglish.voanews.com/a/lets-learn-english-lesson-43-time-for-plan-b/3666458.html),3681422 | 1750039 /218.749387755s | 3e813268b3ea2ef90b8218c0109afbd7728eb9e0ac51068bd7d127db20f2a6c3 / 034763311ab5d7621f95a6936859cb1ce216c0ba43d309b3f4a91bfc24462470 |
+
+Script hashes: Food925ee23bb85f8f6e24b4dba9420196b5d087910c72b5d36d54aa678ef6dcc99a (44lines), Disagreement d6201a804e87c6058050b4fee49ecb67bd1d0122b893f1c53fdd6889c81ba9d8 (24lines), PlanB f3fd277cc3667117a0a556a9217f6bc95654c9f5704600cab4a6eb8e70c5760c (34lines). These pin editorial dialogue rules, NOT audio approval. PlanB includes singing; music/uncleared inserted works remain subject to actual inspection. Practical help is not emergency-services coverage; a friend mentioning an airport is not check-in/security/gate dialogue. All six lack verified timed captions and remain candidate/unknown.
+
+### Executable no-paid pilot
+
+The normal worker audits the six exact pages when VOA's existing poll is due. Curation contracts enter that source's config hash; changed contracts cannot silently retain old bound segments. voaPilot accepts metadata (default), probe-audio, or disabled. It stores six exact voa-pilot:<candidateId> GUIDs through existing lease/ingest RPC in content_items.episode.candidateAudit: plain publisher text, unknown timing/coverage, page/audio binding, hashes, limitations and optional real audio probe. transcripts stays empty until actual timed STT/publisher cues exist. feedUrl is the source-registry identity, NOT a claim the scene came from RSS. Publication date remains null, not today's date.
+
+Revision uses ID/audio URL/script/normalized third-party notices/policy hashes, not retrieval time, page chrome or optional probe mode. Unchanged stored snapshots keep their original checkedAt (not a fake latest audit); fresh probes still appear in audit results. Known publisher third-party declarations are copied to licenseNotice and cause a hard quarantine BEFORE STT/audio analysis. An acoustic none-detected result can never clear them. A new declaration changes the revision; existing004 ingest resets the item to pending, stales all prior segments and deactivates recommendations. No004 edit or006 migration is required.
+
+Run from an already authenticated dedicated server job; never send its service client to a browser:
+
+~~~typescript
+import { runVoaCandidatePilot, readOwnerContentTaskInventory } from './content-worker'
+import type { OwnerContext } from './gateway'
+
+export async function noPaidContentPilot(ctx: OwnerContext) {
+  const trial = await runVoaCandidatePilot({
+    adminClient: ctx.admin, ownerId: ctx.ownerId, probeAudio: true,
+  })
+  const inventory = await readOwnerContentTaskInventory({
+    adminClient: ctx.admin, ownerId: ctx.ownerId,
+    profile: { targetDifficulty: 0.45, fatigue: 0, interests: ['Everyday life'], requireGeneralAmerican: true },
+  })
+  return { trial, inventory }
+}
+~~~
+
+runVoaCandidatePilot validates the unique configured owner before writes, accepts/forwards no analyzer/STT/budget callbacks, and performs only rights verification, six page/optional in-memory audio probes, metadata ingest, inventory reads and lease release. No RSS discovery, provider calls, Storage uploads/retention, recommendations or ability updates. Extra runtime callback keys are not forwarded. It returns the ordinary summary plus voaPilot/inventory/refreshSelection. The existing authenticated/scheduled refresh HTTP response transparently carries these additive fields. The standalone inventory read is an exported server API, not a new HTTP action. Existing lessons/playback contracts do not change.
+
+### Single-owner inventory semantics
+
+OwnerContentTaskInventory reports current owner-selectable unseen stock, not proficiency or the entire collection. Exactly the existing17dimensions: meeting, small talk, restaurant, shopping, transport, airport, renting, landlord, bank, work, interview, clarification, disagreement, opinions, social, emergency, living abroad.
+
+- Per task, configuredCandidateIds / auditedCandidateCount / reviewedUsableCount remain separate. Candidate labels NEVER count as reviewed coverage. Audit readback uses only six exact GUIDs and explicit columns through the existing SDK; failed/RPC-only readback yields null/unknown, not zero. Unique owner validation precedes private reads. A null inventory request ID cannot match a recommendation request and bypass cooldown.
+- Current SQL eligibility, revision, rights, ready/unexpired clip and owner cooldown are followed by fresh profile-specific quality/enrichment checks and original/clip SHA plus interval binding. Duplicate content fingerprints count once. GA still requires acoustic observation when requested.
+- Supported tasks require a trusted system review bound to segment/content/timing/original SHA/policy, with reviewer/evidence/version/time and at least two distinct aligned sentence quotations. Both creation AND inventory readback require those quotations in independently heard cues in the same sentence intervals (maximum1.5s boundary tolerance, never outside the analyzed clip). A single keyword, absent heard cues, shifted quotes or unknown audio cannot establish stock. Custom semantic review is trusted server analyzer output, not browser/source input.
+- Default narrow VOA rules additionally require the pinned publisher script AND both dialogue acts heard inside an already eligible clip. Current rules support restaurant order/unavailability, disagreement/opinions and social request/refusal. They do not infer shopping, bank, airport or emergency from nearby vocabulary. This is machine-text task matching on separately screened audio, not another acoustic classifier or owner manual approval. Unmatched dimensions stay unknown.
+- The existing candidates RPC caps at100 and cannot paginate. A full window sets windowComplete=false/countBasis=lower-bound; absent/low task stock stays unknown, not a proven whole-library shortage. Unknown semantic classifications also preserve unknown. Fewer than100 fully classified rows can establish a gap only in this current owner-selectable reservoir. No SQL was added to hide the limit.
+- Default lowWater=2 distinct clips (configurable1–10), explicitly provisional, not a scientifically calibrated or date-based target. gap/low/sufficient/unknown and needsAttention are explicit. Notices include life-task-reviewed-inventory-gap, life-task-inventory-low, life-task-inventory-unknown and content-inventory-window-limited. nextExpectedSupplyAt and estimatedDaysRemaining are always null: no invented expiry or publication plan.
+
+Refresh prioritizes existing everyday archive work when task stock is low/unknown, rotates it by UTC day for a one-source budget, then retains mixed continuing feeds/interests. Rotation is dispatch selection, not evidence of new publication; real SQL due/ETag/lease gates still apply. Recommendations prioritize reviewed deficient tasks, then nontechnical text-topic variety, then fit/source diversity. Topic heuristics never increment task counts. Technology+Work or Technology+other topic labels remain restricted unless a valid reviewed task exchange supports them; Work-only and unknown topics also do not prove nontechnical life coverage. Restricted entries have a multi-item limit of floor(limit/2), minimum1. Insufficient variety returns a shorter batch, not counterfeit core stock. A single-item request can still receive one eligible technical clip if no suitable alternative exists.
+
+The yearly nontechnical supply gate remains open. Archives are finite, not fresh continuing feeds. [The Bugcast publisher](https://thebugcast.org/2026/08/22/908-dove-distinction/) has current family/culture chat, but music is mixed and applicable dialogue reuse permission is unresolved. Its [HTTPS RSS](https://thebugcast.org/podcast/feed/) returned20items/September5 Last-Modified with no transcript/chapters tags; it is NOT allowlisted. No email, purchase, paid call, new source or publication promise was made. Owner must configure the existing OpenRouter key in this dedicated backend and approve a capped real audio trial; permission and missing task interactions remain separate from credentials.
+
+### Checkpoint verification
+
+- Targeted content units:196passed/21skipped,217total. Scoped ESLint passed. Regressions cover candidate-vs-reviewed, unique-owner rejection, no-paid metadata persistence/dedupe, changed rights, unknown readback, quote/heard/same-sentence timing/hash/script mismatch,100-row saturation, low-water, source rotation, Technology+Work restriction and both first/new third-party declaration cases. Synthetic analysis/DB fixtures are explicitly test-only.
+- Actual six-page+MP3/frame probe: session27669, final exit0, September8 18:34:08 start,21.94s test time. One test contains all six real assets;96 other tests skipped by name. Each requested30–90s clip contains498207actual bytes with frame/preroll coverage27.977142857–90.253061224s. Acoustic flags remain false/unknown. No Storage upload or paid call; this observation is retained, not rerun after metadata-only fixes.
+- Actual dedicated local004 notice-withdrawal test: September8 18:49:43, exit0,1passed/99 name-filtered skips,661ms. Real worker generated clean/changed-notice revisions; a random isolated source/owner and explicitly synthetic ready/eligible fixture ran inside BEGIN/ROLLBACK. Existing ingest preserved the declaration/new revision, reset the item pending, staled the old segment, deactivated recommendations and made playback raise42501. Exact source/auth-user counts after rollback were both0. No real owner record was modified; no product migration.
+- The new six-candidate ingest itself is verified through worker/RPC unit tests, not yet as six real publisher rows in live PostgreSQL. Earlier SQL evidence is historical and does not substitute for that readback or real acoustic approval. Main owns the functions rebuild, full merge CI and production gates.
+
+~~~powershell
+npx vitest run tests/content-worker.test.ts tests/content-pipeline.test.ts
+npx eslint src/content/sources.ts src/server/content-voa.ts src/server/content-worker.ts tests/content-pipeline.test.ts tests/content-worker.test.ts
+npm run typecheck
+$env:JOVE_CONTENT_AUDIO_PROBE='1'
+npx vitest run tests/content-worker.test.ts -t 'binds six exact VOA'
+Remove-Item Env:JOVE_CONTENT_AUDIO_PROBE
+$env:JOVE_CONTENT_LOCAL_TEST='1'
+npx vitest run tests/content-worker.test.ts -t 'rolls back a real publisher-notice revision'
+Remove-Item Env:JOVE_CONTENT_LOCAL_TEST
+~~~

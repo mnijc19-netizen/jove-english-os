@@ -4,7 +4,7 @@ import {
   nextSourcePoll, parseRssFeed, parseOpenYapPreviewManifest, parseVoaLessonPage, parseTimedTranscript, PIPELINE_LIMITS, rightsReasons,
   sliceTranscript, textMetrics, toMaterial, transcriptFormat, unknownInspection, validateSourceUrl,
 } from '../src/content/pipeline'
-import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_SOURCES, OPEN_YAP_SAMPLE_SOURCE, VOA_LESSON_CANDIDATES } from '../src/content/sources'
+import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, CONTENT_SOURCES, OPEN_YAP_SAMPLE_SOURCE, VOA_LESSON_CANDIDATES } from '../src/content/sources'
 import type {
   AnalysisResult, AudioArtifact, ContentSegment, ContentSource, FeedEpisode, Inspection,
   LearnerContentProfile, ObservationEvidence, RightsUse, TranscriptReference,
@@ -17,6 +17,23 @@ describe('exact VOA scene candidates retain unknown acoustic and temporal facts'
     <audio src="${contract.audioUrl}"></audio></div>
     <div>Anna: Where is the library?</div><div>Marsha: It is <strong>nearby</strong>.</div>
     <div>Anna: Thank you.</div><div>Marsha: You are welcome.</div><h2>Quiz</h2></html>`
+  it('keeps exactly the existing 17 dimensions and six bounded scene contracts without keyword coverage inflation', () => {
+    expect(CONTENT_LIFE_TASKS).toEqual(['meeting', 'small talk', 'restaurant', 'shopping', 'transport', 'airport', 'renting', 'landlord',
+      'bank', 'work', 'interview', 'clarification', 'disagreement', 'opinions', 'social', 'emergency', 'living abroad'])
+    expect(VOA_LESSON_CANDIDATES).toHaveLength(6)
+    expect(new Set(VOA_LESSON_CANDIDATES.map(candidate => candidate.mediaId)).size).toBe(6)
+    for (const candidate of VOA_LESSON_CANDIDATES) {
+      expect(candidate.taskIntents.every(task => CONTENT_LIFE_TASKS.includes(task))).toBe(true)
+      expect(candidate.taskIntents.some(task => ['bank', 'renting', 'landlord', 'airport', 'emergency'].includes(task))).toBe(false)
+    }
+    expect(VOA_LESSON_CANDIDATES.find(candidate => candidate.id === 'voa-lle-plan-b')!.limitations.join(' ')).toContain('singing')
+  })
+  it.each(VOA_LESSON_CANDIDATES)('binds the exact $id player without converting intent into reviewed stock', candidate => {
+    const html = page.replaceAll(contract.mediaId, candidate.mediaId).replaceAll(contract.audioUrl, candidate.audioUrl)
+    expect(parseVoaLessonPage(html, candidate)).toMatchObject({ id: candidate.id, eligible: false, status: 'candidate',
+      humanAudio: 'unknown', publisherTranscript: { timing: 'unknown' } })
+    expect(() => parseVoaLessonPage(html.replace(candidate.mediaId, '9999999'), candidate)).toThrow('voa-conversation-binding-changed')
+  })
   it('binds only the exact audio/player to plain publisher dialogue without claiming timed subtitles or review', () => {
     const result = parseVoaLessonPage(page, contract)
     expect(result).toMatchObject({ status: 'candidate', eligible: false, thirdPartyAudio: 'unknown', humanAudio: 'unknown',

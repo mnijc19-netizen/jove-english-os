@@ -66,4 +66,13 @@ describe('default-closed commit-bound production release hold', () => {
     expect(deploy!.indexOf('node scripts/verify-release-readiness.mjs')).toBeLessThan(deploy!.indexOf('actions/deploy-pages@'))
     expect(deploy).toContain('ref: ${{ github.sha }}')
   })
+  it('runs shared-backend Auth and content fixtures in separate CI steps', () => {
+    const workflow = readFileSync(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8')
+    // Both suites provision an owner. Vitest's default file parallelism must
+    // not make a single-owner content check observe another suite's member.
+    const commands = [...workflow.matchAll(/^\s+run: (npx vitest run .+)$/gm)].map(match => match[1])
+    expect(commands).toContain('npx vitest run tests/cloud-live.test.ts')
+    expect(commands).toContain('npx vitest run tests/content-worker.test.ts')
+    expect(commands.some(command => command.includes('cloud-live.test.ts') && command.includes('content-worker.test.ts'))).toBe(false)
+  })
 })

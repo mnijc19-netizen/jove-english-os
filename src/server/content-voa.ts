@@ -2,23 +2,25 @@ import { parseVoaLessonPage } from '../content/pipeline'
 import { ALLOWLISTED_CONTENT_SOURCES, VOA_LESSON_CANDIDATES } from '../content/sources'
 import { contentAudioWindow } from './content-audio'
 import { ContentNetworkError, fetchContentResource, type ContentFetcher } from './content-network'
-import { contentEvidenceHash, revalidateContentRights } from './content-rights'
+import { contentEvidenceHash, revalidateContentRights, type ContentPolicyEvidence } from './content-rights'
 
 /** Bounded candidate research, NOT an eligible-lesson publisher or a general crawler.
  * No paid call, database approval, synthesized captions, or external writes occur here.
  */
 export async function auditVoaLessonCandidates(options: {
   ids?: readonly string[]; fetcher?: ContentFetcher; probeAudio?: boolean; now?: () => number; signal?: AbortSignal
+  rightsPolicies?: readonly ContentPolicyEvidence[]
 } = {}) {
   const ids = options.ids ?? VOA_LESSON_CANDIDATES.map(row => row.id)
-  if (!ids.length || ids.length > 3 || new Set(ids).size !== ids.length || ids.some(id => !VOA_LESSON_CANDIDATES.some(row => row.id === id)))
+  if (!ids.length || ids.length > 6 || new Set(ids).size !== ids.length || ids.some(id => !VOA_LESSON_CANDIDATES.some(row => row.id === id)))
     throw new ContentNetworkError('unapproved-voa-candidate')
   const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === 'voa-everyday-grammar')!
-  const rights = await revalidateContentRights({ source, fetcher: options.fetcher, now: options.now, signal: options.signal })
+  const rights = await revalidateContentRights({ source, fetcher: options.fetcher, evidence: options.rightsPolicies, now: options.now, signal: options.signal })
   if (rights.status !== 'verified') throw new ContentNetworkError('voa-publisher-policy-not-verified')
   const fetcher = options.fetcher ?? fetchContentResource
   const results = []
   for (const id of ids) {
+    if (options.signal?.aborted) throw new ContentNetworkError('content-run-timeout-or-cancelled')
     const contract = VOA_LESSON_CANDIDATES.find(row => row.id === id)!
     const response = await fetcher({ source, url: contract.pageUrl, role: 'page', exactUrls: [contract.pageUrl], maxBytes: 1_048_576, signal: options.signal })
     if (response.status !== 200 || response.finalUrl !== contract.pageUrl || response.body.length > 1_048_576 || response.contentType !== 'text/html')
@@ -36,10 +38,14 @@ export async function auditVoaLessonCandidates(options: {
         timingBasis: clip.timingBasis, acousticallyReviewed: false as const,
         networkConstraint: audio.dnsPinning === 'deno-preflight-only' ? 'DNS preflight only, not pinned' : null }
     }
-    results.push({ candidate, checkedAt: (options.now ?? Date.now)(), rights,
+    const checkedAt = (options.now ?? Date.now)()
+    if (!Number.isFinite(checkedAt) || checkedAt <= 0) throw new ContentNetworkError('invalid-content-clock')
+    results.push({ candidate, taskIntents: [...contract.taskIntents], taskCoverage: 'unknown' as const, checkedAt, rights,
       pageSha256: await contentEvidenceHash(response.body), transcriptSha256: await contentEvidenceHash(candidate.publisherTranscript.text), audioProbe,
       nextGates: ['item-third-party-rights-review-required', 'actual-audio-timed-alignment-required', 'actual-human-audio-screen-required'],
       networkConstraint: response.dnsPinning === 'deno-preflight-only' ? 'DNS preflight only, not pinned' : null })
   }
   return results
 }
+
+export type VoaCandidateAudit = Awaited<ReturnType<typeof auditVoaLessonCandidates>>[number]

@@ -38,6 +38,57 @@ describe('authenticated service gateway', () => {
   it('uses an actual SHA-256 fingerprint', async () => {
     expect(await digestRequest('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
   })
+  it('rejects a pre-cancelled buffered or empty request without acquiring its reader', async () => {
+    const controller = new AbortController(); controller.abort()
+    for (const body of ['abc', undefined]) {
+      const request = new Request('https://example.test', { method: 'POST', body, signal: controller.signal })
+      const reader = request.body ? vi.spyOn(request.body, 'getReader') : undefined
+      await expect(boundedBody(request, 10)).rejects.toMatchObject({ status: 408, code: 'UPLOAD_INTERRUPTED' })
+      if (reader) expect(reader).not.toHaveBeenCalled()
+    }
+  })
+  it('gives cancellation priority when a byte read and abort settle together', async () => {
+    const controller = new AbortController(), cancelled = vi.fn()
+    const body = new ReadableStream<Uint8Array>({ pull(stream) {
+      stream.enqueue(new Uint8Array([1])); controller.abort()
+    }, cancel: cancelled })
+    const request = new Request('https://example.test', { method: 'POST', body, signal: controller.signal, duplex: 'half' } as RequestInit)
+    await expect(boundedBody(request, 10)).rejects.toMatchObject({ code: 'UPLOAD_INTERRUPTED' })
+    expect(cancelled).toHaveBeenCalledOnce()
+  })
+  it('does not cancel an already fully consumed multipart encoder', async () => {
+    const form = new FormData(); form.set('audio', new Blob([new Uint8Array(128)], { type: 'audio/wav' }))
+    const request = new Request('https://example.test', { method: 'POST', body: form })
+    const reader = request.body!.getReader(), cancel = vi.spyOn(reader, 'cancel')
+    vi.spyOn(request.body!, 'getReader').mockReturnValue(reader)
+    expect((await boundedBody(request, 4096)).length).toBeGreaterThan(128)
+    expect(cancel).not.toHaveBeenCalled()
+  })
+  it('gives an already-fired deadline priority over a synchronously buffered read', async () => {
+    vi.useFakeTimers()
+    try {
+      const stream = new ReadableStream<Uint8Array>({ start(controller) {
+        controller.enqueue(new Uint8Array([1])); controller.close()
+      } })
+      const request = new Request('https://example.test', { method: 'POST', body: stream, duplex: 'half' } as RequestInit)
+      const reader = request.body!.getReader(), read = reader.read.bind(reader)
+      vi.spyOn(reader, 'read').mockImplementation(() => { vi.advanceTimersByTime(20); return read() })
+      vi.spyOn(request.body!, 'getReader').mockReturnValue(reader)
+      await expect(boundedBody(request, 10, 20)).rejects.toMatchObject({ code: 'UPLOAD_TIMEOUT' })
+    } finally { vi.useRealTimers() }
+  })
+  it('still rejects an abort at multipart EOF without cancelling the closed reader', async () => {
+    const controller = new AbortController(), form = new FormData()
+    form.set('audio', new Blob([new Uint8Array(128)], { type: 'audio/wav' }))
+    const request = new Request('https://example.test', { method: 'POST', body: form, signal: controller.signal })
+    const reader = request.body!.getReader(), read = reader.read.bind(reader), cancel = vi.spyOn(reader, 'cancel')
+    vi.spyOn(reader, 'read').mockImplementation(async () => {
+      const part = await read(); if (part.done) controller.abort(); return part
+    })
+    vi.spyOn(request.body!, 'getReader').mockReturnValue(reader)
+    await expect(boundedBody(request, 4096)).rejects.toMatchObject({ code: 'UPLOAD_INTERRUPTED' })
+    expect(cancel).not.toHaveBeenCalled(); expect(request.body!.locked).toBe(false)
+  })
   it.each([0, 0.001])('uses an atomic null predicate to preserve a confirmed cost of %s, retaining the owner filter', async cost => {
     const row = { id: 'usage-row', user_id: 'owner-a', actual_usd: cost, status: 'completed' }
     const fetcher = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {

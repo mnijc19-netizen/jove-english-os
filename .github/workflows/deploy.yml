@@ -28,10 +28,13 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run check:cloud-local -- --start
-      - name: Real local Auth, Storage and content persistence
-        run: npx vitest run tests/cloud-live.test.ts tests/content-worker.test.ts
+      - name: Real local Auth and Storage synchronization
+        run: npx vitest run tests/cloud-live.test.ts
         env:
           JOVE_LOCAL_CLOUD_TEST: '1'
+      - name: Real local content persistence
+        run: npx vitest run tests/content-worker.test.ts
+        env:
           JOVE_CONTENT_LOCAL_TEST: '1'
       - run: npm run build:functions
       - name: Real local Deno authorization and private reference audio

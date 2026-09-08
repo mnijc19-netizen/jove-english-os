@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import { ALLOWLISTED_CONTENT_SOURCES, OPEN_YAP_SAMPLE_SOURCE } from '../src/content/sources'
+import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, OPEN_YAP_SAMPLE_SOURCE, VOA_LESSON_CANDIDATES } from '../src/content/sources'
 import type { ContentSource, Inspection, ObservationEvidence, TimedTranscript } from '../src/content/pipeline-types'
 import { createContentFetcher, fetchContentResource, isPublicContentAddress, type ContentFetcher } from '../src/server/content-network'
 import { parseRssFeed, parseOpenYapPreviewManifest, validateSourceUrl } from '../src/content/pipeline'
@@ -12,9 +12,10 @@ import { auditVoaLessonCandidates } from '../src/server/content-voa'
 import { contentPublicOrigin, contentSignedPlaybackUrl, createContentBudget, createContentHandler } from '../src/server/content'
 import { GatewayError, type OwnerContext } from '../src/server/gateway'
 import {
-  recordContentLearningUse, runContentRefresh, selectAndPersistContentLessons,
+  buildContentTaskInventory, planContentSourceRefresh, readOwnerContentTaskInventory, reviewVoaLifeTaskDialogue,
+  recordContentLearningUse, runContentRefresh, runVoaCandidatePilot, selectAndPersistContentLessons,
   type ContentAdminClient, type ContentAudioAnalyzer, type ContentAudioStore, type ContentBudget,
-  type ContentRefreshOptions, type EligibleContentLesson, type PersistedContentSegment,
+  type ContentRefreshOptions, type ContentLifeTaskReview, type EligibleContentLesson, type PersistedContentSegment,
 } from '../src/server/content-worker'
 
 const origin = 'https://publisher.example.org'
@@ -105,7 +106,22 @@ class MemoryRpc implements ContentAdminClient {
   rightsStatus = 'unchecked'
   rightsDue = true
   rightsCheckedAt: string | null = null
-  async rpc(_name: string, input?: Record<string, unknown>) {
+  from(table: string) {
+    expect(table).toBe('content_items')
+    return { select: (columns: string) => {
+      expect(columns).toBe('guid,episode')
+      return { eq: (column: string, value: string) => {
+        expect([column, value]).toEqual(['source_id', 'voa-everyday-grammar'])
+        return { in: (key: string, guids: string[]) => {
+          expect(key).toBe('guid')
+          return { limit: async (count: number) => ({ error: null, data: [...this.items.values()]
+            .map(item => ({ episode: item.episode as { guid: string }, guid: (item.episode as { guid: string }).guid }))
+            .filter(row => guids.includes(row.guid)).slice(0, count) }) }
+        } }
+      } }
+    } }
+  }
+  async rpc(_name: string, input?: Record<string, unknown>): Promise<Awaited<ReturnType<ContentAdminClient['rpc']>>> {
     const action = input!.action as string, args = input!.args as Record<string, unknown>
     this.calls.push({ action, args: structuredClone(args) })
     let data: unknown = {}
@@ -124,6 +140,15 @@ class MemoryRpc implements ContentAdminClient {
       let changed = 0
       for (const row of args.items as { id: string; revision: string; episode: unknown }[]) {
         if (!this.items.has(row.id)) { this.items.set(row.id, { ...row, attempts: 0, status: 'pending', transcript: null, saved_segments: [], object_path: null, audio_sha256: null, audio_mime: null }); changed++ }
+        else if (this.items.get(row.id)!.revision !== row.revision) {
+          const prior = this.items.get(row.id)!
+          for (const [id, record] of this.records) if (record.segment.episode.guid === (prior.episode as { guid: string }).guid) {
+            this.records.delete(id)
+            this.recommendations = this.recommendations.filter(recommendation => recommendation.segment_id !== id)
+          }
+          this.items.set(row.id, { ...row, attempts: 0, status: 'pending', transcript: null, saved_segments: [], object_path: null, audio_sha256: null, audio_mime: null })
+          changed++
+        }
       }
       data = { changed }
     } else if (action === 'poll') this.etag = args.etag as string | null
@@ -148,6 +173,241 @@ function options(db = new MemoryRpc()): ContentRefreshOptions & { adminClient: M
     analyzerVersion: 'fixture-v1', transcriberVersion: 'fixture-v1', budget: budget(), costCeilings: { analysisUsd: 0.1, transcriptionUsd: 0.1 },
     limits: { episodesPerSource: 1, segmentsPerEpisode: 1 }, transcriptOrigin: 'https://owner-backend.example.org' }
 }
+
+const voaSource = ALLOWLISTED_CONTENT_SOURCES.find(source => source.id === 'voa-everyday-grammar')!
+const voaTestPolicies = [{ ...rightsPolicies[0]!, url: voaSource.rights.evidenceUrls[0]! }]
+function voaTestFetcher(extraChrome = ''): ContentFetcher {
+  return async request => {
+    const contract = VOA_LESSON_CANDIDATES.find(candidate => candidate.pageUrl === request.url)
+    const html = contract ? `<html><h2>Conversation</h2><div data-media-id="${contract.mediaId}" title="VOA - Voice of America English News">
+      <audio src="${contract.audioUrl}"></audio></div><p>Anna: This is original test dialogue, not publisher evidence.</p>
+      <p>Worker: This fixture has no human audio inspection.</p><p>Anna: No task has been approved.</p>
+      <p>Worker: Keep all times unknown.</p><h2>Quiz</h2>${extraChrome}</html>` : policyHtml
+    return { status: 200, finalUrl: request.url, body: new TextEncoder().encode(html), etag: null, lastModified: null,
+      retryAfter: null, contentType: 'text/html', dnsPinning: 'injected' }
+  }
+}
+async function screenedTaskFixture(source: ContentSource, lines: string[], candidateId?: string) {
+  const contract = VOA_LESSON_CANDIDATES.find(candidate => candidate.id === candidateId)
+  const opts = options(), audioUrl = contract?.audioUrl ?? `${origin}/audio/one.mp3`, pageUrl = contract?.pageUrl ?? `${origin}/episode/one`
+  // Synthetic trusted-backend snapshot for the semantic binding unit test, NOT a publisher audit.
+  if (contract) {
+    const persist = opts.adminClient.rpc.bind(opts.adminClient)
+    opts.adminClient.rpc = async (name, input) => {
+      if (input?.action === 'ingest') for (const item of (input.args as { items: { episode: Record<string, unknown> }[] }).items)
+        item.episode.candidateAudit = { transcriptSha256: contract.dialogueScriptSha256, candidate: { thirdPartyNotices: [] } }
+      return persist(name, input)
+    }
+  }
+  const transport: ContentFetcher = async request => {
+    const isFeed = request.role === 'feed', isAudio = request.role === 'audio'
+    const body = isAudio ? fixtureAudio : new TextEncoder().encode(isFeed ? `<rss version="2.0"><channel><title>TEST ONLY</title><item>
+      <title>Synthetic task test</title><guid>${contract ? `voa-pilot:${contract.id}` : 'one'}</guid><link>${pageUrl}</link>
+      <enclosure url="${audioUrl}" type="audio/mpeg" length="10"/></item></channel></rss>` : policyHtml)
+    return { status: 200, finalUrl: request.url, body, etag: null, lastModified: null, retryAfter: null,
+      contentType: isAudio ? 'audio/wav' : isFeed ? 'application/rss+xml' : 'text/html', dnsPinning: 'injected' }
+  }
+  const result = await runContentRefresh({ ...opts, sources: [source], fetcher: transport, voaPilot: 'disabled',
+    rightsPolicies: source.id === voaSource.id ? voaTestPolicies : rightsPolicies,
+    transcribe: async input => ({ audioSha256: input.audio.sha256, requestFingerprint: input.requestFingerprint,
+      audioDurationSeconds: 70, provider: 'SYNTHETIC-TEST-ONLY', evidenceId: 'SYNTHETIC-TEST-ONLY', usage,
+      transcriptJson: JSON.stringify({ version: '1.0.0', segments: lines.map((body, i) => ({ startTime: i * 10, endTime: (i + 1) * 10, body })) }) }),
+    analyzeAudio: async input => {
+      const checked = await analyzer(input)
+      checked.audioEvidence!.heard = input.segment.sentences.map(sentence => ({ startTime: sentence.startSeconds, endTime: sentence.endSeconds, body: sentence.text }))
+      return checked
+    } })
+  expect(result.eligibleSegments).toBe(1)
+  return { id: [...opts.adminClient.records.keys()][0]!, record: [...opts.adminClient.records.values()][0]!, config: opts.adminClient.config }
+}
+describe('six-scene no-paid pilot and owner task inventory', () => {
+  it('audits only six exact contracts, keeps timestamps/coverage unknown and rejects extra URLs before network', async () => {
+    const transport = vi.fn(voaTestFetcher())
+    const audits = await auditVoaLessonCandidates({ fetcher: transport, rightsPolicies: voaTestPolicies, now: () => now })
+    expect(audits.map(audit => audit.candidate.id)).toEqual(VOA_LESSON_CANDIDATES.map(candidate => candidate.id))
+    expect(transport).toHaveBeenCalledTimes(7)
+    for (const audit of audits) expect(audit).toMatchObject({ taskCoverage: 'unknown', audioProbe: null,
+      candidate: { status: 'candidate', eligible: false, publisherTranscript: { timing: 'unknown', alignment: 'unverified' } } })
+    transport.mockClear()
+    await expect(auditVoaLessonCandidates({ ids: ['https://unapproved.example/a'], fetcher: transport })).rejects.toThrow('unapproved-voa-candidate')
+    expect(transport).not.toHaveBeenCalled()
+  })
+  it('persists actual audit snapshots through existing lease/ingest RPC without spending, retention or approvals', async () => {
+    const db = new MemoryRpc(), transport = vi.fn(voaTestFetcher())
+    const result = await runVoaCandidatePilot({ adminClient: db, ownerId, fetcher: transport, rightsPolicies: voaTestPolicies, now: () => now })
+    expect(result.voaPilot).toHaveLength(6)
+    expect(result.itemsDiscovered).toBe(6)
+    expect(result.inventory?.candidateAuditStatus).toBe('observed')
+    expect(result.inventory?.tasks).toHaveLength(17)
+    expect(result.inventory?.tasks.every(task => task.reviewedUsableCount === 0 && task.state === 'gap')).toBe(true)
+    expect(result.inventory?.tasks.find(task => task.task === 'restaurant')?.auditedCandidateCount).toBe(1)
+    expect(result.inventory?.tasks.find(task => task.task === 'bank')).toMatchObject({ configuredCandidateIds: [], auditedCandidateCount: 0 })
+    expect(result.inventory).toMatchObject({ nextExpectedSupplyAt: null, estimatedDaysRemaining: null })
+    expect(db.items.size).toBe(6)
+    expect(db.records.size).toBe(0)
+    expect(db.calls.some(call => ['usage', 'asset', 'clip', 'retention', 'pending', 'recommend', 'poll'].includes(call.action))).toBe(false)
+    expect(transport.mock.calls.every(([request]) => request.role === 'page')).toBe(true)
+    expect(db.locked).toBe(false)
+    const first = db.calls.find(call => call.action === 'ingest')!.args.items as { revision: string; episode: { transcripts: unknown[]; candidateAudit: unknown } }[]
+    expect(first.every(item => item.episode.transcripts.length === 0 && item.episode.candidateAudit)).toBe(true)
+    const again = await runVoaCandidatePilot({ adminClient: db, ownerId, fetcher: voaTestFetcher('<footer>changed chrome</footer>'),
+      rightsPolicies: voaTestPolicies, now: () => now + 1000 })
+    const second = db.calls.filter(call => call.action === 'ingest').at(-1)!.args.items as { revision: string }[]
+    expect(second.map(item => item.revision)).toEqual(first.map(item => item.revision))
+    expect(again.itemsDiscovered).toBe(0)
+  })
+  it('refuses a different or ambiguous owner before pilot writes or private inventory reads', async () => {
+    const db = new MemoryRpc()
+    await expect(runVoaCandidatePilot({ adminClient: db, ownerId: crypto.randomUUID() })).rejects.toThrow('content-single-owner-required')
+    expect(db.calls.map(call => call.action)).toEqual(['owner'])
+    const absent: ContentAdminClient = { rpc: vi.fn(async () => ({ data: { ownerId: null }, error: null })) }
+    await expect(readOwnerContentTaskInventory({ adminClient: absent, ownerId })).rejects.toThrow('content-single-owner-required')
+    expect(absent.rpc).toHaveBeenCalledTimes(1)
+  })
+  it('does not proceed to six page reads when publisher rights change', async () => {
+    const db = new MemoryRpc(), transport = vi.fn(voaTestFetcher())
+    const result = await runVoaCandidatePilot({ adminClient: db, fetcher: transport,
+      rightsPolicies: [{ ...voaTestPolicies[0]!, sha256: '0'.repeat(64) }], now: () => now })
+    expect(db.items.size).toBe(0)
+    expect(result.voaPilot).toEqual([])
+    expect(result.nextGates).toContain('publisher-license-evidence-changed')
+    expect(transport).toHaveBeenCalledTimes(1)
+  })
+  it.each([false, true])('quarantines known third-party declarations before audio and withdraws an old revision (previously eligible=%s)', async previouslyEligible => {
+    const db = new MemoryRpc(), opts = options(db)
+    const analyze = vi.fn(analyzer)
+    const transcribe = vi.fn(async (input: Parameters<NonNullable<ContentRefreshOptions['transcribe']>>[0]) => ({
+      audioSha256: input.audio.sha256, requestFingerprint: input.requestFingerprint, audioDurationSeconds: 70,
+      provider: 'SYNTHETIC-TEST-ONLY', evidenceId: 'SYNTHETIC-TEST-ONLY', usage,
+      transcriptJson: JSON.stringify({ version: '1.0.0', segments: phrases.map((body, i) => ({ startTime: i * 10, endTime: (i + 1) * 10, body })) }),
+    }))
+    const transport: ContentFetcher = async request => {
+      if (request.role === 'page') return voaTestFetcher()(request)
+      return { status: 200, finalUrl: request.url, etag: null, lastModified: null, retryAfter: null, dnsPinning: 'injected',
+        contentType: request.role === 'audio' ? 'audio/wav' : 'application/rss+xml',
+        body: request.role === 'audio' ? fixtureAudio : new TextEncoder().encode('<rss version="2.0"><channel><title>TEST</title></channel></rss>') }
+    }
+    const resume = () => runContentRefresh({ ...opts, sources: [voaSource], fetcher: transport, rightsPolicies: voaTestPolicies,
+      voaPilot: 'disabled', analyzeAudio: analyze, transcribe })
+    let oldRevision: string | undefined
+    if (previouslyEligible) {
+      await runVoaCandidatePilot({ adminClient: db, fetcher: voaTestFetcher(), rightsPolicies: voaTestPolicies, now: () => now })
+      oldRevision = [...db.items.values()][0]!.revision
+      expect((await resume()).eligibleSegments).toBe(1)
+      expect(db.recommendations).toHaveLength(1)
+    }
+    const noticeFetcher: ContentFetcher = async request => {
+      const response = await voaTestFetcher()(request)
+      return { ...response, body: new TextEncoder().encode(new TextDecoder().decode(response.body)
+        .replace('<h2>Quiz', '<p>This dialogue recording copyright Another Author.</p><h2>Quiz')) }
+    }
+    const changed = await runVoaCandidatePilot({ adminClient: db, fetcher: noticeFetcher, rightsPolicies: voaTestPolicies, now: () => now + 1000 })
+    expect(changed.itemsDiscovered).toBe(6)
+    const stored = [...db.items.values()][0]!
+    expect((stored.episode as { licenseNotice: string }).licenseNotice).toContain('copyright Another Author')
+    if (previouslyEligible) expect(stored.revision).not.toBe(oldRevision)
+    expect(db.records.size).toBe(0)
+    expect(db.recommendations).toEqual([])
+    analyze.mockClear(); transcribe.mockClear()
+    const result = await resume()
+    expect(result.nextGates).toContain('publisher-third-party-rights-review-required')
+    expect(result.eligibleSegments).toBe(0)
+    expect(analyze).not.toHaveBeenCalled()
+    expect(transcribe).not.toHaveBeenCalled()
+  })
+  it('retains unknown when the client cannot read candidate snapshots, rather than claiming no candidates exist', async () => {
+    const db = new MemoryRpc()
+    const result = await readOwnerContentTaskInventory({ adminClient: { rpc: db.rpc.bind(db) }, ownerId, now: () => now })
+    expect(result.candidateAuditStatus).toBe('unknown')
+    expect(result.tasks.every(task => task.auditedCandidateCount === null)).toBe(true)
+    expect(result.notices).toContain('candidate-audit-readback-unavailable')
+  })
+  it('counts only bound reviewed task exchanges, deduplicates clips and distinguishes low stock from unknown', async () => {
+    const opts = options()
+    await runContentRefresh({ ...opts, analyzeAudio: analyzer })
+    const saved = [...opts.adminClient.records.values()][0]!
+    const profile = { targetDifficulty: 0.45, fatigue: 0, interests: ['Technology'] }
+    const project = (record: PersistedContentSegment & { lifeTaskReview?: ContentLifeTaskReview }, copies = 1, lowWater = 2) => buildContentTaskInventory({
+      ownerId, profile, sources: opts.sources, now, lowWater, auditedCandidateIds: VOA_LESSON_CANDIDATES.map(candidate => candidate.id),
+      rows: { candidates: Array.from({ length: copies }, () => ({ id: record.segment.id, record, config: opts.adminClient.config })), recent: [] } })
+    expect(project(saved).tasks.every(task => task.state === 'unknown' && task.reviewedUsableCount === 0)).toBe(true)
+    expect(project({ ...saved, status: 'quarantined' }).tasks.every(task => task.state === 'gap')).toBe(true)
+    saved.audioEvidence!.heard = saved.segment.sentences.map(sentence => ({ startTime: sentence.startSeconds, endTime: sentence.endSeconds, body: sentence.text }))
+    const review: ContentLifeTaskReview = { evidenceId: 'TEST-ONLY', reviewer: 'TEST-ONLY', version: '1', reviewedAt: now,
+      segmentId: saved.segment.id, contentFingerprint: saved.segment.contentFingerprint, timingFingerprint: saved.segment.timingFingerprint,
+      audioSha256: saved.artifact!.sha256, sourcePolicyHash: saved.rightsRecord!.sourcePolicyHash,
+      assessments: CONTENT_LIFE_TASKS.map(task => ({ task, outcome: task === 'social' ? 'supported' : 'not-supported',
+        reason: 'Synthetic fixture semantic assessment; not real publisher or audio evidence.',
+        quotes: task === 'social' ? [{ sentenceIndex: 0, text: phrases[0]! }, { sentenceIndex: 4, text: phrases[4]! }] : [] })) }
+    const reviewed = { ...saved, lifeTaskReview: review }
+    expect(project(reviewed, 2).tasks.find(task => task.task === 'social')).toMatchObject({ reviewedUsableCount: 1, state: 'low' })
+    expect(project(reviewed, 2, 1).tasks.find(task => task.task === 'social')?.state).toBe('sufficient')
+    expect(project(reviewed, 100).tasks.find(task => task.task === 'bank')).toMatchObject({ reviewedUsableCount: 0, state: 'unknown', countBasis: 'lower-bound' })
+    const withoutHeard = structuredClone(reviewed)
+    withoutHeard.audioEvidence!.heard = []
+    expect(project(withoutHeard).tasks.find(task => task.task === 'social')).toMatchObject({ reviewedUsableCount: 0, state: 'unknown' })
+    const wrongTime = structuredClone(reviewed)
+    wrongTime.audioEvidence!.heard[0]!.startTime = 40
+    wrongTime.audioEvidence!.heard[0]!.endTime = 45
+    expect(project(wrongTime).tasks.find(task => task.task === 'social')).toMatchObject({ reviewedUsableCount: 0, state: 'unknown' })
+    for (const corrupted of [
+      { ...review, audioSha256: '0'.repeat(64) }, { ...review, timingFingerprint: 'wrong' }, { ...review, reviewedAt: now + 1 },
+      { ...review, sourcePolicyHash: 'wrong' }, { ...review, assessments: [...review.assessments, review.assessments[0]!] },
+      { ...review, assessments: [{ task: 'bank' as const, outcome: 'supported' as const, reason: 'A keyword is not a task exchange.', quotes: [{ sentenceIndex: 0, text: 'made up bank transaction' }] }] },
+    ]) expect(project({ ...saved, lifeTaskReview: corrupted }).tasks.every(task => task.reviewedUsableCount === 0 && task.state === 'unknown')).toBe(true)
+    expect(() => project(reviewed, 1, 0)).toThrow('invalid-content-inventory')
+  })
+  it('routes small refresh budgets to everyday inventory work, rotates it, and never claims archive expiry or new releases', () => {
+    const selected = [0, 1].map(day => planContentSourceRefresh({ sources: [...ALLOWLISTED_CONTENT_SOURCES].reverse(), limit: 1, now: now + day * 86_400_000 }))
+    expect(new Set(selected.flatMap(row => row.sourceIds))).toEqual(new Set(['open-yap-sample', 'voa-everyday-grammar']))
+    const all = planContentSourceRefresh({ sources: ALLOWLISTED_CONTENT_SOURCES, limit: 5, now })
+    expect(all.sourceIds).toHaveLength(5)
+    expect(all.sourceIds.indexOf('jb-linux-unplugged')).toBeGreaterThan(all.sourceIds.indexOf('open-yap-sample'))
+    expect(all.notices).toContain('nontechnical-continuing-supply-not-established')
+    expect(planContentSourceRefresh({ sources: [ALLOWLISTED_CONTENT_SOURCES.find(source => source.id === 'jb-linux-unplugged')!], limit: 1, now }).notices)
+      .toContain('everyday-source-dispatch-unavailable')
+  })
+  it('binds editorial dialogue rules to independently heard aligned audio, not intent labels or a page-only match', async () => {
+    const contract = VOA_LESSON_CANDIDATES.find(candidate => candidate.id === 'voa-lle-food-trucks')!
+    const turns = contract.dialogueRules![0]!.turns
+    const row = await screenedTaskFixture(voaSource, phrases.map((text, i) => i < 2 ? `${text} ${turns[i]}` : text), contract.id)
+    const result = reviewVoaLifeTaskDialogue(row.record, row.config, now)
+    expect(result?.assessments.map(assessment => assessment.task)).toEqual(['restaurant'])
+    const inventory = buildContentTaskInventory({ ownerId, rows: { candidates: [row], recent: [] }, sources: [voaSource],
+      profile: { targetDifficulty: 0.45, fatigue: 0, interests: ['Technology'] }, now })
+    expect(inventory.tasks.find(task => task.task === 'restaurant')).toMatchObject({ reviewedUsableCount: 1, state: 'low' })
+    expect(inventory.tasks.find(task => task.task === 'shopping')).toMatchObject({ reviewedUsableCount: 0, state: 'unknown' })
+    for (const change of ['heard', 'heard-time', 'hash', 'interval', 'clip', 'music', 'page', 'provider', 'script']) {
+      const invalid = structuredClone(row.record)
+      if (change === 'heard') invalid.audioEvidence!.heard = []
+      if (change === 'heard-time') {
+        invalid.audioEvidence!.heard[0]!.startTime = 40; invalid.audioEvidence!.heard[0]!.endTime = 45
+        invalid.audioEvidence!.heard[1]!.startTime = 45; invalid.audioEvidence!.heard[1]!.endTime = 50
+      }
+      if (change === 'hash') invalid.artifact!.sha256 = '0'.repeat(64)
+      if (change === 'interval') invalid.audioEvidence!.inspectedEndSeconds++
+      if (change === 'clip') invalid.clip!.audioSha256 = '0'.repeat(64)
+      if (change === 'music') invalid.inspection!.facts.musicFraction = { status: 'unknown', reason: 'Not inspected' }
+      if (change === 'page') invalid.segment.episode.pageUrl = VOA_LESSON_CANDIDATES[0]!.pageUrl
+      if (change === 'provider') invalid.audioEvidence!.heard[0]!.body = 'A page-only match cannot supply heard audio.'
+      if (change === 'script') (invalid.segment.episode as unknown as { candidateAudit: { transcriptSha256: string } }).candidateAudit.transcriptSha256 = '0'.repeat(64)
+      expect(reviewVoaLifeTaskDialogue(invalid, row.config, now), change).toBeNull()
+    }
+  })
+  it('prefers an eligible everyday clip despite technology interest and does not fill the remaining batch with technical-only clips', async () => {
+    const rows = [await screenedTaskFixture(testSource('everyday-test'), phrases)]
+    for (const label of ['alpha', 'beta', 'gamma']) rows.push(await screenedTaskFixture(testSource(`tech-${label}`), Array.from({ length: 6 }, (_, i) =>
+      `At work our meeting covers software code running a linux model on a computer and the app will test each change in ${label} step ${i}.`)))
+    const db = new MemoryRpc(), client: ContentAdminClient = { rpc: async (name, input) => input?.action === 'candidates'
+      ? { data: { candidates: rows, recent: [] }, error: null } : db.rpc(name, input) }
+    const selected = await selectAndPersistContentLessons({ adminClient: client, ownerId, sources: rows.map(row => row.config), now: () => now,
+      requestId: 'test-variety', profile: { targetDifficulty: 0.45, fatigue: 0, interests: ['Technology'] }, limit: 3 })
+    expect(selected[0]?.segmentId).toBe(rows[0]!.id)
+    expect(selected).toHaveLength(2)
+    expect(db.recommendations).toHaveLength(2)
+    expect(selected.every(lesson => lesson.reason.includes('life-task coverage unknown'))).toBe(true)
+  })
+})
 
 describe('content worker state transitions and inspection boundary', () => {
   it('persists source metadata, transcripts, timed segments and unknown scores without downloading audio', async () => {
@@ -503,21 +763,22 @@ describe('scheduled rights revalidation', () => {
 })
 
 describe.runIf(process.env.JOVE_CONTENT_AUDIO_PROBE==='1')('actual public audio bytes and current policy evidence (no paid analysis)',()=>{
-  it('binds three exact VOA everyday scene pages to their real audio and frame clips without promoting candidates', async () => {
+  it('binds six exact VOA everyday scene pages to their real audio and frame clips without promoting candidates', async () => {
     const results = await auditVoaLessonCandidates({ probeAudio: true })
-    expect(results).toHaveLength(3)
+    expect(results).toHaveLength(6)
     for (const row of results) {
       expect(row.rights.status).toBe('verified')
       expect(row.candidate.eligible).toBe(false)
       expect(row.candidate.publisherTranscript.text.length).toBeGreaterThan(500)
       expect(row.candidate.publisherTranscript.timing).toBe('unknown')
+      expect(row.taskCoverage).toBe('unknown')
       expect(row.audioProbe?.acousticallyReviewed).toBe(false)
       expect(row.audioProbe!.clipBytes).toBeLessThan(row.audioProbe!.sourceBytes)
       console.info(JSON.stringify({ actualVoaCandidate: row.candidate.id, mediaId: row.candidate.mediaId,
         transcriptSha256: row.transcriptSha256, dialogueLines: row.candidate.publisherTranscript.text.split('\n').length,
         thirdPartyNotices: row.candidate.thirdPartyNotices, ...row.audioProbe }))
     }
-  }, 90_000)
+  }, 120_000)
   it.each(['voa-everyday-grammar','jb-linux-unplugged','open-yap-sample'])('%s supplies real bounded media with a measured, hashable clip',async id=>{
     const source=ALLOWLISTED_CONTENT_SOURCES.find(source=>source.id===id)!
     const checked=await revalidateContentRights({source})
@@ -700,6 +961,52 @@ function postgresAdmin(): ContentAdminClient {
 }
 describe.runIf(localEnabled)('content SQL acceptance assertions fail closed on absent RPC values', () => {
   const acceptance = readFileSync(new URL('../supabase/tests/content.test.sql', import.meta.url), 'utf8')
+  it('rolls back a real publisher-notice revision withdrawal through unchanged SQL004', async () => {
+    const db = new MemoryRpc()
+    await runVoaCandidatePilot({ adminClient: db, fetcher: voaTestFetcher(), rightsPolicies: voaTestPolicies, now: () => now })
+    const original = structuredClone([...db.items.values()][0]!)
+    await runVoaCandidatePilot({ adminClient: db, rightsPolicies: voaTestPolicies, now: () => now + 1000,
+      fetcher: async request => {
+        const response = await voaTestFetcher()(request)
+        return { ...response, body: new TextEncoder().encode(new TextDecoder().decode(response.body)
+          .replace('<h2>Quiz', '<p>This dialogue recording copyright Another Author.</p><h2>Quiz')) }
+      } })
+    const revised = db.items.get(original.id)!
+    expect(revised.revision).not.toBe(original.revision)
+    const sourceId = `test-content-notice-${crypto.randomUUID()}`, syntheticOwner = crypto.randomUUID()
+    const itemId = createHash('sha256').update(sourceId).digest('hex'), segmentDigest = createHash('sha256').update(`${sourceId}:clip`).digest('hex')
+    const marker = acceptance.indexOf('  -- Full episode deletion')
+    expect(marker).toBeGreaterThan(0)
+    const beforeWithdrawal = acceptance.slice(0, marker)
+      .replace("'test-content-sql-'||replace(gen_random_uuid()::text,'-','')", sqlLiteral(sourceId))
+      .replace('owner_key uuid := gen_random_uuid()', `owner_key uuid := ${sqlLiteral(syntheticOwner)}::uuid`)
+      .replaceAll("repeat('d',64)", sqlLiteral(original.revision))
+      .replace(`item_key text:=${sqlLiteral(original.revision)}`, `item_key text:=${sqlLiteral(itemId)}`)
+      .replaceAll("repeat('e',64)", sqlLiteral(segmentDigest))
+      .replace("jsonb_build_object('guid','SYNTHETIC SQL TEST ONLY','sourceId',source_key)",
+        `jsonb_set(${sqlLiteral(JSON.stringify(original.episode))}::jsonb,'{sourceId}',to_jsonb(source_key))`)
+    expect(beforeWithdrawal).toContain(sourceId)
+    const statement = `begin; ${beforeWithdrawal}
+      if (select status from public.content_segments where id=segment_key) is distinct from 'eligible' then raise exception 'Missing synthetic baseline'; end if;
+      if (select count(*) from public.content_recommendations where segment_id=segment_key and user_id=owner_key and active) is distinct from 1 then raise exception 'Missing active synthetic recommendation'; end if;
+      response:=public.content_worker('ingest',base_args||jsonb_build_object('items',jsonb_build_array(jsonb_build_object(
+        'id',item_key,'revision',${sqlLiteral(revised.revision)},
+        'episode',jsonb_set(${sqlLiteral(JSON.stringify(revised.episode))}::jsonb,'{sourceId}',to_jsonb(source_key))))));
+      if (response->>'changed')::integer is distinct from 1 then raise exception 'Notice revision not ingested'; end if;
+      if (select status from public.content_items where id=item_key) is distinct from 'pending' then raise exception 'Notice item not pending'; end if;
+      if (select revision from public.content_items where id=item_key) is distinct from ${sqlLiteral(revised.revision)} then raise exception 'Notice revision missing'; end if;
+      if (select episode->>'licenseNotice' from public.content_items where id=item_key) is distinct from 'This dialogue recording copyright Another Author.' then raise exception 'Publisher declaration lost'; end if;
+      if (select status from public.content_segments where id=segment_key) is distinct from 'stale' then raise exception 'Old clip not withdrawn'; end if;
+      if exists(select 1 from public.content_recommendations where segment_id=segment_key and active) then raise exception 'Old recommendation still active'; end if;
+      begin
+        perform public.content_worker('playback',jsonb_build_object('ownerId',owner_key,'segmentId',segment_key));
+        raise exception 'Withdrawn clip still served';
+      exception when insufficient_privilege then null; end;
+    end $$; rollback;`
+    expect(() => sql(statement)).not.toThrow()
+    expect(sql(`select count(*) from public.content_sources where id=${sqlLiteral(sourceId)};`)).toBe('0')
+    expect(sql(`select count(*) from auth.users where id=${sqlLiteral(syntheticOwner)}::uuid;`)).toBe('0')
+  }, 30_000)
   it('passes the unchanged real RPC acceptance in a rollback-only transaction', () => {
     expect(() => sql(`begin; ${acceptance} rollback;`)).not.toThrow()
   })

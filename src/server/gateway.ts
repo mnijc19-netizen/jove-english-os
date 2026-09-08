@@ -33,21 +33,32 @@ export async function authenticatedOwner(request: Request, env: ServerEnvironmen
 }
 export async function boundedBody(request: Request, limit: number, timeoutMs = 15000): Promise<Uint8Array<ArrayBuffer>> {
   if (!Number.isSafeInteger(limit) || limit <= 0 || !Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new GatewayError(503, 'CONFIGURATION', 'The upload limit is not configured.')
+  const cancelled = () => new GatewayError(408, 'UPLOAD_INTERRUPTED', 'The upload was interrupted. Your original work is retained.')
+  // A buffered reader can win Promise.race against an already-rejected abort.
+  // Do not acquire/read a stream at all when cancellation is already known.
+  if (request.signal.aborted) throw cancelled()
   if (Number(request.headers.get('Content-Length') ?? 0) > limit) throw new GatewayError(413, 'TOO_LARGE', 'This request is too large.')
   if (!request.body) return new Uint8Array()
   const reader = request.body.getReader(), chunks: Uint8Array[] = []
   let rejectRead: ((error: GatewayError) => void) | undefined
+  let interruption: GatewayError | undefined
   const interrupted = new Promise<never>((_resolve, reject) => { rejectRead = reject })
   // Attach the handler before inspecting an already-aborted request.
   void interrupted.catch(() => undefined)
-  const abort = () => rejectRead?.(new GatewayError(408, 'UPLOAD_INTERRUPTED', 'The upload was interrupted. Your original work is retained.'))
+  const interrupt = (error: GatewayError) => { interruption ??= error; rejectRead?.(interruption) }
+  const abort = () => interrupt(cancelled())
   request.signal.addEventListener('abort', abort, { once: true })
-  const timer = setTimeout(() => rejectRead?.(new GatewayError(408, 'UPLOAD_TIMEOUT', 'The upload took too long. Your original work is retained.')), timeoutMs)
+  const timer = setTimeout(() => interrupt(new GatewayError(408, 'UPLOAD_TIMEOUT', 'The upload took too long. Your original work is retained.')), timeoutMs)
   if (request.signal.aborted) abort()
-  let length = 0
+  let length = 0, completed = false
   try {
     while (true) {
-      const { value, done } = await Promise.race([reader.read(), interrupted])
+      if (request.signal.aborted) throw cancelled()
+      if (interruption) throw interruption
+      const read = reader.read().then(part => { if (part.done) completed = true; return part })
+      const { value, done } = await Promise.race([read, interrupted])
+      if (request.signal.aborted) throw cancelled()
+      if (interruption) throw interruption
       if (done) break
       length += value.byteLength
       if (length > limit) throw new GatewayError(413, 'TOO_LARGE', 'This request is too large.')
@@ -55,7 +66,10 @@ export async function boundedBody(request: Request, limit: number, timeoutMs = 1
     }
   } finally {
     clearTimeout(timer); request.signal.removeEventListener('abort', abort)
-    void reader.cancel().catch(() => undefined); reader.releaseLock()
+    // A fully consumed multipart body is already closed. Cancelling it again
+    // can race an upstream encoder's final continuation on newer runtimes.
+    if (!completed) void reader.cancel().catch(() => undefined)
+    reader.releaseLock()
   }
   const result = new Uint8Array(length)
   let offset = 0

@@ -180,12 +180,26 @@ export const OPEN_YAP_SAMPLE_SOURCE: ContentSource = {
 export const CONTENT_SOURCES: readonly ContentSource[] = [...RSS_CONTENT_SOURCES, OPEN_YAP_SAMPLE_SOURCE]
 export const ALLOWLISTED_CONTENT_SOURCES = CONTENT_SOURCES.filter(source => source.enabled && source.rights.status === 'verified')
 
-/** Bounded first-party scene audit. These are NOT extra feeds or approved lessons. */
-export const VOA_LESSON_CANDIDATES: readonly VoaLessonContract[] = [
+/** The product's existing 17 dimensions, not a generated taxonomy or proficiency score. */
+export const CONTENT_LIFE_TASKS = ['meeting', 'small talk', 'restaurant', 'shopping', 'transport', 'airport',
+  'renting', 'landlord', 'bank', 'work', 'interview', 'clarification', 'disagreement', 'opinions', 'social',
+  'emergency', 'living abroad'] as const
+export type ContentLifeTask = typeof CONTENT_LIFE_TASKS[number]
+export type VoaPilotContract = VoaLessonContract & {
+  taskIntents: readonly ContentLifeTask[]
+  /** Reviewed publisher script snapshot only; not an audio approval or transcript alignment. */
+  dialogueScriptSha256?: string
+  /** Editorial dialogue rules, not approvals. Require both acts in an actually screened, aligned clip. */
+  dialogueRules?: readonly { tasks: readonly ContentLifeTask[]; turns: readonly [string, string]; rationale: string }[]
+}
+
+/** Bounded first-party scene audit. Intents route research; they NEVER establish task coverage. */
+export const VOA_LESSON_CANDIDATES: readonly VoaPilotContract[] = [
   { id: 'voa-lle-neighborhood', title: 'This Is My Neighborhood', mediaId: '3294378',
     pageUrl: 'https://learningenglish.voanews.com/a/lets-learn-english-lesson-11-this-is-my-neighborhood/3293986.html',
     audioUrl: 'https://voa-audio.voanews.eu/vle/2016/04/20/de238e35-97b9-4c21-81e3-e3c26fbeccaa.mp3',
     potentialTasks: ['ask for directions', 'ask for everyday help', 'neighborhood errands'],
+    taskIntents: ['transport', 'clarification'],
     limitations: ['Mentions finding a bank and getting cash, NOT opening an account or a teller transaction.',
       'Apartment location is NOT renting or negotiating a lease. No published timed captions verified.',
       'Scripted VOA teaching scene; exact audio still needs human-speech, music/third-party and timing inspection.'] },
@@ -193,6 +207,7 @@ export const VOA_LESSON_CANDIDATES: readonly VoaLessonContract[] = [
     pageUrl: 'https://learningenglish.voanews.com/a/lets-learn-english-level-2-lesson-2/3960471.html',
     audioUrl: 'https://voa-audio.voanews.eu/vle/2017/09/05/676d9800-cee0-4a59-9e79-b9378e0061ad.mp3',
     potentialTasks: ['job interview', 'discuss work skills', 'clarify an assignment'],
+    taskIntents: ['interview', 'work', 'clarification'],
     limitations: ['Comedic scripted interview is a candidate, not comprehensive job preparation or a certified real interview.',
       'Professor Bot teaching interludes may not qualify as primary human input; select only actual inspected dialogue.',
       'No published timed captions verified. Background/inserted audio rights and whole-interval alignment remain unknown.'] },
@@ -200,9 +215,44 @@ export const VOA_LESSON_CANDIDATES: readonly VoaLessonContract[] = [
     pageUrl: 'https://learningenglish.voanews.com/a/lets-learn-english-lesson-47-how-can-i-help/3737352.html',
     audioUrl: 'https://voa-audio.voanews.eu/vle/2017/03/03/8511524b-9e6f-4e73-9fa1-cd3f6b32b495.mp3',
     potentialTasks: ['offer practical help', 'ask for clarification', 'cooperate on a problem'],
+    taskIntents: ['clarification', 'social'],
     limitations: ['Contains an in-story online course and Master interlude: their exact audio ownership/music cannot be inferred from the VOA label.',
       'Not emergency assistance or verified mechanical advice. Keep disabled until exact interval rights/audio review.',
       'No published timed captions verified; page script cannot supply invented timestamps.'] },
+  { id: 'voa-lle-food-trucks', title: 'What Do You Want?', mediaId: '3437143',
+    pageUrl: 'https://learningenglish.voanews.com/a/lets-learn-english-lesson-23-what-do-you-want/3413753.html',
+    audioUrl: 'https://voa-audio.voanews.eu/vle/2016/07/27/f5ba9389-58a1-4643-9ec4-3bbfcd8c96e6.mp3',
+    potentialTasks: ['order food', 'respond to unavailable food', 'check cost and change'],
+    taskIntents: ['restaurant', 'shopping'],
+    dialogueScriptSha256: '925ee23bb85f8f6e24b4dba9420196b5d087910c72b5d36d54aa678ef6dcc99a',
+    dialogueRules: [{ tasks: ['restaurant'], turns: ['I want the chicken dish.', "We're out of chicken."],
+      rationale: 'The customer orders a specific dish and the worker responds that it is unavailable; not merely food vocabulary.' }],
+    limitations: ['Food-truck dialogue, not a complete restaurant service or general retail curriculum.',
+      'Dancing/music context requires exact interval music and third-party inspection; no clip is approved from this script.',
+      'Published player duration is not measured timing. No verified timed captions.'] },
+  { id: 'voa-lle-disagreement', title: "Let's Agree to Disagree", mediaId: '3601381',
+    pageUrl: 'https://learningenglish.voanews.com/a/lets-learn-english-lesson-37-lets-agree-to-disagree/3574029.html',
+    audioUrl: 'https://voa-audio.voanews.eu/vle/2016/11/17/a0f8f1e0-4d24-425c-8db5-0322d86f3de9.mp3',
+    potentialTasks: ['express a preference with reasons', 'politely disagree', 'discuss city and country life'],
+    taskIntents: ['disagreement', 'opinions', 'small talk', 'social'],
+    dialogueScriptSha256: 'd6201a804e87c6058050b4fee49ecb67bd1d0122b893f1c53fdd6889c81ba9d8',
+    dialogueRules: [{ tasks: ['disagreement', 'opinions'], turns: ['I think city people are rude.', "But I don't think city people are rude."],
+      rationale: 'One participant expresses a judgment and the other explicitly contests it; the negation must be retained.' }],
+    limitations: ['Preferences about living in a city are NOT a lease, landlord conversation or immigration procedure.',
+      'Scripted teaching scene, not spontaneous-conversation or General American certification.',
+      'No verified timed captions; human speech, music and third-party audio remain uninspected.'] },
+  { id: 'voa-lle-plan-b', title: 'Time for Plan B', mediaId: '3681422',
+    pageUrl: 'https://learningenglish.voanews.com/a/lets-learn-english-lesson-43-time-for-plan-b/3666458.html',
+    audioUrl: 'https://voa-audio.voanews.eu/vle/2017/01/18/b97c84f3-f68d-4b35-bf71-9c369a107e82.mp3',
+    potentialTasks: ['ask friends for practical help after losing a wallet', 'respond to unavailable help'],
+    taskIntents: ['social'],
+    dialogueScriptSha256: 'f3fd277cc3667117a0a556a9217f6bc95654c9f5704600cab4a6eb8e70c5760c',
+    dialogueRules: [{ tasks: ['social'], turns: ['would you be able to come downtown?', "I'm babysitting."],
+      rationale: 'A caller requests practical help and the friend explains their unavailability; this is not an emergency-services exchange.' }],
+    limitations: ['Urgent personal help is NOT verified police/fire/medical emergency task coverage.',
+      'A friend being at an airport does NOT establish check-in, security or gate dialogue.',
+      'The ending contains singing: exclude song/music and unclear third-party intervals after actual listening.',
+      'No verified timed captions or acoustic approval.'] },
 ]
 
 /** Bounded research queue, NOT ingestion configuration or approval. Never synthesize an RSS URL for these sites. */
