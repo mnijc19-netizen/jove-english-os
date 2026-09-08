@@ -13,6 +13,7 @@ export default defineConfig({
   expect: { timeout: 10000 },
   fullyParallel: false,
   retries: process.env.CI ? 1 : 0,
+  failOnFlakyTests: !!process.env.CI,
   workers: 1,
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
