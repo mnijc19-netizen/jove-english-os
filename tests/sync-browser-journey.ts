@@ -257,6 +257,172 @@ describe('dedicated local browser account/reset/offline sync journeys', enabled,
       }
     })
   }
+  async function readingConflictJourney(a: Page, b: Page, owner: string) {
+    async function settings(page: Page) {
+      const requests: string[] = []
+      const failed = (request: import('@playwright/test').Request) => {
+        const path = new URL(request.url()).pathname
+        if (!path.startsWith('/jove-english-os/')) return
+        requests.push(path.endsWith('/Settings.vue') ? 'settings-module' : path === '/jove-english-os/' ? 'dev-shell' : 'other-app-module')
+      }
+      page.on('requestfailed', failed)
+      try {
+        // Exercise the user's in-app route and its real save-before-leave guard.
+        await page.getByRole('link', { name: 'Settings', exact: true }).click()
+        await browserExpect(page.getByRole('heading', { level: 1, name: 'A few thoughtful settings.', exact: true })).toBeVisible()
+      } catch {
+        const state = await page.evaluate(() => ({ online: navigator.onLine, shell: !!document.querySelector('.app-shell'),
+          fatal: !!document.querySelector('.fatal'), boot: !!document.querySelector('.boot'), reading: !!document.getElementById('reading-response'),
+          settingsHeading: document.querySelector('h1')?.textContent?.replace(/\s+/g, ' ').trim() === 'A few thoughtful settings.',
+          settingsRoute: location.hash === '#/settings' }))
+        throw new Error('Reading route did not reach Settings: ' + JSON.stringify({ state, requests }))
+      } finally { page.off('requestfailed', failed) }
+    }
+    const fixture = await a.evaluate(async () => {
+      const nativeImport = new Function('path', 'return import(path)')
+      const { db } = await nativeImport('/jove-english-os/src/db/db.ts')
+      const { useApp } = await nativeImport('/jove-english-os/src/stores/app.ts')
+      const source = await db.materials.toCollection().first(), now = Date.now(), date = new Date(now).toLocaleDateString('en-CA')
+      if (!source) throw new Error('Missing local reading material')
+      const taskId = `${date}:learn:${source.id}:reading`, sessionId = `reading:${taskId}`
+      // Synthetic assignments; the completion below comes from actual UI work.
+      await db.profiles.update('main', { dailyMinutes: 45, fatigue: 0 })
+      await db.plans.put({ id: date, date, minutes: 45, focus: 'reading', createdAt: now, evidenceFingerprint: 'browser-reading-conflict', tasks: [
+        { id: taskId, kind: 'learn', title: 'Read something worth sharing', materialId: source.id, minutes: 9, done: false, reason: 'Shared original assignment' },
+        { id: `${date}:speak:browser-reading-next`, kind: 'speak', title: 'Say it in your own words', minutes: 36, done: false, reason: 'Shared next assignment' },
+      ] })
+      await db.sessions.put({ id: sessionId, kind: 'reading', materialId: source.id, startedAt: now, stage: 'respond',
+        draft: { passage: source.transcript, stage: 'respond', activeMs: 0, response: '', submittedResponse: '', retell: '', audioId: '' } })
+      await db.events.put({ id: `started:${taskId}`, type: 'TASK_STARTED', source: 'objective', timestamp: now,
+        data: { taskId, materialId: source.id, kind: 'reading' } })
+      await useApp().refresh()
+      return { materialId: source.id, taskId, sessionId, date }
+    })
+    await sync(a); await sync(b); await sync(a)
+    const route = appURL + `#/learn?mode=reading&task=${encodeURIComponent(fixture.taskId)}&material=${encodeURIComponent(fixture.materialId)}`
+    for (const page of [a, b]) {
+      // This Auth/journal test serves dev modules, without the built PWA cache.
+      // Visit the offline destination in this document before partitioning;
+      // production shell/route precaching is covered by the built-app suite.
+      await settings(page)
+      await page.goto(route)
+      await browserExpect(page.locator('#reading-response')).toBeVisible()
+    }
+    // Let the real component normalize the shared draft before partitioning.
+    await sync(a); await sync(b); await sync(a)
+    await Promise.all([a, b].map(page => setDisconnected(page.context(), true)))
+    const submitted = 'My first device saved the meaning in a complete response.'
+    const retell = 'I can explain the situation and describe a useful next step.'
+    const unsent = 'My other device has an unfinished answer that must stay recoverable.'
+    await a.locator('#reading-response').fill(submitted)
+    await a.locator('#reading-retell').fill(retell)
+    await a.getByRole('button', { name: 'Save reading & retell', exact: true }).click()
+    try { await browserExpect(a.getByRole('button', { name: 'Continue to next task', exact: true })).toBeVisible() }
+    catch {
+      // Offline diagnostics use native IDB, not a new dev-module HTTP import.
+      // Emit only booleans/counts/known stages; never owner, input or Auth data.
+      const facts = await a.evaluate(async ({ fixture, submitted, retell }) => {
+        const database = await new Promise<IDBDatabase>((resolve, reject) => {
+          const request = indexedDB.open('jove-english-os'); request.onsuccess = () => resolve(request.result); request.onerror = () => reject()
+        })
+        try {
+          const read = <T>(table: string): Promise<T[]> => new Promise((resolve, reject) => {
+            const request = database.transaction(table).objectStore(table).getAll()
+            request.onsuccess = () => resolve(request.result); request.onerror = () => reject()
+          })
+          const sessions = await read<{ id: string; kind: string; stage: string; draft: { response?: string; submittedResponse?: string; retell?: string } }>('sessions')
+          const events = await read<{ type: string; sessionId?: string; data?: { taskId?: string } }>('events')
+          const plans = await read<{ id: string; tasks: { id: string; minutes: number; done: boolean; optional?: boolean }[] }>('plans')
+          const root = sessions.find(row => row.id === fixture.sessionId), task = plans.find(row => row.id === fixture.date)?.tasks.find(row => row.id === fixture.taskId)
+          const error = [...document.querySelectorAll('.error')].map(node => node.textContent ?? '').join(' ')
+          return { stage: ['ready', 'reading', 'respond', 'saved'].includes(root?.stage ?? '') ? root!.stage : 'unknown',
+            responseSaved: root?.draft.response === submitted, submittedSaved: root?.draft.submittedResponse === submitted, retellSaved: root?.draft.retell === retell,
+            separateLocalCopy: sessions.some(row => row.kind === 'reading-conflict' && row.draft.response === submitted),
+            responseEvents: events.filter(row => row.sessionId === fixture.sessionId && row.type === 'READING_RESPONSE').length,
+            retellEvents: events.filter(row => row.sessionId === fixture.sessionId && row.type === 'READING_RETELL').length,
+            completions: events.filter(row => row.type === 'TASK_COMPLETED' && row.data?.taskId === fixture.taskId).length,
+            taskFound: !!task, taskDone: task?.done ?? false, taskMinutes: task?.minutes ?? 0,
+            conflictNotice: error.includes('Another device updated'), saveFailure: /Could not.*sav/i.test(error) }
+        } finally { database.close() }
+      }, { fixture, submitted, retell })
+      throw new Error('Reading submission did not release continuation: ' + JSON.stringify(facts))
+    }
+    const originalEvents = await a.evaluate(async fixture => {
+      const path = '/jove-english-os/src/db/db.ts', { db } = await new Function('path', 'return import(path)')(path)
+      return (await db.events.toArray()).filter((event: { type: string; sessionId?: string; data?: { taskId?: string } }) =>
+        event.sessionId === fixture.sessionId && ['READING_RESPONSE', 'READING_RETELL'].includes(event.type)
+        || event.type === 'TASK_COMPLETED' && event.data?.taskId === fixture.taskId)
+        .sort((left: { id: string }, right: { id: string }) => left.id.localeCompare(right.id))
+    }, fixture)
+    expect(originalEvents).toHaveLength(3)
+    await b.locator('#reading-response').fill(unsent)
+    await browserExpect.poll(() => b.evaluate(async sessionId => {
+      const path = '/jove-english-os/src/db/db.ts', { db } = await new Function('path', 'return import(path)')(path)
+      return (await db.sessions.get(sessionId))?.draft.response
+    }, fixture.sessionId)).toBe(unsent)
+    // Hash routing preserves the loaded app while offline and flushes the drafts.
+    for (const page of [a, b]) await settings(page)
+    const beforeReconnect = await admin.from('sync_operations').select('id').eq('user_id', owner)
+      .eq('entity_type', 'events').eq('entity_id', `completed:${fixture.taskId}`)
+    expect(beforeReconnect.error).toBeNull(); expect(beforeReconnect.data).toEqual([])
+    await Promise.all([a, b].map(page => setDisconnected(page.context(), false)))
+    await sync(a); await sync(b); await sync(a)
+    for (const page of [a, b]) {
+      const merged = await page.evaluate(async fixture => {
+        const nativeImport = new Function('path', 'return import(path)'), { db } = await nativeImport('/jove-english-os/src/db/db.ts')
+        const { useApp } = await nativeImport('/jove-english-os/src/stores/app.ts')
+        await useApp().refresh()
+        const plan = useApp().plan, root = await db.sessions.get(fixture.sessionId)
+        return { response: root?.draft.submittedResponse, retell: root?.draft.retell,
+          task: plan.tasks.find((task: { id: string }) => task.id === fixture.taskId), minutes: plan.minutes,
+          remaining: plan.tasks.filter((task: { done: boolean; optional?: boolean }) => !task.done && !task.optional)
+            .reduce((sum: number, task: { minutes: number }) => sum + task.minutes, 0),
+          completions: (await db.events.toArray()).filter((event: { type: string; data?: { taskId?: string } }) =>
+            event.type === 'TASK_COMPLETED' && event.data?.taskId === fixture.taskId).length,
+          conflicts: (await db.sessions.where('kind').equals('reading-conflict').toArray())
+            .filter((session: { draft: { syncRecovery?: { rootSessionId?: string } } }) => session.draft.syncRecovery?.rootSessionId === fixture.sessionId)
+            .map((session: { draft: { response?: string } }) => session.draft.response) }
+      }, fixture)
+      expect(merged.response).toBe(submitted); expect(merged.retell).toBe(retell)
+      expect(merged.task).toMatchObject({ id: fixture.taskId, materialId: fixture.materialId, done: true, minutes: 9 })
+      expect(merged.minutes).toBeLessThanOrEqual(45); expect(merged.remaining).toBeLessThanOrEqual(36)
+      expect(merged.completions).toBe(1); expect(merged.conflicts).toEqual([unsent])
+    }
+    await b.goto(route)
+    await b.getByRole('button', { name: 'Continue editing saved draft', exact: true }).click()
+    await browserExpect(b.locator('#reading-response')).toHaveValue(unsent)
+    await browserExpect(b.locator('#reading-retell')).toHaveValue('')
+    await b.locator('#reading-retell').fill('I continued the unfinished draft without changing my original submission.')
+    await b.getByRole('button', { name: 'Save reading & retell', exact: true }).click()
+    await browserExpect(b.getByText('Saved. Ready to reflect on the meaning.', { exact: true })).toBeVisible()
+    await settings(b); await sync(b); await sync(a)
+    await a.goto(route); await a.reload()
+    await a.getByRole('button', { name: 'Open recovered practice', exact: true }).click()
+    await browserExpect(a.getByText('Saved. Ready to reflect on the meaning.', { exact: true })).toBeVisible()
+    for (const page of [a, b]) {
+      const restored = await page.evaluate(async fixture => {
+        const path = '/jove-english-os/src/db/db.ts', { db } = await new Function('path', 'return import(path)')(path)
+        const recovered = (await db.sessions.where('kind').equals('reading-recovery').toArray())
+          .filter((session: { draft: { syncRecovery?: { rootSessionId?: string } } }) => session.draft.syncRecovery?.rootSessionId === fixture.sessionId)
+        const events = await db.events.toArray(), root = await db.sessions.get(fixture.sessionId)
+        return { count: recovered.length, response: recovered[0]?.draft.submittedResponse,
+          original: root?.draft.submittedResponse, retell: root?.draft.retell,
+          originalEvents: events.filter((event: { type: string; sessionId?: string; data?: { taskId?: string } }) =>
+            event.sessionId === fixture.sessionId && ['READING_RESPONSE', 'READING_RETELL'].includes(event.type)
+            || event.type === 'TASK_COMPLETED' && event.data?.taskId === fixture.taskId)
+            .sort((left: { id: string }, right: { id: string }) => left.id.localeCompare(right.id)),
+          invented: events.some((event: { type: string; sessionId?: string; skill?: string; score?: number; data?: { taskId?: string; assessmentId?: string } }) =>
+            event.sessionId === recovered[0]?.id && (event.score !== undefined || event.skill !== undefined || event.data?.taskId || event.data?.assessmentId
+              || ['TASK_COMPLETED', 'ASSESSMENT_COMPLETED'].includes(event.type))) }
+      }, fixture)
+      expect(restored).toEqual({ count: 1, response: unsent, original: submitted, retell, originalEvents, invented: false })
+    }
+    const uploaded = await admin.from('sync_operations').select('id').eq('user_id', owner)
+      .eq('entity_type', 'events').eq('entity_id', `completed:${fixture.taskId}`)
+    expect(uploaded.error).toBeNull(); expect(uploaded.data).toHaveLength(1)
+    await settings(a); await settings(b)
+    await sync(a); await sync(b)
+  }
   for (const engine of engines) it(engine + ': real OTP, two offline profiles, verified audio, safe reset/restore, reload and member isolation', async () => {
     failures.length = 0; transportFailures.length = 0
     if (!['chromium', 'firefox', 'webkit'].includes(engine)) throw new Error('Unknown local browser engine')
@@ -326,6 +492,8 @@ describe('dedicated local browser account/reset/offline sync journeys', enabled,
       await sync(a); await sync(b); await sync(a)
       stage = 'cross-device Review counter collision and durable rebased attempt'
       await reviewJourney(a, b, fixture.owner)
+      stage = 'cross-device reading submission, unsent recovery and completed-plan budget'
+      await readingConflictJourney(a, b, fixture.owner)
       const left = await state(a), right = await state(b)
       expect(left.events).toHaveLength(2); expect(right.events).toEqual(left.events)
       expect(right.draft).toEqual(left.draft); expect(right.bytes).toEqual([82,73,70,70,1,2,3,4])

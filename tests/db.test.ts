@@ -4,9 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createEmptyCard, fsrs, Rating } from 'ts-fsrs'
 import { db, JoveDatabase, version1Stores } from '../src/db/db'
 import { addChunk, exportBackup, initialize, rebuildSkills, recordEvent, recordRepairAttempt, restoreBackup, reviewCard, saveError, REPAIR_RETEST_DELAY, REPAIR_TRANSFER_DELAY } from '../src/db/repository'
-import { aggregateSkills } from '../src/domain/engine'
+import { aggregateSkills, makePlan } from '../src/domain/engine'
 import { demoMaterials } from '../src/content/materials'
-import { modalities } from '../src/db/schema'
+import { modalities, planSchema } from '../src/db/schema'
 import { defaultProfile, type AudioAsset, type Chunk, type StudyEvent } from '../src/domain/types'
 
 const now = Date.UTC(2026, 8, 7, 4)
@@ -377,6 +377,39 @@ describe('repair retests and review submission concurrency', () => {
 })
 
 describe('allowlisted, atomic backup/restore', () => {
+  it('round-trips original required tasks and optional full-duration drafts without changing legacy records', async () => {
+    await initialize([seed])
+    const legacy = makePlan({ ...defaultProfile(), onboarded: true }, [], [], [], [seed], undefined, now)
+    expect(planSchema.parse(legacy)).toEqual(legacy)
+    expect(legacy.tasks.every(task => !Object.hasOwn(task, 'optional'))).toBe(true)
+    const reading = legacy.tasks.find(task => task.id.endsWith(':reading'))!
+    const optional = { ...reading, id: `${reading.id}:other-device`, minutes: 9, optional: true }
+    const complete = { ...legacy, tasks: [...legacy.tasks.map(task => ({ ...task, done: true })), optional] }
+    expect(planSchema.parse(complete)).toEqual(complete)
+    await db.plans.put(complete)
+    const draft = { id: `reading:${optional.id}`, kind: 'reading', materialId: seed.id, startedAt: now, stage: 'respond',
+      draft: { taskId: optional.id, response: 'The original unfinished response.', retell: 'The original unfinished retell.' } }
+    await db.sessions.put(draft)
+    const backup = await exportBackup()
+    await restoreBackup(backup)
+    expect(await db.plans.get(complete.id)).toEqual(complete)
+    expect(await db.sessions.get(draft.id)).toEqual(draft)
+    expect(await db.events.count()).toBe(0)
+    for (const invalid of [{ ...optional, minutes: 0 }, { ...optional, optional: 'true' }]) {
+      expect(planSchema.safeParse({ ...complete, tasks: [...complete.tasks.slice(0, -1), invalid] }).success).toBe(false)
+    }
+    const onlyOptional = { ...legacy, minutes: 0, tasks: [optional] }
+    await db.plans.put(onlyOptional)
+    await restoreBackup(await exportBackup())
+    expect(await db.plans.get(legacy.id)).toEqual(onlyOptional)
+    expect(await db.sessions.get(draft.id)).toEqual(draft)
+    expect(await db.events.count()).toBe(0)
+    expect(planSchema.safeParse({ ...onlyOptional, tasks: [{ ...optional, optional: false }] }).success).toBe(false)
+    expect(planSchema.safeParse({ ...onlyOptional, tasks: [] }).success).toBe(false)
+    const oldBackup = readJson(backup); oldBackup.tables.plans = [legacy]
+    await restoreBackup(JSON.stringify(oldBackup))
+    expect(await db.plans.get(legacy.id)).toEqual(legacy)
+  })
   it('round-trips legacy and new optional rubric scores while rejecting unknown rubric fields', async () => {
     await initialize([])
     const evaluation = { summary: 'Language feedback', strengths: [], errors: [], comprehension: null, accuracy: 0.8, fluency: null, successfulChunks: [], nextPrompt: 'Try a new situation.' }

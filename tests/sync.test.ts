@@ -4,7 +4,9 @@ import { createEmptyCard, fsrs, type Card } from 'ts-fsrs'
 import Dexie from 'dexie'
 import { createClient } from '@supabase/supabase-js'
 import { db as repositoryDatabase, JoveDatabase, version1Stores } from '../src/db/db'
-import { defaultProfile, defaultSettings, type Chunk, type StudyEvent } from '../src/domain/types'
+import { defaultProfile, defaultSettings, type Chunk, type StudyEvent, type Material, type DailyPlan } from '../src/domain/types'
+import { makePlan } from '../src/domain/engine'
+import { planSchema } from '../src/db/schema'
 import { canonical, changedFields, eventOccurrenceKey, isPrivateAudio, parseOperation, projectOperations, withoutCacheAudioReferences, type RecordValue, type StoredOperation, type SyncOperation } from '../src/sync/protocol'
 import { SyncJournal, resolveEventAliases } from '../src/sync/journal'
 import { restoreReviewAttempt, reviewAttempt, reviewAttemptCompleted, selectedReviewCard } from '../src/sync/review'
@@ -664,7 +666,66 @@ describe('review regressions: fields, deletions and dependency closure', () => {
     const short = { ...base, minutes: 45, tasks: [{ ...base.tasks[0], minutes: 45, done: true }] }
     const renamed = { ...base, tasks: [{ ...base.tasks[0], title: 'New lesson' }] }
     const result = await projectOperations([op('plans', base), op('plans', short, 2, deviceB, base), op('plans', renamed, 3, deviceA, base)])
-    expect(result.records.plans[0]).toMatchObject({ minutes: 90, tasks: [{ title: 'New lesson', minutes: 90, done: true }] })
+    // A later recommendation cannot rewrite the duration or identity of completed work.
+    expect(result.records.plans[0]).toMatchObject({ minutes: 45, tasks: [{ title: 'Listen', minutes: 45, done: true }] })
+  })
+  it.each(['completed', 'completion-event-only', 'started', 'draft-only', 'quota-completed', 'quota-events-only'] as const)('retains an actual offline %s reading assignment after another device replans', async state => {
+    const completed = state === 'completed' || state === 'completion-event-only'
+    const quotaComplete = state === 'quota-completed' || state === 'quota-events-only'
+    const at = new Date(2026, 8, 8, 12).getTime()
+    const materials: Material[] = ['reader-a', 'reader-b'].map(id => ({ id, title: id, topic: 'Everyday life', difficulty: 0.25,
+      duration: 60, transcript: 'A friend asks a question about a story. They share a useful idea and listen carefully.',
+      sentences: ['A friend asks a question about a story.', 'They share a useful idea and listen carefully.'],
+      sourceKind: 'curated', sourceLabel: 'Synthetic regression fixture', synthetic: true, approved: true,
+      question: 'What do they share?', answer: 'An idea', keywords: [],
+      chunks: [{ text: 'a useful idea', meaningEn: 'a helpful thought', meaningZh: '', example: 'Please share a useful idea.' }], createdAt: at - 1000 }))
+    const profile = { ...defaultProfile(), onboarded: true, dailyMinutes: 45 as const, fatigue: 0, createdAt: at - 1000 }
+    const initial = makePlan(profile, [], [], [], materials, undefined, at)
+    const reading = initial.tasks.find(task => task.id.endsWith(':reading'))!
+    const changedProfile = { ...profile, interests: [reading.materialId!] }
+    // saveProfile discards only this device's unstarted assignments, then uses the real planner.
+    const other = makePlan(changedProfile, [], [], [], materials, { ...initial, tasks: [] }, at + 1)
+    if (state === 'quota-completed') other.tasks = other.tasks.map(task => ({ ...task, done: true }))
+    expect(other.tasks.find(task => task.id.endsWith(':reading'))!.id).not.toBe(reading.id)
+    expect(reading.minutes).toBe(9)
+    const own = { ...initial, tasks: initial.tasks.map(task => ({ ...task, done: state === 'completed' && task.id === reading.id })) }
+    const draft = { id: `reading:${reading.id}`, kind: 'reading', materialId: reading.materialId, startedAt: at,
+      stage: 'respond', draft: { response: 'An original unfinished response', retell: 'An original unfinished retell' } }
+    const facts: StudyEvent[] = state === 'draft-only' ? [] : [{ id: `started:${reading.id}`, type: 'TASK_STARTED', source: 'objective', timestamp: at,
+      data: { taskId: reading.id, kind: 'reading', materialId: reading.materialId! } }]
+    if (completed) facts.push({ id: `completed:${reading.id}`, type: 'TASK_COMPLETED', source: 'objective', timestamp: at + 1,
+      data: { taskId: reading.id, kind: 'reading', materialId: reading.materialId!, minutes: reading.minutes } })
+    if (quotaComplete) facts.push(...other.tasks.map(task => ({ id: `completed:${task.id}`, type: 'TASK_COMPLETED', source: 'objective' as const, timestamp: at + 1,
+      data: { taskId: task.id, kind: task.kind, minutes: task.minutes } })))
+    const history = [...materials.map(row => op('materials', row as unknown as RecordValue)), op('plans', initial as unknown as RecordValue),
+      ...(state === 'completed' ? [op('plans', own as unknown as RecordValue, 2, deviceA, initial as unknown as RecordValue)] : []),
+      op('sessions', draft, 2), ...facts.map((row, i) => op('events', row as unknown as RecordValue, i + 3)),
+      op('plans', other as unknown as RecordValue, 6, deviceB, initial as unknown as RecordValue)]
+    const projection = await projectOperations(history)
+    const merged = planSchema.parse(projection.records.plans[0])
+    expect(merged.tasks.find(task => task.id === reading.id)).toMatchObject({ id: reading.id, materialId: reading.materialId, done: completed })
+    expect(merged.minutes).toBeLessThanOrEqual(45)
+    const next = makePlan(changedProfile, projection.skills, [], projection.records.events as unknown as StudyEvent[], materials, merged, at + 2)
+    expect(next.tasks.find(task => task.id === reading.id)).toMatchObject({ materialId: reading.materialId, done: completed })
+    expect(next.tasks.filter(task => !task.done && !task.optional).reduce((sum, task) => sum + task.minutes, 0)).toBeLessThanOrEqual(quotaComplete ? 0 : completed ? 36 : 45)
+    if (quotaComplete) {
+      expect(merged.minutes).toBe(45)
+      expect(merged.tasks.find(task => task.id === reading.id)).toEqual({ ...reading, optional: true })
+      expect(next.tasks.find(task => task.id === reading.id)).toEqual({ ...reading, optional: true })
+      expect(next.tasks.filter(task => !task.optional).every(task => task.done)).toBe(true)
+      expect(next.minutes).toBe(45)
+    }
+    expect(next.tasks.every(task => task.minutes > 0)).toBe(true)
+    expect(projection.records.sessions).toEqual([draft])
+    expect(projection.records.events).toHaveLength(facts.length)
+    expect(projection.records.cards).toEqual([])
+    expect(canonical(await projectOperations([...history].reverse()))).toBe(canonical(projection))
+    // Actual journal pages: the replacement arrives before the delayed evidence/history.
+    const { db, journal } = await local()
+    const paged = [...history].reverse().map((row, i) => ({ ...row, cursor: i + 20, receivedAt: at + 10 }))
+    for (const row of paged) await journal.merge([row], row.cursor)
+    expect(await db.plans.get(initial.id)).toEqual(merged as DailyPlan)
+    expect(await db.sessions.get(draft.id)).toEqual(draft)
   })
   it('converges for every pagination partition of a six-operation edit/delete/recreation history', async () => {
     const base = draft(), answer = { ...base, draft: { answer: 'one' } }, recreated = { ...base, draft: { answer: 'two' } }
@@ -683,6 +744,195 @@ describe('review regressions: fields, deletions and dependency closure', () => {
       expect(await db.events.toArray()).toEqual(expected.records.events)
       expect((await journal.pending()).filter(row => row.entityType === 'sessions' || row.entityType === 'events')).toEqual([])
     }
+  })
+  it.each(['plan-and-events', 'events-only'])('never relabels completed required 45 minutes as optional after a remote 15-minute replan (%s)', async completion => {
+    const at = new Date(2026, 8, 8, 12).getTime()
+    const materials: Material[] = ['reader-a', 'reader-b'].map(id => ({ id, title: id, topic: 'Everyday life', difficulty: 0.25,
+      duration: 60, transcript: 'A friend asks a question about a story.', sentences: ['A friend asks a question about a story.'],
+      sourceKind: 'curated', sourceLabel: 'Synthetic regression fixture', synthetic: true, approved: true,
+      question: 'What do they share?', answer: 'An idea', keywords: [], chunks: [], createdAt: at - 1000 }))
+    const profile = { ...defaultProfile(), onboarded: true, dailyMinutes: 45 as const, fatigue: 0, createdAt: at - 1000 }
+    const initial = makePlan(profile, [], [], [], materials, undefined, at)
+    const completed = { ...initial, tasks: initial.tasks.map(task => ({ ...task, done: true })) }
+    const events: StudyEvent[] = initial.tasks.map((task, i) => ({ id: `completed:${task.id}`, type: 'TASK_COMPLETED', source: 'objective', timestamp: at + i,
+      data: { taskId: task.id, kind: task.kind, minutes: task.minutes } }))
+    const changed = { ...profile, dailyMinutes: 15, interests: [initial.tasks.find(task => task.id.endsWith(':reading'))!.materialId!] }
+    const other = makePlan(changed, [], [], [], materials, { ...initial, tasks: [] }, at + 100)
+    expect(initial.minutes).toBe(45); expect(other.minutes).toBe(15)
+    const history = [...materials.map(row => op('materials', row as unknown as RecordValue)), op('plans', initial as unknown as RecordValue),
+      ...(completion === 'plan-and-events' ? [op('plans', completed as unknown as RecordValue, 2, deviceA, initial as unknown as RecordValue)] : []),
+      ...events.map((row, i) => op('events', row as unknown as RecordValue, i + 3)), op('plans', other as unknown as RecordValue, 20, deviceB, initial as unknown as RecordValue)]
+    const projection = await projectOperations(history), merged = planSchema.parse(projection.records.plans[0])
+    expect(merged.tasks.filter(task => task.done && !task.optional).reduce((sum, task) => sum + task.minutes, 0)).toBe(45)
+    expect(merged.tasks.some(task => task.optional)).toBe(false)
+    const next = makePlan(changed, projection.skills, [], projection.records.events as unknown as StudyEvent[], materials, merged, at + 200)
+    expect(next.minutes).toBe(45)
+    expect(next.tasks.every(task => task.done && !task.optional)).toBe(true)
+    for (const task of completed.tasks) expect(next.tasks.find(row => row.id === task.id)).toEqual(task)
+    expect(planSchema.safeParse(next).success).toBe(true)
+    expect(canonical(await projectOperations([...history].reverse()))).toBe(canonical(projection))
+    const { db, journal } = await local()
+    for (const [i, row] of [...history].reverse().entries()) await journal.merge([{ ...row, cursor: i + 100, receivedAt: at + 200 }], i + 100)
+    expect(await db.plans.get(initial.id)).toEqual(merged)
+    expect((await db.events.toArray()).sort((a, b) => a.id.localeCompare(b.id))).toEqual([...events].sort((a, b) => a.id.localeCompare(b.id)))
+  })
+  it('projects a valid legacy plan with only an oversized optional original without inventing a zero-minute task', async () => {
+    const task = { id: '2026-09-08:listen:original', kind: 'listen' as const, title: 'Original begun lesson', minutes: 45, done: false, reason: 'Original assignment' }
+    const initial = { id: '2026-09-08', date: '2026-09-08', minutes: 45, focus: 'naturalListening', createdAt: now, tasks: [task], evidenceFingerprint: 'legacy' }
+    const other = { ...initial, minutes: 15, tasks: [{ ...task, id: '2026-09-08:listen:other', minutes: 15 }] }
+    const started: StudyEvent = { id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective', timestamp: now, data: { taskId: task.id, kind: task.kind } }
+    const history = [op('plans', initial), op('events', started as unknown as RecordValue, 2), op('plans', other, 3, deviceB, initial)]
+    const result = await projectOperations(history), plan = planSchema.parse(result.records.plans[0])
+    expect(plan).toMatchObject({ minutes: 0, tasks: [{ ...task, optional: true }] })
+    expect(result.records.events).toEqual([started])
+    expect(canonical(await projectOperations([...history].reverse()))).toBe(canonical(result))
+    const { db, journal } = await local()
+    for (const [i, row] of [...history].reverse().entries()) await journal.merge([receipt(row, i + 10)], i + 10)
+    expect(await db.plans.get(initial.id)).toEqual(plan)
+    expect(await db.events.toArray()).toEqual([started])
+  })
+})
+
+describe('reading submission and recoverable conflict frontiers', () => {
+  const material = { id: 'conflict-reader', title: 'A short story', topic: 'Life', difficulty: 0.25, duration: 60,
+    transcript: 'Friends tell a story.', sentences: ['Friends tell a story.'], sourceKind: 'curated', sourceLabel: 'Synthetic fixture',
+    synthetic: true, approved: true, question: 'Who?', answer: 'Friends', keywords: [], chunks: [], createdAt: now }
+  const base = { id: 'reading:assignment', kind: 'reading', materialId: material.id, startedAt: now, stage: 'respond',
+    draft: { passage: material.transcript, response: '', retell: '', submittedResponse: '', activeMs: 4000 } }
+  const saved = { ...base, completedAt: now + 1, stage: 'saved', draft: { ...base.draft,
+    response: 'A genuine response.', submittedResponse: 'A genuine response.', retell: 'A genuine retell.', observationAt: now } }
+  const evidence = ['response', 'retell'].map(kind => ({ id: `${base.id}:${kind}`, type: kind === 'response' ? 'READING_RESPONSE' : 'READING_RETELL',
+    timestamp: now, source: 'text', sessionId: base.id, data: { materialId: material.id, response: kind === 'response' ? saved.draft.submittedResponse : saved.draft.retell } }))
+  const sourceHistory = () => [op('materials', material), op('sessions', base), op('sessions', saved, 3, deviceA, base), ...evidence.map(row => op('events', row, 4))]
+  it('does not attest an earlier torn saved snapshot with response and retell from different actual submission times', async () => {
+    const a = { ...saved, draft: { ...saved.draft, observationAt: now + 10 } }
+    const b = { ...saved, draft: { ...saved.draft, response: 'Actual response B.', submittedResponse: 'Actual response B.', retell: 'Actual retell B.', observationAt: now + 20 } }
+    const torn = { ...a, draft: { ...a.draft, retell: b.draft.retell } }
+    const proof = (row: typeof a, device: string) => ['response', 'retell'].map((kind, i) => op('events', {
+      id: `${base.id}:${kind}`, type: kind === 'response' ? 'READING_RESPONSE' : 'READING_RETELL', source: 'text', sessionId: base.id,
+      timestamp: row.draft.observationAt, data: { materialId: material.id, response: kind === 'response' ? row.draft.submittedResponse : row.draft.retell },
+    }, 10 + i, device))
+    const history = [op('materials', material), op('sessions', base), op('sessions', torn, 2, '00000000-0000-4000-8000-000000000003', base),
+      op('sessions', a, 3, deviceA, base), op('sessions', b, 4, deviceB, base), ...proof(a, deviceA), ...proof(b, deviceB)]
+    const result = await projectOperations(history)
+    expect(result.records.sessions.find(row => row.id === base.id)?.draft).toMatchObject(a.draft)
+    expect(result.records.events).toHaveLength(4)
+    expect(canonical(await projectOperations([...history].reverse()))).toBe(canonical(result))
+    const { db, journal } = await local()
+    for (const [i, row] of [...history].reverse().entries()) await journal.merge([{ ...row, cursor: i + 100, receivedAt: now + 100 }], i + 100)
+    expect((await db.sessions.get(base.id))?.draft).toMatchObject(a.draft)
+  })
+  it.each(['reading', 'reading-recovery'])('keeps response-only concurrent unsent edits in %s discoverable', async kind => {
+    const seed = { ...base, kind, draft: { ...base.draft, ...(kind === 'reading-recovery' ? { syncRecovery: { rootSessionId: 'reading:original' } } : {}) } }
+    const a = { ...seed, draft: { ...seed.draft, response: 'A independently typed response without a retell yet.' } }
+    const b = { ...seed, draft: { ...seed.draft, response: 'B independently typed response without a retell yet.' } }
+    const history = [op('materials', material), op('sessions', seed), op('sessions', a, 2, deviceA, seed), op('sessions', b, 3, deviceB, seed)]
+    const final = await projectOperations(history)
+    expect(final.records.sessions.find(row => row.id === seed.id)?.draft).toMatchObject({ response: b.draft.response })
+    expect(final.records.sessions.find(row => row.kind === 'reading-conflict')?.draft).toMatchObject({ response: a.draft.response })
+    expect(final.records.sessions).toHaveLength(2)
+    expect(canonical(await projectOperations([...history].reverse()))).toBe(canonical(final))
+  })
+  it.each(['reading', 'reading-recovery'])('does not turn a causally inherited %s draft into an extra recovery obligation', async kind => {
+    const seed = { ...base, kind }, a = { ...seed, draft: { ...seed.draft, response: 'A original unsent response.' } }
+    const b = { ...a, draft: { ...a.draft, retell: 'B synced the response and added this retell.' } }
+    const history = [op('materials', material), op('sessions', seed), op('sessions', a, 2, deviceA, seed), op('sessions', b, 3, deviceB, a)]
+    expect(history.at(-1)!.payload.changed).toEqual(['["draft","retell"]'])
+    const final = await projectOperations(history)
+    expect(final.records.sessions).toEqual([b])
+    expect(final.conflicts).toEqual([])
+    const { db, journal } = await local()
+    for (const [i, row] of [...history].reverse().entries()) await journal.merge([{ ...row, cursor: i + 10, receivedAt: now + 100 }], i + 10)
+    expect(await db.sessions.toArray()).toEqual([b])
+  })
+  it.each(['listening', 'chunks', 'legacy-chunks'])('retains the old %s assignment linked to an unfinished source draft without fabricating completion', async mode => {
+    const id = mode === 'listening' ? '2026-09-08:listen:conflict-reader' : `2026-09-08:learn:conflict-reader${mode === 'chunks' ? ':chunks' : ''}`
+    const task = { id, kind: mode === 'listening' ? 'listen' : 'learn', title: 'Original assignment', minutes: 15, reason: 'Saved work', materialId: material.id, done: false }
+    const original = { id: '2026-09-08', date: '2026-09-08', minutes: 15, focus: 'naturalListening', tasks: [task], evidenceFingerprint: 'first', createdAt: now }
+    const replacement = { ...original, tasks: [{ ...task, id: `${id}:replacement`, title: 'Different recommendation' }] }
+    const session = { id: mode === 'listening' ? 'listening-attempt-uuid' : `learn-draft-${mode === 'chunks' ? id : material.id}`,
+      kind: mode === 'listening' ? 'listen' : 'learn', materialId: material.id, startedAt: now, stage: 'practice',
+      draft: { response: 'Original unfinished work', ...(mode === 'listening' ? { taskId: id, sourceSessionId: 'original-attempt' } : {}) } }
+    const final = await projectOperations([op('materials', material), op('plans', original), op('sessions', session, 2), op('plans', replacement, 3, deviceB, original)])
+    expect(final.records.plans[0]?.tasks).toEqual([task])
+    expect(final.records.sessions).toEqual([session])
+    expect(final.records.events).toEqual([])
+  })
+  it('keeps one latest frontier per device through six autosaves, arbitrary pages and canonical mount normalization', async () => {
+    const history = sourceHistory(), { db, journal } = await local()
+    let previous = base
+    for (let i = 0; i < 6; i++) {
+      const typed = { ...base, draft: { ...base.draft, response: `B response version ${i}`, retell: `B retell version ${i}` } }
+      history.push(op('sessions', typed, 5 + i, deviceB, previous)); previous = typed
+    }
+    let copyId = ''
+    for (let i = 0; i < history.length; i++) {
+      await journal.merge([{ ...history[i]!, cursor: i + 20, receivedAt: now + 100 }], i + 20)
+      const copies = await db.sessions.where('kind').equals('reading-conflict').toArray()
+      expect(copies.length).toBeLessThanOrEqual(1)
+      if (copies.length) { copyId ||= copies[0]!.id; expect(copies[0]!.id).toBe(copyId) }
+    }
+    const expected = await projectOperations(history), canonicalRow = expected.records.sessions.find(row => row.id === base.id)!
+    const normalized = { ...canonicalRow, draft: { ...canonicalRow.draft as object, audioId: '', readSections: [], sectionMs: [], priorExposure: true } }
+    history.push(op('sessions', normalized, 20, deviceB, canonicalRow))
+    const final = await projectOperations(history), frontier = final.records.sessions.find(row => row.kind === 'reading-conflict')!
+    expect(final.records.sessions).toHaveLength(2)
+    expect(frontier.id).toBe(copyId)
+    expect(frontier.draft).toMatchObject({ response: 'B response version 5', retell: 'B retell version 5', syncRecovery: { sourceDeviceId: deviceB } })
+    expect(final.records.sessions.find(row => row.id === base.id)?.draft).toMatchObject({ retell: saved.draft.retell, submittedResponse: saved.draft.submittedResponse })
+    expect(canonical(await projectOperations([...history].reverse()))).toBe(canonical(final))
+    expect(canonical(await projectOperations([...history, ...history]))).toBe(canonical(final))
+    const second = await local()
+    for (const [i, row] of [...history].reverse().entries()) await second.journal.merge([{ ...row, cursor: i + 50, receivedAt: now + 100 }], i + 50)
+    expect((await second.db.sessions.toArray()).sort((a, b) => a.id.localeCompare(b.id))).toEqual([...final.records.sessions].sort((a, b) => a.id.localeCompare(b.id)))
+    expect(await db.syncOperations.count()).toBe(history.length - 1 + 2) // local profile/settings plus every original source operation
+  })
+  it('preserves an explicitly continued recovery across reconnect and later edits to its source frontier', async () => {
+    const typed = { ...base, draft: { ...base.draft, response: 'B original response', retell: 'B original retell' } }
+    const history = [...sourceHistory(), op('sessions', typed, 5, deviceB, base)]
+    const initial = await projectOperations(history), frontier = initial.records.sessions.find(row => row.kind === 'reading-conflict')!
+    const origin = (frontier.draft as Record<string, unknown>).syncRecovery as Record<string, string>
+    const recovery = { id: `reading-recovery:${frontier.id.slice('reading-conflict:'.length)}:${origin.sourceVersion}`, kind: 'reading-recovery', materialId: material.id,
+      startedAt: now + 2, stage: 'respond', draft: { passage: material.transcript, response: 'Recovered and edited independently', retell: 'A separate recoverable retell',
+        activeMs: 0, priorExposure: true, syncRecovery: { ...origin, frontierId: frontier.id } } }
+    history.push(op('sessions', recovery, 6))
+    for (let i = 0; i < 5; i++) history.push(op('sessions', { ...typed, draft: { ...typed.draft, response: `Source device still editing ${i}` } }, 7 + i, deviceB, typed))
+    const final = await projectOperations(history)
+    expect(final.records.sessions).toHaveLength(3)
+    expect(final.records.sessions.find(row => row.id === recovery.id)).toEqual(recovery)
+    expect(final.records.sessions.find(row => row.id === frontier.id)?.draft).toMatchObject({ response: 'Source device still editing 4' })
+    expect(final.records.events).toHaveLength(evidence.length)
+    expect(final.records.events.every(row => row.sessionId === base.id)).toBe(true)
+    const { db, journal } = await local()
+    for (const [i, row] of history.entries()) await journal.merge([{ ...row, cursor: i + 20, receivedAt: now + 100 }], i + 20)
+    expect(await db.sessions.get(recovery.id)).toEqual(recovery)
+    await journal.capture()
+    expect((await journal.pending()).filter(row => row.entityType === 'sessions')).toEqual([])
+  })
+  it('never combines saved contenders from different devices or discards their original evidence', async () => {
+    const other = { ...saved, draft: { ...saved.draft, response: 'B submitted response', submittedResponse: 'B submitted response', retell: 'B submitted retell' } }
+    const history = [...sourceHistory(), op('sessions', other, 5, deviceB, base), ...evidence.map(row => op('events', { ...row,
+      data: { ...row.data, response: row.type === 'READING_RESPONSE' ? other.draft.response : other.draft.retell } }, 6, deviceB))]
+    const final = await projectOperations(history)
+    expect(final.records.sessions.find(row => row.id === base.id)?.draft).toMatchObject({ submittedResponse: saved.draft.response, retell: saved.draft.retell })
+    expect(final.records.sessions.find(row => row.kind === 'reading-conflict')?.draft).toMatchObject({ submittedResponse: other.draft.response, retell: other.draft.retell })
+    expect(final.records.events).toHaveLength(4)
+    expect(final.records.cards).toEqual([])
+    expect(final.conflicts.some(row => row.entityType === 'sessions' && row.entityId === base.id)).toBe(true)
+  })
+  it('keeps each saved retell attached to its own private audio and stages a missing audio dependency', async () => {
+    const a = { ...saved, draft: { ...saved.draft, audioId: 'audio-a', audioSeconds: 3 } }
+    const b = { ...base, draft: { ...base.draft, response: 'B unsent response', retell: 'B unsent retell', audioId: 'audio-b', audioSeconds: 4 } }
+    const meta = (id: string) => ({ id, mimeType: 'audio/wav', createdAt: now, duration: 3, kind: 'recording', processed: false, label: 'Original retell' })
+    const history = [op('materials', material), op('sessions', base), op('sessions', a, 3, deviceA, base), op('sessions', b, 5, deviceB, base),
+      op('audioMetadata', meta('audio-a'), 2), ...evidence.map(row => op('events', { ...row, data: { ...row.data, ...(row.type === 'READING_RETELL' ? { audioId: 'audio-a' } : {}) } }, 4))]
+    const partial = await projectOperations(history)
+    expect(partial.records.sessions.find(row => row.id === base.id)?.draft).toMatchObject({ retell: saved.draft.retell, audioId: 'audio-a' })
+    expect(partial.records.sessions.filter(row => row.kind === 'reading-conflict')).toEqual([])
+    expect(partial.deferred.some(row => row.entityId.startsWith('reading-conflict:'))).toBe(true)
+    const final = await projectOperations([...history, op('audioMetadata', meta('audio-b'), 6)])
+    expect(final.records.sessions.find(row => row.kind === 'reading-conflict')?.draft).toMatchObject({ retell: b.draft.retell, audioId: 'audio-b' })
+    expect(final.records.events.find(row => row.type === 'READING_RETELL')?.data).toMatchObject({ response: saved.draft.retell, audioId: 'audio-a' })
   })
 })
 

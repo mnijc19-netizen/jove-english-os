@@ -64,6 +64,18 @@ describe('distinct assigned reading and deliberate language', () => {
     expect(replan.tasks.find(t => t.id === legacy.id)).toMatchObject({ materialId: legacy.materialId, done: false })
     expect(taskPath(legacy)).toEqual({ path: '/learn', query: { task: legacy.id, material: legacy.materialId, mode: 'chunks' } })
   })
+  it('never auto-starts optional assignments before, between or after required tasks', () => {
+    const plan = makePlan(learner, [], [], [], readers, undefined, now)
+    const required = plan.tasks.slice(0, 2)
+    const extra = { ...plan.tasks.find(task => task.id.endsWith(':reading'))!, id: 'saved-original:reading', minutes: 9, optional: true }
+    for (const tasks of [[extra, ...required], [required[0], extra, required[1]], [...required, extra]]) {
+      const mixed = { ...plan, tasks }
+      expect(nextAssignedTask(mixed)?.id).toBe(required[0].id)
+      expect(nextAssignedTask({ ...mixed, tasks: tasks.map(task => ({ ...task, done: task.id === required[0].id })) }, required[0].id)?.id).toBe(required[1].id)
+      expect(nextAssignedTask({ ...mixed, tasks: tasks.map(task => ({ ...task, done: !task.optional })) })).toBeUndefined()
+      expect(taskPath(extra)).toEqual({ path: '/learn', query: { task: extra.id, material: extra.materialId, mode: 'reading' } })
+    }
+  })
   it('uses the final available minute for already started language instead of a newly introduced reader', () => {
     const plan = makePlan(learner, [], [], [], readers, undefined, now)
     const language = { ...plan.tasks.find(t => t.id.endsWith(':chunks'))!, id: `${plan.date}:learn:a`, minutes: 1 }

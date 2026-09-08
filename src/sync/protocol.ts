@@ -1,9 +1,9 @@
 import { z } from 'zod'
 import { createEmptyCard, fsrs, type Grade } from 'ts-fsrs'
-import { aggregateSkills } from '../domain/engine'
+import { aggregateSkills, taskActivity } from '../domain/engine'
 import { projectChunks, projectErrors } from '../db/projections'
 import { assessmentSchema, audioMetadataSchema, chunkSchema, conversationSchema, errorSchema, eventSchema, materialSchema, planSchema, profileSchema, reviewCardSchema, sessionSchema, settingsSchema, usageSchema } from '../db/schema'
-import type { Chunk, ErrorPattern, ReviewCard } from '../domain/types'
+import type { Chunk, DailyPlan, ErrorPattern, PlanTask, ReviewCard } from '../domain/types'
 import { canonicalReviewCard, hasReviewAttemptIdentity, restoreReviewAttempt } from './review'
 
 export const entitySchemas = {
@@ -146,6 +146,164 @@ function completePut(op: SyncOperation): boolean {
   return op.kind === 'put' && changedFields(undefined, op.payload.record!).every(path => op.payload.changed!.includes(path))
 }
 
+/** Recommendations may be replaced; an assignment with work attached may not.
+ * Read the complete operation set, not the previous page's materialized array. */
+function mergePlanAssignments(plan: DailyPlan, history: StoredOperation[], evidence: Map<string, StoredOperation[]>): DailyPlan {
+  const versions = new Map<string, { task: PlanTask; op: StoredOperation }[]>()
+  for (const op of history) if (op.kind === 'put' && op.payload.record!.date === plan.date) {
+    for (const task of (op.payload.record as unknown as DailyPlan).tasks) {
+      versions.set(task.id, [...(versions.get(task.id) ?? []), { task, op }])
+    }
+  }
+  const retained = new Map<string, PlanTask>()
+  const commitment = new Map<string, StoredOperation>()
+  for (const [id, copies] of versions) {
+    const related = evidence.get(id) ?? []
+    const facts = related.filter(op => op.entityType === 'events')
+    const matches = (task: PlanTask, op: StoredOperation) => {
+      const data = op.payload.record!.data as Record<string, unknown>
+      return (data.materialId === undefined || data.materialId === task.materialId)
+        && (data.kind === undefined || data.kind === task.kind || data.kind === taskActivity(task))
+    }
+    const completed = facts.find(op => op.payload.record!.type === 'TASK_COMPLETED' && op.payload.record!.source === 'objective' && copies.some(copy => matches(copy.task, op)))
+    const began = facts.find(op => ['TASK_STARTED', 'READING_STARTED', 'READING_RESPONSE', 'REVIEW_RESPONSE', 'ASSESSMENT_RESPONSE', 'LISTENING_RESPONSE', 'SPEAKING_RESPONSE', 'WRITTEN_RESPONSE', 'CHUNK_RECALL'].includes(String(op.payload.record!.type)) && copies.some(copy => matches(copy.task, op)))
+    const legacy = copies.filter(({ task }) => task.kind === 'learn' && task.id === `${plan.date}:learn:${task.materialId}`)
+      .flatMap(({ task }) => evidence.get(`legacy-learn:${task.materialId}`) ?? [])
+    const session = [...related, ...legacy].find(op => op.entityType === 'sessions' && copies.some(({ task }) => {
+      const row = op.payload.record!, draft = row.draft as Record<string, unknown>
+      return row.materialId === task.materialId && (draft.taskId === id || row.kind === 'reading' && row.id === `reading:${id}`
+        || row.kind === 'learn' && (row.id === `learn-draft-${id}`
+          || id === `${plan.date}:learn:${task.materialId}` && row.id === `learn-draft-${task.materialId}`))
+    }))
+    const committed = copies.find(copy => copy.task.done)
+    const proof = completed ?? began ?? session
+    if (!committed && !proof) continue
+    const eligible = proof && proof.entityType === 'events' ? copies.filter(copy => matches(copy.task, proof)) : copies
+    const own = proof ? eligible.filter(copy => copy.op.deviceId === proof.deviceId) : []
+    // A journal capture can serialize its event before its plan. Use that device's
+    // adjacent snapshot, not a different device's later unstarted recommendation.
+    const selected = committed ?? (proof && (own.filter(copy => compare(copy.op, proof) <= 0).at(-1) ?? own[0])) ?? eligible[0]!
+    const task = { ...selected.task, done: !!committed || !!completed }
+    const minutes = (completed?.payload.record?.data as Record<string, unknown> | undefined)?.minutes
+    if (task.done && Number.isInteger(minutes) && Number(minutes) >= 1 && Number(minutes) <= 1440) task.minutes = Number(minutes)
+    if (copies.some(copy => copy.task.optional)) task.optional = true
+    retained.set(id, task)
+    commitment.set(id, committed?.op ?? completed ?? proof ?? selected.op)
+  }
+  const tasks = plan.tasks.flatMap(task => retained.has(task.id) ? [{ ...retained.get(task.id)! }]
+    : [...retained.values()].some(old => taskActivity(old) === taskActivity(task)) ? [] : [{ ...task }])
+  for (const task of retained.values()) if (!tasks.some(old => old.id === task.id)) tasks.push({ ...task })
+  const position = (task: PlanTask) => {
+    const exact = plan.tasks.findIndex(old => old.id === task.id)
+    const activity = plan.tasks.findIndex(old => taskActivity(old) === taskActivity(task))
+    return exact >= 0 ? exact : activity >= 0 ? activity : plan.tasks.length
+  }
+  tasks.sort((a, b) => position(a) - position(b) || a.id.localeCompare(b.id, 'en'))
+  // Completed/started durations belong to their actual assignment. Work which
+  // cannot fit is explicitly optional, never a fabricated one-minute obligation.
+  // A lower future target cannot erase time already completed as required.
+  // Only unfinished overflow becomes optional; required history is a floor.
+  const budget = Math.max(plan.minutes, tasks.filter(task => task.done && !task.optional).reduce((sum, task) => sum + task.minutes, 0))
+  let available = budget
+  const committedTasks = tasks.filter(task => retained.has(task.id)).sort((a, b) => Number(b.done) - Number(a.done)
+    || compare(commitment.get(a.id)!, commitment.get(b.id)!) || a.id.localeCompare(b.id, 'en'))
+  for (const task of committedTasks) {
+    if (task.optional || task.minutes > available) task.optional = true
+    else available -= task.minutes
+  }
+  let excess = tasks.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0) - budget
+  const trimmable = tasks.filter(task => !task.done && !task.optional && !retained.has(task.id)).sort((a, b) => position(b) - position(a))
+  for (const task of trimmable) {
+    if (excess <= 0) break
+    const reduction = Math.min(excess, task.minutes)
+    task.minutes -= reduction; excess -= reduction
+  }
+  const result = tasks.filter(task => task.minutes > 0)
+  return { ...plan, tasks: result, minutes: result.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0) }
+}
+
+const readingKind = (kind: unknown) => kind === 'reading' || kind === 'reading-recovery'
+function readingSnapshot(row: RecordValue): RecordValue {
+  const copy = structuredClone(row)
+  delete (copy.draft as Record<string, unknown>).syncReadingConflicts
+  return copy
+}
+function readingSubmission(row: RecordValue): string {
+  const draft = row.draft as Record<string, unknown>
+  return canonical([row.materialId, row.startedAt, draft.passage ?? '', draft.submittedResponse ?? '',
+    draft.retell ?? '', draft.audioId ?? '', draft.audioSeconds ?? 0, draft.observationAt ?? 0, draft.activeMs ?? 0,
+    draft.readSections ?? [], draft.sectionMs ?? [], draft.priorExposure !== false])
+}
+function readingWork(row: RecordValue): string {
+  const draft = row.draft as Record<string, unknown>
+  return canonical([readingSubmission(row), draft.response ?? '', draft.checkedSections ?? [], draft.unknownTokens ?? [], draft.lookupTokens ?? []])
+}
+/** Positive preservation proof, not an inference from Lamport order alone.
+ * Adding a retell to a synced response subsumes that earlier partial draft;
+ * replacing a different nonempty response does not. */
+function includesReadingWork(earlier: RecordValue, later: RecordValue): boolean {
+  if (earlier.materialId !== later.materialId || earlier.startedAt !== later.startedAt) return false
+  if (earlier.stage === 'saved') return later.stage === 'saved' && readingSubmission(earlier) === readingSubmission(later)
+  const a = earlier.draft as Record<string, unknown>, b = later.draft as Record<string, unknown>
+  for (const key of ['passage', 'response', 'submittedResponse', 'retell', 'audioId'] as const)
+    if (a[key] && a[key] !== b[key]) return false
+  if (a.observationAt && a.observationAt !== b.observationAt || a.audioId && a.audioSeconds !== b.audioSeconds) return false
+  if (Number(a.activeMs ?? 0) > Number(b.activeMs ?? 0)) return false
+  for (const key of ['readSections', 'checkedSections', 'unknownTokens', 'lookupTokens'] as const) {
+    const before = Array.isArray(a[key]) ? a[key] : [], after = Array.isArray(b[key]) ? b[key] : []
+    if (before.some(value => !after.includes(value))) return false
+  }
+  const before = Array.isArray(a.sectionMs) ? a.sectionMs : [], after = Array.isArray(b.sectionMs) ? b.sectionMs : []
+  return before.every((value, i) => Number(value) <= Number(after[i] ?? 0))
+}
+
+/** A committed reading is one attempt, not an independently mergeable saved
+ * marker and response/audio leaves. Conflict frontiers are bounded per device;
+ * continuing one creates a separate, explicitly chosen recovery session. */
+async function mergeReadingSession(history: StoredOperation[], all: StoredOperation[]) {
+  const puts = history.filter(op => op.kind === 'put' && readingKind(op.payload.record?.kind))
+  const attested = (op: StoredOperation) => {
+    const row = op.payload.record!, draft = row.draft as Record<string, unknown>
+    if (typeof draft.observationAt !== 'number' || !Number.isFinite(draft.observationAt) || draft.observationAt <= 0) return false
+    const evidence = all.filter(e => e.entityType === 'events' && e.payload.record?.sessionId === row.id
+      && e.payload.record.timestamp === draft.observationAt
+      && (e.payload.record.data as Record<string, unknown> | undefined)?.materialId === row.materialId)
+    return evidence.some(e => e.payload.record!.type === 'READING_RESPONSE' && (e.payload.record!.data as Record<string, unknown>).response === draft.submittedResponse)
+      && evidence.some(e => e.payload.record!.type === 'READING_RETELL'
+        && ((e.payload.record!.data as Record<string, unknown>).response ?? '') === String(draft.retell ?? '').trim()
+        && ((e.payload.record!.data as Record<string, unknown>).audioId ?? '') === (draft.audioId ?? ''))
+  }
+  const saved = puts.filter(op => op.payload.record!.stage === 'saved')
+  const firstSaved = saved.find(attested) ?? saved[0]
+  const selected = firstSaved ? puts.filter(op => op.payload.record!.stage === 'saved'
+    && readingSubmission(op.payload.record!) === readingSubmission(firstSaved.payload.record!)).at(-1)! : puts.at(-1)!
+  const primary = readingSnapshot(selected.payload.record!)
+  const copies: RecordValue[] = [], ids: string[] = [], conflicted: string[] = [], inactive: string[] = []
+  for (const device of new Set(puts.map(op => op.deviceId))) {
+    const key = await eventOccurrenceKey({ id: primary.id, device, purpose: 'reading-conflict-v1' })
+    const id = `reading-conflict:${key}`
+    // Reading the projected winner on B and normalizing it on mount is not a
+    // new B submission, nor permission to erase B's preceding unsent frontier.
+    const latest = puts.filter(op => op.deviceId === device && readingWork(op.payload.record!) !== readingWork(primary)
+      && (device !== (firstSaved ?? selected).deviceId || compare(op, firstSaved ?? selected) > 0)).at(-1)
+    if (!latest || puts.some(op => compare(op, latest) > 0 && includesReadingWork(latest.payload.record!, op.payload.record!))) { inactive.push(id); continue }
+    const row = readingSnapshot(latest.payload.record!)
+    const draft = row.draft as Record<string, unknown>
+    const changedWork = !!draft.response || !!draft.retell || !!draft.audioId || Number(draft.activeMs) > 0
+    if (!changedWork) { inactive.push(id); continue }
+    const sourceVersion = await eventOccurrenceKey(row)
+    const root = (primary.draft as Record<string, unknown>).syncRecovery as Record<string, unknown> | undefined
+    const copy = { ...row, id, kind: 'reading-conflict', draft: { ...draft,
+      syncRecovery: { sourceSessionId: primary.id, rootSessionId: root?.rootSessionId ?? primary.id, sourceDeviceId: device, sourceVersion } } }
+    // Explicit operations for a copy (including a tombstone) always outrank a
+    // generated seed. User continuations normally use another stable session ID.
+    if (!all.some(op => op.entityType === 'sessions' && op.entityId === id)) copies.push(copy)
+    ids.push(id); conflicted.push(latest.id)
+  }
+  if (ids.length) (primary.draft as Record<string, unknown>).syncReadingConflicts = ids.sort()
+  return { primary, copies, conflicted, inactive: inactive.filter(id => !all.some(op => op.entityType === 'sessions' && op.entityId === id)) }
+}
+
 type Reference = { types: EntityType[]; id: string }
 function references(type: EntityType, row: RecordValue): Reference[] {
   const result: Reference[] = []
@@ -189,6 +347,18 @@ export async function projectOperations(input: StoredOperation[]): Promise<Proje
     operations.set(op.id, existing?.cursor !== undefined ? existing : { ...op, cursor: raw.cursor, receivedAt: raw.receivedAt })
   }
   const privateIds = new Set([...operations.values()].filter(op => op.entityType === 'audioMetadata' && op.kind === 'put' && isPrivateAudio(op.payload.record?.kind)).map(op => op.entityId))
+  const sortedOperations = [...operations.values()].sort(compare)
+  const planEvidence = new Map<string, StoredOperation[]>()
+  for (const op of sortedOperations) if (op.kind === 'put' && ['events', 'sessions'].includes(op.entityType)) {
+    const row = op.payload.record!, data = (op.entityType === 'events' ? row.data : row.draft) as Record<string, unknown> | undefined
+    const keys = new Set<string>()
+    if (typeof data?.taskId === 'string') keys.add(data.taskId)
+    if (op.entityType === 'sessions' && row.kind === 'reading' && row.id.startsWith('reading:')) keys.add(row.id.slice(8))
+    if (op.entityType === 'sessions' && row.kind === 'learn' && row.id.startsWith('learn-draft-')) {
+      keys.add(row.id.slice(12)); if (row.id === `learn-draft-${row.materialId}`) keys.add(`legacy-learn:${row.materialId}`)
+    }
+    for (const key of keys) planEvidence.set(key, [...(planEvidence.get(key) ?? []), op])
+  }
   const cacheIds = new Set([...operations.values()].filter(op => op.entityType === 'audioMetadata' && op.kind === 'put' && !isPrivateAudio(op.payload.record?.kind) && !privateIds.has(op.entityId)).map(op => op.entityId))
   const grouped = new Map<string, StoredOperation[]>()
   // V1 allowed arbitrary card IDs. Two restored devices must not violate Dexie's
@@ -208,7 +378,7 @@ export async function projectOperations(input: StoredOperation[]): Promise<Proje
     const id = natural.length <= 1000 ? natural : `card:${await eventOccurrenceKey({ id: pair.chunkId, modality: pair.modality })}`
     for (const source of pair.ids) cardAliases[source] = id
   }
-  for (const raw of [...operations.values()].sort(compare)) {
+  for (const raw of sortedOperations) {
     if (raw.entityType === 'audioMetadata' && (cacheIds.has(raw.entityId) || raw.kind === 'put' && !isPrivateAudio(raw.payload.record?.kind))) continue
     const alias = raw.entityType === 'cards' ? cardAliases[raw.entityId] : undefined
     const op = alias ? { ...raw, entityId: alias, payload: raw.payload.record ? { ...raw.payload, record: { ...raw.payload.record, id: alias } } : raw.payload } : raw
@@ -228,6 +398,7 @@ export async function projectOperations(input: StoredOperation[]): Promise<Proje
   const cardBases = new Map<string, StoredOperation[]>()
   const eventKeys: Record<string, string> = {}, eventAliases: Record<string, string[]> = {}, deferred: Projection['deferred'] = [], tombstones: Projection['tombstones'] = []
   const deletedRecords = new Map<string, RecordValue>()
+  const readingCopies: RecordValue[] = []
   const eventOps = [...operations.values()].filter(op => op.entityType === 'events')
   const occurrenceByOp = new Map(await Promise.all(eventOps.map(async op => [op.id, await eventOccurrenceKey(op.payload.record!)] as const)))
   const eventByKey = new Map<string, RecordValue>()
@@ -285,13 +456,17 @@ export async function projectOperations(input: StoredOperation[]): Promise<Proje
         }
         let value = flat.get(key)
         if (type === 'conversations' && key === '["messages"]') value = mergeMessages(current.messages, value)
-        if (type === 'plans' && key === '["tasks"]' && Array.isArray(value)) {
-          const done = new Set((Array.isArray(current.tasks) ? current.tasks : []).filter(task => task.done).map(task => task.id))
-          value = value.map(task => ({ ...task, done: task.done || done.has(task.id) }))
-        }
         assign(current, path, value, flat.has(key))
       }
-      if (type === 'plans' && Array.isArray(current.tasks)) current.minutes = current.tasks.reduce((sum, task) => sum + Number(task.minutes), 0)
+      if (type === 'plans' && Array.isArray(current.tasks)) current.minutes = current.tasks.reduce((sum, task) => sum + (task.optional ? 0 : Number(task.minutes)), 0)
+    }
+    if (type === 'plans' && Object.keys(current).length) current = mergePlanAssignments(planSchema.parse(current), ops, planEvidence) as unknown as RecordValue
+    if (type === 'sessions' && !deleted && readingKind(current.kind)) {
+      const merged = await mergeReadingSession(ops, [...operations.values()])
+      current = merged.primary
+      readingCopies.push(...merged.copies)
+      tombstones.push(...merged.inactive.map(entityId => ({ entityType: 'sessions' as const, entityId, retained: false })))
+      if (merged.conflicted.length) conflicts.push({ entityType: type, entityId: first.entityId, operationIds: merged.conflicted })
     }
     if (!deleted) records[type].push(entitySchemas[type].parse(current) as RecordValue)
     else {
@@ -299,6 +474,7 @@ export async function projectOperations(input: StoredOperation[]): Promise<Proje
       if (Object.keys(current).length) deletedRecords.set(JSON.stringify([type, first.entityId]), entitySchemas[type].parse(current) as RecordValue)
     }
   }
+  records.sessions.push(...readingCopies.map(row => sessionSchema.parse(row) as unknown as RecordValue))
   for (const type of entityTypes) {
     records[type] = records[type].map(row => withoutCacheAudioReferences(row, cacheIds))
     for (const row of records[type]) {

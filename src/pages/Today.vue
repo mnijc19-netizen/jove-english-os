@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useApp } from "../stores/app";
-import { skillLabel, taskPath } from "../domain/engine";
+import { nextAssignedTask, skillLabel, taskPath } from "../domain/engine";
 import Icon from "../components/Icon.vue";
 import type { PlanTask } from "../domain/types";
 import { planRecovery, selectMeaningfulReviews } from "../domain/longitudinal";
@@ -10,7 +10,7 @@ const app = useApp();
 const router = useRouter(), starting = ref(false), startError = ref("");
 const recovery = computed(() => planRecovery(app.profile, app.events, app.clock));
 const reviewSelection = computed(() => selectMeaningfulReviews(app.cards, app.events, app.clock, {
-  budgetSeconds: Math.min(recovery.value.reviewBudgetSeconds, (app.plan.tasks.find(t => t.kind === 'review' && !t.done)?.minutes ?? 0) * 60),
+  budgetSeconds: Math.min(recovery.value.reviewBudgetSeconds, (app.plan.tasks.find(t => t.kind === 'review' && !t.done && !t.optional)?.minutes ?? 0) * 60),
   maxCards: recovery.value.maxReviewCards,
 }));
 const date = computed(() =>
@@ -20,8 +20,10 @@ const date = computed(() =>
     day: "numeric",
   }).format(new Date(app.clock)),
 );
-const completed = computed(() => app.plan.tasks.filter((t) => t.done).length);
-const next = computed(() => app.plan.tasks.find((t) => !t.done && t.minutes > 0));
+const requiredTasks = computed(() => app.plan.tasks.filter(task => !task.optional));
+const optionalTasks = computed(() => app.plan.tasks.filter(task => task.optional));
+const completed = computed(() => requiredTasks.value.filter((t) => t.done).length);
+const next = computed(() => nextAssignedTask(app.plan));
 const path = taskPath;
 const material = computed(
   () =>
@@ -30,8 +32,8 @@ const material = computed(
     ) || app.materials[0],
 );
 const offered = new Set<string>();
-watch(() => app.plan.tasks.filter(t => !t.done && t.minutes > 0).map(t => t.id).join('|'), async () => {
-  for (const task of app.plan.tasks.filter(t => !t.done && t.minutes > 0)) {
+watch(() => requiredTasks.value.filter(t => !t.done && t.minutes > 0).map(t => t.id).join('|'), async () => {
+  for (const task of requiredTasks.value.filter(t => !t.done && t.minutes > 0)) {
     if (offered.has(task.id)) continue;
     offered.add(task.id);
     try { await app.evidence({ id: `offered:${task.id}`, type: 'TASK_OFFERED', source: 'objective',
@@ -43,9 +45,11 @@ async function start(task: PlanTask) {
   if (starting.value) return;
   starting.value = true; startError.value = '';
   try {
-    await app.beginTask(task.id);
-    await app.evidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
-      data: { taskId: task.id, kind: task.id.endsWith(':reading') ? 'reading' : task.kind } });
+    if (!task.done) {
+      await app.beginTask(task.id);
+      await app.evidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
+        data: { taskId: task.id, kind: task.id.endsWith(':reading') ? 'reading' : task.kind } });
+    }
     await router.push(path(task));
   } catch { startError.value = 'Could not save your place. Please try starting again.'; }
   finally { starting.value = false; }
@@ -124,14 +128,14 @@ async function start(task: PlanTask) {
         <div class="training-progress">
           <div>
             <span
-              >{{ completed }} of {{ app.plan.tasks.length }} steps
+              >{{ completed }} of {{ requiredTasks.length }} steps
               complete</span
             ><span>{{ app.plan.minutes }} min planned</span>
           </div>
           <div class="progress-track">
             <i
               :style="{
-                width: (app.plan.tasks.length ? completed / app.plan.tasks.length : 0) * 100 + '%',
+                width: (requiredTasks.length ? completed / requiredTasks.length : 0) * 100 + '%',
               }"
             ></i>
           </div>
@@ -145,10 +149,17 @@ async function start(task: PlanTask) {
           }}<Icon name="arrow" :size="18"
         /></button>
         <div v-else class="success-note">
-          <Icon name="check" />{{ completed === app.plan.tasks.length ? 'Today’s plan is complete.' : 'Your planned time is covered for today. Unfinished work stays saved.' }}
+          <Icon name="check" />{{ completed === requiredTasks.length ? 'Today’s plan is complete.' : 'Your planned time is covered for today. Unfinished work stays saved.' }}
           Let it settle; there is no need to clear the backlog.
         </div>
         <RouterLink v-if="!next && app.due.length" :to="{ path: '/review', query: { extra: '1' } }" class="button secondary">Optional extra review</RouterLink>
+        <div v-if="optionalTasks.length" class="section" aria-label="Optional saved practice">
+          <p class="help-text">Other work you already began stays saved with its original time. It is optional, outside today’s required plan.</p>
+          <div v-for="task in optionalTasks" :key="task.id">
+            <p>{{ task.title }} · {{ task.minutes }} min · {{ task.done ? 'Saved' : 'Unfinished' }}</p>
+            <button class="button secondary" :disabled="starting" @click="start(task)">{{ task.done ? 'View optional practice' : 'Continue optional practice' }}</button>
+          </div>
+        </div>
         <p v-if="startError" class="error" role="alert">{{ startError }}</p>
         <p class="card-footnote">
           <Icon name="shield" :size="14" />Your progress saves as you go.
@@ -208,7 +219,7 @@ async function start(task: PlanTask) {
       </div>
       <div class="task-list">
         <RouterLink
-          v-for="(task, index) in app.plan.tasks"
+          v-for="(task, index) in requiredTasks"
           :key="task.id"
           :to="path(task)"
           class="task-row"

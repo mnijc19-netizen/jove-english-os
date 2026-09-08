@@ -19,6 +19,8 @@ import { db as learningDb } from '../src/db/db'
 import { addChunk, initialize } from '../src/db/repository'
 import { useApp } from '../src/stores/app'
 import * as engine from '../src/domain/engine'
+import { canonical, changedFields, eventOccurrenceKey, parseOperation, projectOperations, type RecordValue } from '../src/sync/protocol'
+import { SyncJournal } from '../src/sync/journal'
 
 // No auth, backend, provider, or media fixture: the assigned loop uses real
 // Pinia/repository/IndexedDB and compiled Vue handlers, with offline services.
@@ -55,7 +57,21 @@ async function invoke(node: HostNode, action = 'onClick', value?: unknown) {
   if (typeof node.props[action] === 'function') await node.props[action](value)
   await flush()
 }
-async function flush() { for (let i = 0; i < 5; i++) { await yieldImmediate(); await Vue.nextTick() } }
+const hashes = new Set<Promise<string>>()
+function readingHash(value: Parameters<typeof eventOccurrenceKey>[0]) {
+  const pending = eventOccurrenceKey(value)
+  hashes.add(pending)
+  void pending.finally(() => hashes.delete(pending))
+  return pending
+}
+async function flush() {
+  // WebCrypto is real asynchronous I/O, not a Vue microtask. Drain each actual
+  // hash before asserting persisted state or unmounting the next test's store.
+  for (let idle = 0; idle < 5; idle++) {
+    if (hashes.size) { await Promise.all(hashes); idle = 0 }
+    await yieldImmediate(); await Vue.nextTick()
+  }
+}
 const text = 'People share stories because they want to understand one another. A good friend listens carefully and asks a kind question. We can learn from ordinary moments and small surprises. Try to explain your idea using familiar words and a useful detail. Then ask your friend what they think about it.'
 const material: Material = { id: 'reader', title: 'A story to share', topic: 'Everyday life', difficulty: 0.25, duration: 60, transcript: text,
   sentences: text.match(/[^.!?]+[.!?]*/g)!, sourceKind: 'curated', sourceLabel: 'Original fixture', synthetic: false, approved: true,
@@ -63,7 +79,8 @@ const material: Material = { id: 'reader', title: 'A story to share', topic: 'Ev
 const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value))
 let rows: Map<string, StudySession>, audios: Map<string, AudioAsset>, state: ReturnType<typeof makeState>, Reading: Vue.Component
 const guards: (() => Promise<boolean>)[] = [], mounted: Vue.App[] = []
-const db = { sessions: { put: vi.fn(), get: vi.fn() }, audio: { get: vi.fn() } }
+const db = { sessions: { put: vi.fn(), get: vi.fn(), add: vi.fn(), where: () => ({ anyOf: (...kinds: string[]) => ({ toArray: async () => [...rows.values()].filter(row => kinds.includes(row.kind)) }) }) },
+  transaction: async (_mode: string, _table: unknown, action: () => Promise<unknown>) => action(), audio: { get: vi.fn() } }
 const router = { push: vi.fn() }
 function makeState() {
   const events = Vue.reactive<StudyEvent[]>([])
@@ -90,6 +107,7 @@ function loadComponent(overrides: Record<string, unknown> = {}) {
   const modules: Record<string, unknown> = {
     vue: Vue, 'vue-router': { useRouter: () => router, onBeforeRouteLeave: (guard: () => Promise<boolean>) => guards.push(guard), onBeforeRouteUpdate: (guard: () => Promise<boolean>) => guards.push(guard) },
     '../stores/app': { useApp: () => state }, '../db/db': { db }, '../composables/useRequest': { useRequest }, '../domain/longitudinal': longitudinal,
+    '../sync/protocol': { canonical, eventOccurrenceKey: readingHash },
     './Recorder.vue': { default: Vue.defineComponent({ emits: ['recorded', 'active'], setup: (_props, { emit }) => () => Vue.h('button', {
       onClick: () => emit('recorded', { audioId: 'retell-audio', duration: 4 }),
     }, 'Record test retell') }) },
@@ -121,6 +139,7 @@ beforeEach(() => {
   rows = new Map(); audios = new Map(); guards.length = 0; state = makeState()
   db.sessions.put.mockReset().mockImplementation(async (row: StudySession) => { rows.set(row.id, copy(row)); return row.id })
   db.sessions.get.mockReset().mockImplementation(async (id: string) => rows.get(id))
+  db.sessions.add.mockReset().mockImplementation(async (row: StudySession) => { if (rows.has(row.id)) throw new Error('Duplicate session'); rows.set(row.id, copy(row)); return row.id })
   db.audio.get.mockReset().mockImplementation(async (id: string) => audios.get(id))
   vi.stubGlobal('document', Object.assign(new EventTarget(), { hidden: false, activeElement: null }))
   vi.stubGlobal('Document', EventTarget)
@@ -130,11 +149,11 @@ beforeEach(() => {
 })
 afterEach(async () => {
   for (const app of mounted.splice(0)) app.unmount()
-  await flush(); vi.useRealTimers(); vi.unstubAllGlobals()
+  await flush(); vi.restoreAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals()
 })
 
 describe('assigned learning loop with real local persistence', () => {
-  let learning: ReturnType<typeof useApp>, Learn: Vue.Component
+  let learning: ReturnType<typeof useApp>, Learn: Vue.Component, Today: Vue.Component
   const route = Vue.reactive({ query: {} as Record<string, string> })
   const chunkMaterial = { ...material, chunks: [{ text: 'give me a hand', meaningEn: 'help me', meaningZh: '', example: 'Could you give me a hand?' }] }
   beforeEach(async () => {
@@ -158,6 +177,12 @@ describe('assigned learning loop with real local persistence', () => {
     const exports: { default?: Vue.Component } = {}
     new Function('require', 'exports', code)((id: string) => { if (!(id in modules)) throw new Error(`Unknown learning import ${id}`); return modules[id] }, exports)
     Learn = exports.default!
+    const today = parse(readFileSync(new URL('../src/pages/Today.vue', import.meta.url), 'utf8'), { filename: 'Today.vue' })
+    const todayScript = compileScript(today.descriptor, { id: 'Today.vue', inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } })
+    const todayCode = transpileModule(todayScript.content, { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText
+    const todayExports: { default?: Vue.Component } = {}
+    new Function('require', 'exports', todayCode)((id: string) => { if (!(id in modules)) throw new Error(`Unknown Today import ${id}`); return modules[id] }, todayExports)
+    Today = todayExports.default!
   })
   afterEach(async () => { for (const app of mounted.splice(0)) app.unmount(); await flush(); vi.restoreAllMocks(); learning.$dispose(); await learningDb.delete() })
   async function mountTask(activity: 'chunks' | 'reading' | PlanTask) {
@@ -167,6 +192,43 @@ describe('assigned learning loop with real local persistence', () => {
     app.component('RouterLink', { render: () => null }); app.mount(root); mounted.push(app); await flush()
     return { root, task, unmount: () => { app.unmount(); mounted.splice(mounted.indexOf(app), 1) } }
   }
+  it.each([false, true])('renders required 45 complete and explicitly opens the original optional nine-minute task, already completed=%s', async alreadyCompleted => {
+    const plan = copy(learning.plan), original = plan.tasks.find(task => task.id.endsWith(':reading'))!
+    plan.tasks = plan.tasks.map(task => ({ ...task, done: true }))
+    const extra: PlanTask = { ...original, id: `${plan.date}:learn:other-reader:reading`, materialId: 'other-reader', minutes: 9, done: alreadyCompleted, optional: true }
+    plan.tasks.push(extra)
+    await learningDb.materials.put({ ...chunkMaterial, id: 'other-reader' })
+    await learningDb.plans.put(plan)
+    const draft = { id: `reading:${extra.id}`, kind: 'reading', materialId: extra.materialId, startedAt: Date.now(), stage: 'respond', draft: { response: 'The original unfinished response.' } }
+    await learningDb.sessions.put(draft)
+    if (alreadyCompleted) await learningDb.events.put({ id: `completed:${extra.id}`, type: 'TASK_COMPLETED', source: 'objective', timestamp: Date.now(),
+      data: { taskId: extra.id, kind: 'learn', materialId: extra.materialId!, minutes: extra.minutes } })
+    await learning.refresh()
+    const root = new HostNode('root'), app = renderer.createApp(Today)
+    app.component('RouterLink', { render: () => null }); app.mount(root); mounted.push(app); await flush()
+    expect(content(root)).toContain('Today’s plan is complete.')
+    expect(content(root)).toContain('45 min planned')
+    expect(content(root)).toContain(`${plan.tasks.length - 1} of ${plan.tasks.length - 1} steps`)
+    expect(find(root, n => n.type === 'button' && ['Continue my practice', 'Start today’s practice'].some(label => content(n).includes(label)))).toBeUndefined()
+    expect((await learningDb.events.toArray()).some(event => event.data?.taskId === extra.id && ['TASK_STARTED', 'TASK_OFFERED'].includes(event.type))).toBe(false)
+    const beforeOpen = await learningDb.events.toArray()
+    const continueButton = button(root, alreadyCompleted ? 'View optional practice' : 'Continue optional practice')
+    await invoke(continueButton)
+    expect(router.push).toHaveBeenLastCalledWith(engine.taskPath(extra))
+    expect(await learningDb.sessions.get(draft.id)).toEqual(draft)
+    expect((await learningDb.plans.get(plan.id))?.tasks.find(task => task.id === extra.id)).toEqual(extra)
+    if (alreadyCompleted) {
+      await invoke(continueButton); await learning.beginTask(extra.id)
+      expect(await learningDb.events.toArray()).toEqual(beforeOpen); return
+    }
+    await learning.evidence({ id: `${draft.id}:response`, sessionId: draft.id, type: 'READING_RESPONSE', source: 'text', data: { taskId: extra.id, materialId: extra.materialId!, response: 'A genuinely submitted recovered response.' } })
+    await learning.evidence({ id: `${draft.id}:retell`, sessionId: draft.id, type: 'READING_RETELL', source: 'text', data: { taskId: extra.id, materialId: extra.materialId!, response: 'A genuinely submitted recovered retell.' } })
+    expect(await learning.completeTask('learn', { taskId: extra.id, materialId: extra.materialId })).toBe(true)
+    expect(learning.plan.minutes).toBe(45)
+    expect(learning.plan.tasks.find(task => task.id === extra.id)).toMatchObject({ minutes: 9, done: true, optional: true })
+    expect((await learningDb.events.get(`completed:${extra.id}`))?.data?.minutes).toBe(9)
+    expect(await learning.continueAssignment(extra.id)).toEqual({ path: '/', query: {} })
+  })
   it('requires an actual chunk and writing, persists six cards, and continues the assigned material', async () => {
     const view = await mountTask('chunks')
     await answer(view.root, 'give me a hand', 'Could you give me a hand with dinner?')
@@ -200,6 +262,24 @@ describe('assigned learning loop with real local persistence', () => {
     expect(router.push).toHaveBeenLastCalledWith(engine.taskPath(learning.plan.tasks.find(t => t.id.endsWith(':chunks'))!))
     expect(await learningDb.chunks.count()).toBe(0)
   })
+  it('continues the mounted draft after real journal projection only removes derived conflict metadata', async () => {
+    const view = await mountTask('reading'); await readToResponse(view.root)
+    const id = `reading:${view.task.id}`, before = await learningDb.sessions.get(id)
+    expect(before?.draft.syncReadingConflicts).toEqual([])
+    const journal = new SyncJournal(learningDb)
+    await journal.bindOwner('00000000-0000-4000-8000-000000000123'); await journal.capture()
+    const pending = await journal.pending()
+    await journal.merge(pending.map((row, i) => ({ ...row, cursor: i + 100, receivedAt: Date.now() })), pending.length + 99)
+    expect(changedFields(before as unknown as RecordValue, await learningDb.sessions.get(id) as unknown as RecordValue)).toEqual(['["draft","syncReadingConflicts"]'])
+    await answer(view.root, 'reading-response', 'This locally written response follows a normal metadata-only sync.')
+    await answer(view.root, 'reading-retell', 'Friends listen and ask kind questions to understand one another.')
+    await invoke(button(view.root, 'Save reading & retell'))
+    expect((await learningDb.sessions.get(id))?.stage).toBe('saved')
+    expect(await learningDb.sessions.where('kind').equals('reading-conflict').count()).toBe(0)
+    expect((await learningDb.events.toArray()).filter(event => event.sessionId === id && ['READING_RESPONSE', 'READING_RETELL'].includes(event.type))).toHaveLength(2)
+    await invoke(button(view.root, 'Continue to next task'))
+    expect(router.push).toHaveBeenLastCalledWith(engine.taskPath(learning.plan.tasks.find(task => task.id.endsWith(':chunks'))!))
+  })
   it('does not expose Continue until the reading session is durably saved and recovers an interrupted final write', async () => {
     const view = await mountTask('reading'); await readToResponse(view.root)
     await answer(view.root, 'reading-response', 'Sharing stories helps us understand each other.')
@@ -225,14 +305,20 @@ describe('assigned learning loop with real local persistence', () => {
     await invoke(button(restored.root, 'Continue to next task'))
     expect(router.push).toHaveBeenLastCalledWith(engine.taskPath(learning.plan.tasks.find(t => t.id.endsWith(':chunks'))!))
   })
-  it('recovers same-page final-save retries without reload, duplicate evidence, or an early Continue', async () => {
+  it.each(['put-rejection', 'post-put-abort'])('recovers same-page final-save %s retries without reload, duplicate evidence, or an early Continue', async failure => {
     const view = await mountTask('reading'); await readToResponse(view.root)
     await answer(view.root, 'reading-response', 'Sharing stories helps us understand each other.')
     await answer(view.root, 'reading-retell', 'A good friend listens and asks a kind question.')
     const putSession = learningDb.sessions.put.bind(learningDb.sessions)
     let failFinal = true
-    vi.spyOn(learningDb.sessions, 'put').mockImplementation((row, ...rest) => row.kind === 'reading' && row.stage === 'saved' && failFinal
-      ? Dexie.Promise.reject(new Error('final session commit unavailable')) : putSession(row, ...rest))
+    vi.spyOn(learningDb.sessions, 'put').mockImplementation((row, ...rest) => {
+      if (row.kind === 'reading' && row.stage === 'saved' && failFinal) {
+        if (failure === 'put-rejection') return Dexie.Promise.reject(new Error('final session commit unavailable'))
+        const transaction = Dexie.currentTransaction!
+        return putSession(row, ...rest).then(key => { transaction.abort(); return key })
+      }
+      return putSession(row, ...rest)
+    })
     await invoke(button(view.root, 'Save reading & retell'))
     const original = await learningDb.events.toArray()
     expect(original.filter(e => ['READING_RESPONSE', 'READING_RETELL'].includes(e.type))).toHaveLength(2)
@@ -360,12 +446,215 @@ describe('assigned learning loop with real local persistence', () => {
 })
 
 describe('real ReadingPractice component behavior', () => {
+  it('retries after put succeeded inside a transaction whose final commit rolls back', async () => {
+    const view = mount(); await flush(); await readToResponse(view.root)
+    const id = 'reading:today:reading', original = copy(rows.get(id)!)
+    const transaction = db.transaction.bind(db); let abort = true
+    vi.spyOn(db, 'transaction').mockImplementation(async (mode, table, action) => {
+      const before = copy([...rows.entries()])
+      const result = await transaction(mode, table, action)
+      if (abort) { abort = false; rows = new Map(before); throw new Error('Final transaction commit rolled back') }
+      return result
+    })
+    await answer(view.root, 'reading-response', 'My local response must survive a transient commit failure.')
+    expect(rows.get(id)).toEqual(original)
+    await invoke(button(view.root, 'Retry saving'))
+    expect(rows.get(id)?.draft.response).toBe('My local response must survive a transient commit failure.')
+    expect([...rows.values()].filter(row => row.kind === 'reading-conflict')).toHaveLength(0)
+  })
+  it('keeps a submitted retell separate from an offline unsent version and offers optional recovery', async () => {
+    const base: StudySession = { id: 'reading:today:reading', kind: 'reading', materialId: material.id, startedAt: Date.now(), stage: 'respond',
+      draft: { passage: text, response: '', submittedResponse: '', retell: '', activeMs: 4000, sectionMs: [4000], readSections: [0] } }
+    const saved: StudySession = { ...base, completedAt: Date.now() + 10, stage: 'saved', draft: { ...base.draft,
+      response: 'A saved meaning response from device A.', submittedResponse: 'A saved meaning response from device A.',
+      retell: 'A submitted retell from device A.', observationAt: Date.now(), completedAt: Date.now() + 10 } }
+    const typing: StudySession = { ...base, draft: { ...base.draft, response: 'An unfinished original response from device B.', retell: 'An unfinished original retell from device B.' } }
+    const operation = (type: 'sessions' | 'events' | 'materials', record: unknown, clock: number, device = 1, previous?: unknown) => parseOperation({
+      id: crypto.randomUUID(), deviceId: `00000000-0000-4000-8000-00000000000${device}`, logicalClock: clock, entityType: type,
+      entityId: (record as RecordValue).id, kind: 'put', schemaVersion: 1,
+      payload: { record, changed: changedFields(previous as RecordValue | undefined, record as RecordValue) } })
+    const originals: StudyEvent[] = [
+      { id: `${base.id}:response`, sessionId: base.id, type: 'READING_RESPONSE', source: 'text', timestamp: Date.now(), data: { materialId: material.id, response: String(saved.draft.submittedResponse) } },
+      { id: `${base.id}:retell`, sessionId: base.id, type: 'READING_RETELL', source: 'text', timestamp: Date.now(), data: { materialId: material.id, response: String(saved.draft.retell) } },
+    ]
+    const operations = [operation('materials', material, 1), operation('sessions', base, 2), operation('sessions', saved, 3, 1, base),
+      ...originals.map(e => operation('events', e, 4)), operation('sessions', typing, 5, 2, base)]
+    const projected = await projectOperations(operations)
+    projected.records.sessions.forEach(row => rows.set(row.id, row as unknown as StudySession))
+    state.events.push(...projected.records.events as unknown as StudyEvent[])
+    const emitted: longitudinal.ReadingSavedEvidence[] = []
+    const view = mount({ onSaved: evidence => emitted.push(evidence) }); await flush()
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0]!.retell).toBe(saved.draft.retell)
+    expect(emitted[0]!.response).toBe(saved.draft.submittedResponse)
+    expect(emitted[0]!.score).toBeNull()
+    const canonicalSaved = copy(rows.get(base.id)!)
+    await invoke(button(view.root, 'Continue editing saved draft'))
+    expect(find(view.root, n => n.props.id === 'reading-response')?.value).toBe(typing.draft.response)
+    expect(find(view.root, n => n.props.id === 'reading-retell')?.value).toBe(typing.draft.retell)
+    await invoke(button(view.root, 'Save reading & retell'))
+    const recovery = [...rows.values()].find(row => row.kind === 'reading-recovery')!
+    expect(recovery.stage).toBe('saved')
+    expect(recovery.id).not.toBe(base.id)
+    expect(recovery.draft.priorExposure).toBe(true)
+    expect(recovery.draft.activeMs).toBe(0)
+    expect(rows.get(base.id)).toEqual(canonicalSaved)
+    expect(state.events.filter(e => e.sessionId === base.id)).toEqual(originals)
+    expect(state.events.find(e => e.sessionId === recovery.id && e.type === 'READING_RETELL')?.data?.response).toBe(typing.draft.retell)
+    expect(state.events.filter(e => e.sessionId === recovery.id).every(e => !e.data?.taskId && !e.data?.assessmentId)).toBe(true)
+    expect(state.completeTask).not.toHaveBeenCalled()
+    expect(emitted).toHaveLength(1)
+    const evidenceAfterRecovery = copy(state.events)
+    view.unmount()
+    const restored = mount({ onSaved: evidence => emitted.push(evidence) }); await flush()
+    await invoke(button(restored.root, 'Open recovered practice'))
+    expect(content(restored.root)).toContain('Saved. Ready to reflect on the meaning.')
+    expect([...rows.values()].filter(row => row.kind === 'reading-recovery')).toHaveLength(1)
+    expect(state.events).toEqual(evidenceAfterRecovery)
+    expect(state.completeTask).not.toHaveBeenCalled()
+    expect(emitted).toHaveLength(2) // the unchanged original attests on its own remount only
+  })
+  it('does not attest a torn legacy saved marker without matching submitted event payloads', async () => {
+    const id = 'reading:today:reading', onSaved = vi.fn()
+    rows.set(id, { id, kind: 'reading', materialId: material.id, startedAt: Date.now(), completedAt: Date.now(), stage: 'saved',
+      draft: { passage: text, submittedResponse: 'Original saved response.', retell: 'Unsubmitted replacement text.', observationAt: Date.now() } })
+    state.events.push({ id: `${id}:response`, type: 'READING_RESPONSE', source: 'text', sessionId: id, timestamp: Date.now(),
+      data: { materialId: material.id, response: 'Original saved response.' } },
+    { id: `${id}:retell`, type: 'READING_RETELL', source: 'text', sessionId: id, timestamp: Date.now(),
+      data: { materialId: material.id, response: 'Original submitted retell.' } })
+    mount({ onSaved }); await flush()
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(state.completeTask).not.toHaveBeenCalled()
+  })
+  it('attests a durably saved reading when its matching evidence arrives on a later sync page', async () => {
+    const id = 'reading:today:reading', onSaved = vi.fn()
+    rows.set(id, { id, kind: 'reading', materialId: material.id, startedAt: Date.now(), completedAt: Date.now(), stage: 'saved',
+      draft: { passage: text, submittedResponse: 'The saved response.', retell: 'The saved retell.', observationAt: Date.now() } })
+    mount({ onSaved }); await flush()
+    expect(onSaved).not.toHaveBeenCalled()
+    state.events.push({ id: `${id}:response`, type: 'READING_RESPONSE', source: 'text', sessionId: id, timestamp: Date.now(),
+      data: { materialId: material.id, response: 'The saved response.' } })
+    await flush(); expect(onSaved).not.toHaveBeenCalled()
+    state.events.push({ id: `${id}:retell`, type: 'READING_RETELL', source: 'text', sessionId: id, timestamp: Date.now(),
+      data: { materialId: material.id, response: 'The saved retell.' } })
+    await flush(); expect(onSaved).toHaveBeenCalledTimes(1)
+    expect(state.completeTask).not.toHaveBeenCalled()
+  })
+  it.each(['different-attempt', 'missing-observation'])('does not attest independent response/retell strings with %s proof', async mode => {
+    const id = 'reading:today:reading', onSaved = vi.fn()
+    rows.set(id, { id, kind: 'reading', materialId: material.id, startedAt: Date.now(), stage: 'saved', draft: {
+      passage: text, submittedResponse: 'Original response A.', retell: 'Different retell B.', ...(mode === 'different-attempt' ? { observationAt: Date.now() } : {}),
+    } })
+    state.events.push({ id: `${id}:response`, type: 'READING_RESPONSE', source: 'text', sessionId: id, timestamp: Date.now(), data: { materialId: material.id, response: 'Original response A.' } },
+      { id: `${id}:retell`, type: 'READING_RETELL', source: 'text', sessionId: id, timestamp: mode === 'different-attempt' ? Date.now() + 10 : Date.now(), data: { materialId: material.id, response: 'Different retell B.' } })
+    const view = mount({ onSaved }); await flush()
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(state.completeTask).not.toHaveBeenCalled()
+    expect(content(view.root)).toContain('Original response A.')
+  })
+  it('offers an actionable retry when the late-evidence durability read fails', async () => {
+    const id = 'reading:today:reading', onSaved = vi.fn(), errors: unknown[] = []
+    rows.set(id, { id, kind: 'reading', materialId: material.id, startedAt: Date.now(), completedAt: Date.now(), stage: 'saved',
+      draft: { passage: text, submittedResponse: 'The saved response.', retell: 'The saved retell.', observationAt: Date.now() } })
+    const view = mount({ onSaved }); mounted.at(-1)!.config.errorHandler = error => errors.push(error); await flush()
+    db.sessions.get.mockRejectedValueOnce(new Error('Transient read failure'))
+    state.events.push(...['response', 'retell'].map(kind => ({ id: `${id}:${kind}`, type: kind === 'response' ? 'READING_RESPONSE' : 'READING_RETELL',
+      source: 'text' as const, sessionId: id, timestamp: Date.now(), data: { materialId: material.id, response: kind === 'response' ? 'The saved response.' : 'The saved retell.' } })))
+    await flush()
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(errors).toEqual([])
+    await invoke(button(view.root, 'Retry saving'))
+    expect(onSaved).toHaveBeenCalledTimes(1)
+  })
+  it('durably recovers local input after a genuine remote replacement without overwriting the remote original', async () => {
+    const view = mount(); await flush(); await readToResponse(view.root)
+    const id = 'reading:today:reading', original = copy(rows.get(id)!)
+    const remote = { ...original, draft: { ...original.draft, response: 'The remote original must not be overwritten.' } }
+    rows.set(id, remote)
+    await answer(view.root, 'reading-response', 'The local text stays on this page for recovery.')
+    expect(rows.get(id)).toEqual(remote)
+    expect(content(view.root)).toContain('Another device updated this reading')
+    expect(find(view.root, n => n.props.id === 'reading-response')?.value).toBe('The local text stays on this page for recovery.')
+    const local = [...rows.values()].find(row => row.kind === 'reading-conflict')
+    expect(local?.draft.response).toBe('The local text stays on this page for recovery.')
+    expect(await guards[0]!()).toBe(true)
+    await invoke(button(view.root, 'Continue editing saved draft'))
+    expect(find(view.root, n => n.props.id === 'reading-response')?.value).toBe('The local text stays on this page for recovery.')
+    expect([...rows.values()].filter(row => row.kind === 'reading-conflict')).toHaveLength(1)
+    expect([...rows.values()].filter(row => row.kind === 'reading-recovery')).toHaveLength(1)
+    expect(rows.get(id)).toEqual(remote)
+    expect(state.events.some(e => e.type === 'READING_RESPONSE')).toBe(false)
+  })
+  it('blocks leaving until the latest local conflict copy commits and retries into the same bounded frontier', async () => {
+    const view = mount(); await flush(); await readToResponse(view.root)
+    const id = 'reading:today:reading', original = copy(rows.get(id)!)
+    const remote = { ...original, draft: { ...original.draft, response: 'The other device owns this original.' } }
+    rows.set(id, remote)
+    let failCommit = true
+    vi.spyOn(db, 'transaction').mockImplementation(async (_mode, _table, action) => {
+      const before = copy([...rows])
+      const result = await action()
+      if (failCommit) { rows = new Map(before); throw new Error('Conflict copy commit failed') }
+      return result
+    })
+    await answer(view.root, 'reading-response', 'My newest unsent text must survive this failure.')
+    expect(await guards[0]!()).toBe(false)
+    expect([...rows.values()].filter(row => row.kind === 'reading-conflict')).toHaveLength(0)
+    expect(rows.get(id)).toEqual(remote)
+    expect(find(view.root, n => n.props.id === 'reading-response')?.value).toBe('My newest unsent text must survive this failure.')
+    failCommit = false
+    await invoke(button(view.root, 'Retry saving'))
+    const first = [...rows.values()].find(row => row.kind === 'reading-conflict')!
+    expect(first.draft.response).toBe('My newest unsent text must survive this failure.')
+    await answer(view.root, 'reading-response', 'My later local edit supersedes only my own frontier.')
+    expect([...rows.values()].filter(row => row.kind === 'reading-conflict')).toHaveLength(1)
+    expect(rows.get(first.id)?.draft.response).toBe('My later local edit supersedes only my own frontier.')
+    expect(await guards[0]!()).toBe(true)
+    expect(rows.get(id)).toEqual(remote)
+    expect(state.events.some(e => ['READING_RESPONSE', 'READING_RETELL'].includes(e.type))).toBe(false)
+  })
   it('does not count page opening as reading or complete a task', async () => {
     const view = mount(); await flush(); await advance(10_000)
     expect(content(view.root)).toContain('Start reading')
     expect(state.events).toEqual([])
     expect([...rows.values()][0].draft.activeMs).toBe(0)
     expect(state.completeTask).not.toHaveBeenCalled()
+  })
+  it('does not create an old-session conflict after delayed hashing and a recovery switch', async () => {
+    const originalComponent = Reading
+    let holdHash = false, hashHeld = false, releaseHash!: () => void
+    const hashGate = new Promise<void>(resolve => { releaseHash = resolve })
+    Reading = loadComponent({ '../sync/protocol': { canonical, eventOccurrenceKey: async (value: RecordValue) => {
+      if (holdHash && 'editorId' in value) { holdHash = false; hashHeld = true; await hashGate }
+      return readingHash(value)
+    } } })
+    const id = 'reading:today:reading', recoveryId = 'reading-recovery:' + 'a'.repeat(64) + ':' + 'b'.repeat(64)
+    rows.set(id, { id, kind: 'reading', materialId: material.id, startedAt: Date.now(), stage: 'respond', draft: { passage: text, response: 'The unchanged original draft.' } })
+    rows.set(recoveryId, { id: recoveryId, kind: 'reading-recovery', materialId: material.id, startedAt: Date.now(), stage: 'respond', draft: {
+      passage: text, response: 'The separate recovered draft.', priorExposure: true,
+      syncRecovery: { sourceSessionId: id, rootSessionId: id, sourceVersion: 'b'.repeat(64), frontierId: 'reading-conflict:' + 'a'.repeat(64) },
+    } })
+    let releaseRead!: (value: StudySession) => void
+    const readGate = new Promise<StudySession>(resolve => { releaseRead = resolve })
+    let holdRead = true
+    try {
+      const view = mount(); await flush(); const original = copy(rows.get(id)!)
+      db.sessions.get.mockImplementation(async (key: string) => {
+        if (key === recoveryId && holdRead) { holdRead = false; return readGate }
+        return rows.get(key)
+      })
+      const opening = (button(view.root, 'Open recovered practice').props.onClick as () => Promise<void>)(); await flush()
+      expect(holdRead).toBe(false)
+      holdHash = true; window.dispatchEvent(new Event('blur')); await flush(); expect(hashHeld).toBe(true)
+      releaseRead(rows.get(recoveryId)!); await opening; await flush()
+      expect(find(view.root, n => n.props.id === 'reading-response')?.value).toBe('The separate recovered draft.')
+      releaseHash(); await flush()
+      expect(rows.get(id)).toEqual(original)
+      expect([...rows.values()].filter(row => row.kind === 'reading-conflict')).toHaveLength(0)
+      await answer(view.root, 'reading-response', 'The new session still saves under its own baseline.')
+      expect(rows.get(recoveryId)?.draft.response).toBe('The new session still saves under its own baseline.')
+      expect([...rows.values()].filter(row => row.kind === 'reading-conflict')).toHaveLength(0)
+    } finally { releaseHash(); Reading = originalComponent }
   })
   it('times only explicitly active visible reading and persists a paused reload', async () => {
     const view = mount(); await flush(); await invoke(button(view.root, 'Start reading')); await advance(3000)
@@ -486,6 +775,44 @@ describe('real ReadingPractice component behavior', () => {
     expect(state.events.find(e => e.type === 'READING_EVALUATED')).toMatchObject({ source: 'ai', score: 0.8,
       data: { rubricVersion: 'reading-meaning-v2', firstPass: true, priorExposure: false } })
     expect(state.events.filter(e => e.type === 'READING_RESPONSE')).toHaveLength(1)
+  })
+  it('does not publish late feedback or attach its score to a remotely replaced response on reload', async () => {
+    const id = 'reading:today:reading'
+    const proof = (response: string, retell: string): StudyEvent[] => [
+      { id: id + ':response', sessionId: id, type: 'READING_RESPONSE', source: 'text', timestamp: Date.now(), data: { materialId: material.id, response } },
+      { id: id + ':retell', sessionId: id, type: 'READING_RETELL', source: 'text', timestamp: Date.now(), data: { materialId: material.id, response: retell } },
+    ]
+    rows.set(id, { id, kind: 'reading', materialId: material.id, startedAt: Date.now(), completedAt: Date.now(), stage: 'saved', draft: {
+      passage: text, response: 'Original response A.', submittedResponse: 'Original response A.', retell: 'Original retell A.', observationAt: Date.now(), completedAt: Date.now(),
+    } })
+    state.events.push(...proof('Original response A.', 'Original retell A.'))
+    state.keySet = true; state.online = true
+    let complete!: (value: Pick<Evaluation, 'summary' | 'comprehension'>) => void
+    const pending = new Promise<Pick<Evaluation, 'summary' | 'comprehension'>>(resolve => { complete = resolve })
+    state.provider.evaluate.mockImplementation(() => pending)
+    const first = mount(); await flush()
+    const feedback = (button(first.root, 'Get feedback on the meaning').props.onClick as () => Promise<void>)(); await flush()
+    expect(state.provider.evaluate).toHaveBeenCalledTimes(1)
+    const remote = copy(rows.get(id)!)
+    Object.assign(remote.draft, { response: 'Different committed response B.', submittedResponse: 'Different committed response B.', retell: 'Different committed retell B.', feedback: '' })
+    rows.set(id, remote)
+    state.events.splice(0, state.events.length, ...proof('Different committed response B.', 'Different committed retell B.'))
+    complete({ summary: 'This feedback belongs only to response A.', comprehension: 0.95 })
+    await feedback; await flush()
+    expect(rows.get(id)).toEqual(remote)
+    expect(state.events.filter(event => event.type === 'READING_EVALUATED')).toEqual([])
+    // An older client might already have published A's evaluation. Keep that
+    // historical event intact, but it cannot grade B or populate B's feedback.
+    const oldEvaluation: StudyEvent = { id: id + ':evaluated', type: 'READING_EVALUATED', source: 'ai', sessionId: id, timestamp: Date.now(), score: 0.95,
+      data: { materialId: material.id, response: 'Original response A.', feedback: 'This feedback belongs only to response A.' } }
+    state.events.push(oldEvaluation)
+    first.unmount(); await flush()
+    const receipts: longitudinal.ReadingSavedEvidence[] = []
+    const restored = mount({ onSaved: value => receipts.push(value) }); await flush()
+    expect(content(restored.root)).toContain('Different committed response B.')
+    expect(receipts.at(-1)?.score).toBeNull()
+    expect(content(restored.root)).not.toContain('This feedback belongs only to response A.')
+    expect(state.events.find(event => event.id === oldEvaluation.id)).toEqual(oldEvaluation)
   })
   it('sends the actual component feedback through the real provider and server input contract', async () => {
     state.keySet = true; state.online = true

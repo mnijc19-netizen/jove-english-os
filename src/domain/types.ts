@@ -46,7 +46,7 @@ export interface Material {
   question: string; answer: string; keywords: string[]; chunks: MaterialChunk[]; createdAt: number;
 }
 export interface StudySession { id: string; kind: string; materialId?: string; startedAt: number; completedAt?: number; stage: string; draft: Record<string, unknown> }
-export interface PlanTask { id: string; kind: 'review' | 'listen' | 'learn' | 'shadow' | 'speak' | 'repair' | 'retell' | 'assessment'; title: string; minutes: number; reason: string; done: boolean; materialId?: string }
+export interface PlanTask { id: string; kind: 'review' | 'listen' | 'learn' | 'shadow' | 'speak' | 'repair' | 'retell' | 'assessment'; title: string; minutes: number; reason: string; done: boolean; materialId?: string; optional?: boolean }
 export interface DailyPlan { id: string; date: string; minutes: number; focus: SkillName; tasks: PlanTask[]; evidenceFingerprint: string; createdAt: number }
 export interface Message { id: string; role: 'user' | 'assistant'; text: string; timestamp: number; audioId?: string }
 export interface Conversation { id: string; mode: string; scenario: string; messages: Message[]; startedAt: number; completedAt?: number; evaluation?: Evaluation }

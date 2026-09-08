@@ -109,12 +109,13 @@ export const sessionSchema = z.strictObject({
 }).refine(s => s.completedAt === undefined || s.completedAt >= s.startedAt, 'Session ends before it starts')
 const taskSchema = z.strictObject({
   id, kind: z.enum(['review', 'listen', 'learn', 'shadow', 'speak', 'repair', 'retell', 'assessment']), title: short,
-  minutes: z.number().int().min(1).max(1440), reason: text, done: z.boolean(), materialId: id.optional(),
+  minutes: z.number().int().min(1).max(1440), reason: text, done: z.boolean(), materialId: id.optional(), optional: z.boolean().optional(),
 })
 export const planSchema = z.strictObject({
-  id, date: z.iso.date(), minutes: z.number().int().min(1).max(10_000), focus: z.enum(skillNames),
+  // Zero required minutes is valid only when every positive-duration task is optional.
+  id, date: z.iso.date(), minutes: z.number().int().min(0).max(10_000), focus: z.enum(skillNames),
   tasks: z.array(taskSchema).min(1).max(100), evidenceFingerprint: short, createdAt: timestampSchema,
-}).refine(p => new Set(p.tasks.map(t => t.id)).size === p.tasks.length && p.tasks.reduce((n, t) => n + t.minutes, 0) === p.minutes, 'Inconsistent plan tasks')
+}).refine(p => new Set(p.tasks.map(t => t.id)).size === p.tasks.length && p.tasks.reduce((n, t) => n + (t.optional ? 0 : t.minutes), 0) === p.minutes, 'Inconsistent plan tasks')
 const evaluationSchema = z.strictObject({
   provenance: z.strictObject({ provider: z.string().min(1).max(100), model: z.string().min(1).max(200) }).optional(),
   summary: text, strengths: strings, errors: z.array(evaluationErrorSchema).max(100),

@@ -219,7 +219,7 @@ export const useApp = defineStore("app", () => {
                 cards.value,
                 events.value,
                 materials.value,
-                { ...previous, tasks: previous.tasks.filter((t) => t.done || hasTaskStarted(t.id, events.value, clock.value)) },
+                { ...previous, tasks: previous.tasks.filter((t) => t.done || t.optional || hasTaskStarted(t.id, events.value, clock.value)) },
                 clock.value,
               ),
             );
@@ -308,7 +308,7 @@ export const useApp = defineStore("app", () => {
   }
   async function beginTask(taskId: string) {
     const task = plan.value.tasks.find((t) => t.id === taskId)
-    if (!task) return;
+    if (!task || task.done) return;
     await db.plans.put(JSON.parse(JSON.stringify(plan.value)));
     plans.value = await db.plans.toArray();
     await evidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
@@ -327,7 +327,7 @@ export const useApp = defineStore("app", () => {
     const p = structuredClone(
       JSON.parse(JSON.stringify(plan.value)),
     ) as DailyPlan;
-    const eligible = p.tasks.filter((t) => t.kind === kind && (!t.done || t.id === identity.taskId)
+    const eligible = p.tasks.filter((t) => t.kind === kind && (!t.optional || t.id === identity.taskId) && (!t.done || t.id === identity.taskId)
       && (!identity.materialId || t.materialId === identity.materialId)
       && (!identity.activity || taskActivity(t) === identity.activity)
       // A legacy/free writing page may match a language task, never a reader.

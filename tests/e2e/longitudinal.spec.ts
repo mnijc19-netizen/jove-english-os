@@ -3,6 +3,7 @@ import type { Page } from '@playwright/test'
 import { createEmptyCard } from 'ts-fsrs'
 import type { Assessment, DailyPlan, Material, Profile, StudyEvent, StudySession } from '../../src/domain/types'
 import { demoMaterials } from '../../src/content/materials'
+import { changedFields, parseOperation, projectOperations, type RecordValue } from '../../src/sync/protocol'
 
 const passage = 'People share stories because they want to understand one another. A good friend listens carefully and asks a kind question. We can learn from ordinary moments and small surprises. Try to explain your idea using familiar words and a useful detail. Then ask your friend what they think about it.'
 const reader = (now: number): Material => ({ id: 'reading-check-fixture', title: 'A story to share', topic: 'Everyday life', difficulty: 0.3,
@@ -23,6 +24,115 @@ async function put(page: Page, table: string, values: unknown[]) {
       for (const value of values) tx.objectStore(table).put(value) }
   }), { table, values })
 }
+
+test('synced unsent reading has an optional independent recovery that survives reload without repeating the assignment', async ({ page }) => {
+  await page.goto('#/'); await page.getByRole('heading', { level: 1 }).waitFor()
+  const now = await page.evaluate(() => Date.now()), date = await page.evaluate(() => new Date().toLocaleDateString('en-CA'))
+  const material = reader(now), taskId = `${date}:learn:${material.id}:reading`, sessionId = `reading:${taskId}`
+  const base: StudySession = { id: sessionId, kind: 'reading', materialId: material.id, startedAt: now - 5000, stage: 'respond',
+    draft: { passage, activeMs: 4000, response: '', submittedResponse: '', retell: '' } }
+  const saved = { ...base, completedAt: now, stage: 'saved', draft: { ...base.draft,
+    response: 'My original saved meaning response.', submittedResponse: 'My original saved meaning response.', retell: 'My original submitted retell.', observationAt: now, completedAt: now } }
+  const typed = { ...base, draft: { ...base.draft, response: 'My offline device kept this unfinished response.', retell: 'My offline device kept this unfinished retell.' } }
+  const operation = (entityType: 'materials' | 'sessions' | 'events', record: unknown, clock: number, device = 1, previous?: unknown) => parseOperation({
+    id: crypto.randomUUID(), deviceId: `00000000-0000-4000-8000-00000000000${device}`, logicalClock: clock,
+    entityType, entityId: (record as RecordValue).id, kind: 'put', schemaVersion: 1,
+    payload: { record, changed: changedFields(previous as RecordValue | undefined, record as RecordValue) } })
+  const evidence: StudyEvent[] = [
+    { id: `${sessionId}:response`, type: 'READING_RESPONSE', source: 'text', timestamp: now, sessionId, data: { materialId: material.id, taskId, response: saved.draft.response } },
+    { id: `${sessionId}:retell`, type: 'READING_RETELL', source: 'text', timestamp: now, sessionId, data: { materialId: material.id, taskId, response: saved.draft.retell } },
+    { id: `completed:${taskId}`, type: 'TASK_COMPLETED', source: 'objective', timestamp: now, data: { materialId: material.id, taskId, kind: 'reading', minutes: 15 } },
+  ]
+  // Actual protocol projection, synthetic owner-free data. This is UI/IDB
+  // acceptance, not an Auth/server/provider or acoustic-quality claim.
+  const projection = await projectOperations([operation('materials', material, 1), operation('sessions', base, 2), operation('sessions', saved, 3, 1, base),
+    ...evidence.map(row => operation('events', row, 4)), operation('sessions', typed, 5, 2, base)])
+  await put(page, 'materials', [material]); await put(page, 'sessions', projection.records.sessions); await put(page, 'events', projection.records.events)
+  await put(page, 'plans', [{ id: date, date, minutes: 45, focus: 'reading', evidenceFingerprint: 'recovery-fixture', createdAt: now,
+    tasks: [{ id: taskId, kind: 'learn', title: 'Read something worth sharing', materialId: material.id, minutes: 15, done: true, reason: 'Original submitted assignment' },
+      { id: `${date}:speak:practice`, kind: 'speak', title: 'Say it in your own words', minutes: 30, done: false, reason: 'Original next assignment' }] }])
+  await page.goto(`#/learn?material=${material.id}&task=${encodeURIComponent(taskId)}&mode=reading`)
+  await page.reload() // Hydrate the raw IDB fixtures through normal app startup.
+  await page.getByRole('button', { name: 'Continue editing saved draft', exact: true }).click()
+  await expect(page.locator('#reading-response')).toHaveValue(typed.draft.response)
+  await expect(page.locator('#reading-retell')).toHaveValue(typed.draft.retell)
+  await page.locator('#reading-response').fill('I continued my own recovered draft without replacing the original response.')
+  await expect.poll(async () => (await rows<StudySession>(page, 'sessions')).find(row => row.kind === 'reading-recovery')?.draft.response).toBe('I continued my own recovered draft without replacing the original response.')
+  await page.reload()
+  await page.getByRole('button', { name: 'Open recovered practice', exact: true }).click()
+  await expect(page.locator('#reading-response')).toHaveValue(/I continued my own recovered draft/)
+  await page.getByRole('button', { name: 'Save reading & retell', exact: true }).click()
+  await expect.poll(async () => (await rows<StudySession>(page, 'sessions')).find(row => row.kind === 'reading-recovery')?.stage).toBe('saved')
+  const allSessions = await rows<StudySession>(page, 'sessions'), recovered = allSessions.find(row => row.kind === 'reading-recovery')!
+  expect(allSessions.filter(row => row.kind === 'reading-recovery')).toHaveLength(1)
+  expect(allSessions.filter(row => row.kind === 'reading-conflict')).toHaveLength(1)
+  expect(allSessions.find(row => row.id === sessionId)?.draft).toMatchObject({ submittedResponse: saved.draft.submittedResponse, retell: saved.draft.retell })
+  expect(recovered.draft).toMatchObject({ activeMs: 0, priorExposure: true })
+  const events = await rows<StudyEvent>(page, 'events')
+  expect(events.filter(row => row.type === 'TASK_COMPLETED')).toEqual([evidence[2]])
+  for (const original of evidence) expect(events.find(row => row.id === original.id)).toEqual(original)
+  expect(events.filter(row => row.sessionId === recovered.id).every(row => !row.data?.taskId && !row.data?.assessmentId && row.score === undefined)).toBe(true)
+  expect(events.find(row => row.sessionId === recovered.id && row.type === 'READING_OBSERVATION')?.data).toMatchObject({ firstPass: false, priorExposure: true, activeSeconds: 0 })
+  await page.reload(); await page.getByRole('button', { name: 'Open recovered practice', exact: true }).click()
+  await expect(page.getByText('Saved. Ready to reflect on the meaning.', { exact: true })).toBeVisible()
+  expect((await rows<StudySession>(page, 'sessions')).filter(row => row.kind === 'reading-recovery')).toHaveLength(1)
+})
+
+test('completed required 45 minutes leaves the original nine-minute draft optional through reload and explicit completion', async ({ page }) => {
+  await page.goto('#/'); await page.getByRole('heading', { level: 1 }).waitFor()
+  const now = await page.evaluate(() => Date.now()), material = reader(now)
+  const profile = (await rows<Profile>(page, 'profiles'))[0]!
+  await put(page, 'profiles', [{ ...profile, onboarded: true, fatigue: 0, dailyMinutes: 45, createdAt: now }])
+  await put(page, 'materials', [material]); await page.reload()
+  const date = await page.evaluate(() => {
+    const today = new Date()
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+  })
+  // Today computes recommendations; the normal start action commits the actual
+  // assignment. Page readiness alone does not create a persisted plan.
+  await page.getByRole('button', { name: 'Start today’s practice', exact: true }).click()
+  await expect.poll(async () => (await rows<DailyPlan>(page, 'plans')).find(row => row.date === date)?.minutes).toBe(45)
+  const plan = (await rows<DailyPlan>(page, 'plans')).find(row => row.date === date)!
+  expect(plan.minutes).toBe(45)
+  const { taskPath } = await import('../../src/domain/engine')
+  const startedTask = plan.tasks.find(task => !task.done && !task.optional)!
+  await expect.poll(() => {
+    const [path, query] = new URL(page.url()).hash.slice(1).split('?')
+    return { path, query: Object.fromEntries(new URLSearchParams(query)) }
+  }).toEqual(taskPath(startedTask))
+  // Historical completed assignments are the fixture; the optional continuation
+  // below uses real DOM handlers, sessions, events, and the original task identity.
+  const taskId = `${date}:learn:offline-original:reading`, sessionId = `reading:${taskId}`
+  const optional = { id: taskId, kind: 'learn' as const, materialId: material.id, title: 'Original saved reading', reason: 'Other-device begun assignment', minutes: 9, done: false, optional: true }
+  const completed = { ...plan, tasks: [...plan.tasks.map(task => ({ ...task, done: true })), optional] }
+  const source: StudySession = { id: sessionId, kind: 'reading', materialId: material.id, startedAt: now, stage: 'respond',
+    draft: { passage: material.transcript, response: 'My original unfinished response about understanding friends.', retell: '', activeMs: 4000 } }
+  await put(page, 'plans', [completed]); await put(page, 'sessions', [source]); await page.goto('#/'); await page.reload()
+  await expect(page.getByText('Today’s plan is complete. Let it settle; there is no need to clear the backlog.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^(Start today’s practice|Continue my practice)$/ })).toHaveCount(0)
+  const resume = page.getByRole('button', { name: 'Continue optional practice', exact: true })
+  await expect(resume).toHaveCount(1)
+  expect((await rows<DailyPlan>(page, 'plans')).find(row => row.date === date)?.minutes).toBe(45)
+  expect((await rows<StudySession>(page, 'sessions')).find(row => row.id === sessionId)).toEqual(source)
+  const originalEvents = await rows<StudyEvent>(page, 'events')
+  expect(originalEvents.some(event => event.data?.taskId === taskId)).toBe(false)
+  await resume.click()
+  await expect(page.locator('#reading-response')).toHaveValue(source.draft.response as string)
+  await page.locator('#reading-retell').fill('Friends listen carefully and ask a kind question to understand each other.')
+  await page.getByRole('button', { name: 'Save reading & retell', exact: true }).click()
+  await expect.poll(async () => (await rows<StudySession>(page, 'sessions')).find(row => row.id === sessionId)?.stage).toBe('saved')
+  const finished = (await rows<DailyPlan>(page, 'plans')).find(row => row.date === date)!
+  expect(finished.tasks.find(task => task.id === taskId)).toEqual({ ...optional, done: true })
+  expect(finished.minutes).toBe(45)
+  const events = await rows<StudyEvent>(page, 'events')
+  for (const original of originalEvents) expect(events.find(event => event.id === original.id)).toEqual(original)
+  expect(events.filter(event => event.id === `completed:${taskId}`)).toHaveLength(1)
+  expect(events.find(event => event.id === `completed:${taskId}`)?.data?.minutes).toBe(9)
+  expect(events.find(event => event.id === `${sessionId}:response`)?.data?.response).toBe(source.draft.response)
+  await page.getByRole('button', { name: 'Continue to next task', exact: true }).click()
+  await expect(page.getByText('Today’s plan is complete. Let it settle; there is no need to clear the backlog.', { exact: true })).toBeVisible()
+  await page.reload(); await expect(page.getByRole('button', { name: 'View optional practice', exact: true })).toHaveCount(1)
+})
 
 test('Today automatically connects assigned listening, separate reading, durable chunk writing and speaking', async ({ page }) => {
   // Real router, DOM, media playback, store and IndexedDB. Bundled synthetic

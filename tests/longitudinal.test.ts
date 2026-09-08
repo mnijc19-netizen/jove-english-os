@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyCard, State } from 'ts-fsrs'
 import {
   analyzeLongitudinal, assessReadingFit, planLongitudinal, planRecovery, selectMeaningfulReviews,
-  assessmentEvaluator, comparableObservation, hasTaskStarted, readingComparisonKey, readingRubric, selectReadingAssessment,
+  assessmentEvaluator, comparableObservation, hasTaskStarted, startedTaskIds, readingComparisonKey, readingRubric, selectReadingAssessment,
   type LongitudinalInput, type ReadingObservationData, type Strand,
 } from '../src/domain/longitudinal'
 import type { Material, Modality, Profile, ReviewCard, Skill, SkillName, StudyEvent } from '../src/domain/types'
@@ -569,6 +569,59 @@ describe('invalid dates, clock skew and sync evidence integrity', () => {
 })
 
 describe('daily-plan integration and supported acoustic practice', () => {
+  it('preserves genuine in-progress work as optional with its original minutes after the quota is complete', () => {
+    const materials = [material('a'), material('b')]
+    const original = makePlan(profile, [], [], [], materials, undefined, NOW)
+    const reading = original.tasks.find(task => task.id.endsWith(':reading'))!
+    const begun = { ...reading, id: `${reading.id}:offline-other`, materialId: 'a' }
+    const merged = { ...original, tasks: [...original.tasks.map(task => ({ ...task, done: true })), begun], minutes: original.minutes + begun.minutes }
+    const events = [event('offline-start', NOW, { type: 'TASK_STARTED', skill: undefined, score: undefined, data: { taskId: begun.id } })]
+    const next = makePlan(profile, [], [], events, materials, merged, NOW + 1)
+    expect(next.tasks.filter(task => task.done)).toEqual(merged.tasks.filter(task => task.done))
+    expect(next.tasks.filter(task => !task.done)).toEqual([{ ...begun, optional: true }])
+    expect(next.minutes).toBe(45)
+    expect(planSchema.safeParse(next).success).toBe(true)
+    const refreshed = makePlan(profile, [], [], events, materials, next, NOW + 2)
+    expect(refreshed.tasks).toEqual(next.tasks)
+    const optionalDone = { ...next, tasks: next.tasks.map(task => task.id === begun.id ? { ...task, done: true } : task) }
+    const afterCompletion = makePlan(profile, [], [], events, materials, optionalDone, NOW + 3)
+    expect(afterCompletion.tasks).toEqual(optionalDone.tasks)
+    expect(afterCompletion.minutes).toBe(45)
+    const tomorrow = makePlan(profile, [], [], events, materials, next, NOW + DAY)
+    expect(tomorrow.tasks.every(task => !task.optional && !task.done && task.id !== begun.id)).toBe(true)
+  })
+  it('does not lock a task from a current start whose same ID has a contradictory future copy', () => {
+    const materials = [material('a'), material('b')]
+    const original = makePlan(profile, [], [], [], materials, undefined, NOW)
+    const reading = { ...original.tasks.find(task => task.id.endsWith(':reading'))!, minutes: 9 }
+    const completed = { ...original.tasks.find(task => task.kind === 'listen')!, done: true, minutes: 36 }
+    const previous = { ...original, minutes: 45, tasks: [completed, reading] }
+    const started = event('same-start', NOW, { type: 'TASK_STARTED', skill: undefined, score: undefined, data: { taskId: reading.id } })
+    const valid = makePlan(profile, [], [], [started], materials, previous, NOW)
+    expect(valid.tasks.find(task => task.id === reading.id)?.minutes).toBe(9)
+    const future = { ...started, timestamp: NOW + 1, data: { taskId: 'different-assignment' } }
+    const rejected = makePlan(profile, [], [], [started, future], materials, previous, NOW)
+    expect(rejected.tasks.find(task => task.id === reading.id)!.minutes).toBeLessThan(9)
+    expect(makePlan(profile, [], [], [future, started], materials, previous, NOW)).toEqual(rejected)
+  })
+  it.each([false, true])('retains both cross-device reading identities when the first is completed=%s', completed => {
+    const materials = [material('a'), material('b')]
+    const original = makePlan(profile, [], [], [], materials, undefined, NOW)
+    const first = original.tasks.find(task => task.id.endsWith(':reading'))!
+    const otherMaterial = materials.find(m => m.id !== first.materialId)!
+    const second = { ...first, id: `${original.date}:learn:${otherMaterial.id}:reading`, materialId: otherMaterial.id }
+    const merged = { ...original, tasks: original.tasks.map(task => task.id === first.id ? { ...task, done: completed } : task).concat(second), minutes: original.minutes + second.minutes }
+    const events = [first, second].map(task => event(`started:${task.id}`, NOW, { type: 'TASK_STARTED', skill: undefined, score: undefined,
+      data: { taskId: task.id, materialId: task.materialId!, kind: 'reading' } }))
+    const next = makePlan(profile, [], [], events, materials, merged, NOW + 1)
+    expect(next.tasks.find(task => task.id === first.id)).toMatchObject({ materialId: first.materialId, done: completed })
+    expect(next.tasks.find(task => task.id === second.id)).toMatchObject({ materialId: second.materialId, done: false })
+    expect(next.minutes).toBeLessThanOrEqual(45)
+    expect(next.tasks.filter(task => !task.done).reduce((sum, task) => sum + task.minutes, 0)).toBeLessThanOrEqual(45 - (completed ? first.minutes : 0))
+    expect(planSchema.safeParse(next).success).toBe(true)
+    const tomorrow = makePlan(profile, [], [], events, materials, next, NOW + DAY)
+    expect(tomorrow.tasks.every(task => !task.done && task.id !== first.id && task.id !== second.id)).toBe(true)
+  })
   it('routes an onboarded daily reader through an existing learn task identity', () => {
     const plan = makePlan(profile, [], [], [], [material('reader')], undefined, NOW)
     const reading = plan.tasks.find(t => t.kind === 'learn')!
@@ -654,6 +707,20 @@ describe('prospective comparison contracts and real adjustment integration', () 
     expect(hasTaskStarted('task', [event('start', NOW + 1, { type: 'TASK_STARTED', data })], NOW)).toBe(false)
     expect(hasTaskStarted('task', [event('start', NOW, { type: 'TASK_STARTED', data })], NOW)).toBe(true)
     expect(hasTaskStarted('other', [event('start', NOW, { type: 'TASK_STARTED', data })], NOW)).toBe(false)
+  })
+  it('indexes starts once across all tasks without hiding ambiguous, future or invalid history', () => {
+    const started = (id: string, taskId: string, timestamp = NOW) => event(id, timestamp, { type: 'TASK_STARTED', data: { taskId } })
+    const valid = started('valid', 'kept')
+    const history = [valid, { ...valid }, started('cross-task', 'discard-a'), started('cross-task', 'discard-b'),
+      started('future-conflict', 'discard-present'), started('future-conflict', 'other-future', NOW + 1),
+      started('future-only', 'future', NOW + 1), started('invalid', 'invalid', NaN),
+      event('offer-only', NOW, { type: 'TASK_OFFERED', data: { taskId: 'offered' } }),
+      event('actual-response', NOW, { type: 'reading-response', data: { taskId: 'response' } })]
+    expect([...startedTaskIds(history, NOW)].sort()).toEqual(['kept', 'response'])
+    expect([...startedTaskIds([...history].reverse(), NOW)].sort()).toEqual(['kept', 'response'])
+    for (const id of ['kept', 'response', 'discard-a', 'discard-b', 'discard-present', 'other-future', 'future', 'invalid', 'offered'])
+      expect(hasTaskStarted(id, history, NOW)).toBe(['kept', 'response'].includes(id))
+    expect(() => startedTaskIds(history, NaN)).toThrow(RangeError)
   })
   it('selects only approved available reading and prefers an unseen matched passage', () => {
     const a = material('a'), b = material('b')

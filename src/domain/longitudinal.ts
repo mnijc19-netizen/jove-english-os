@@ -248,8 +248,14 @@ export function assessmentEvaluator(result: unknown): string | null {
 }
 /** Useful to the store when preferences change. Offering/navigating past a task is not work. */
 export function hasTaskStarted(taskId: string, events: readonly StudyEvent[], now: number): boolean {
-  return cleanEvents(events, now).ordered.some(e => e.data?.taskId === taskId &&
+  return startedTaskIds(events, now).has(taskId)
+}
+/** Clean the full history once before indexing tasks: filtering by task first
+ * would hide contradictory same-ID evidence from another task or future copy. */
+export function startedTaskIds(events: readonly StudyEvent[], now: number): ReadonlySet<string> {
+  return new Set(cleanEvents(events, now).ordered.filter(e => nonempty(e.data?.taskId) &&
     ['TASK_STARTED', 'READING_STARTED', 'READING_RESPONSE', 'REVIEW_RESPONSE', 'ASSESSMENT_RESPONSE', 'LISTENING_RESPONSE', 'SPEAKING_RESPONSE'].includes(kindOf(e)))
+    .map(e => e.data!.taskId as string))
 }
 export const readingRubric = {
   version: 'reading-meaning-v2',
