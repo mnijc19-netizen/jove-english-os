@@ -428,6 +428,55 @@ class Server implements SyncRemote {
   async download(cursor: number, principal = owner) { if (principal !== owner) throw new Error('Wrong owner'); if (this.fail) throw new Error('Offline'); return this.rows.filter(row => row.cursor! > cursor).slice(0, 500) }
 }
 
+describe('journal preserves readable recording bytes during metadata replay', () => {
+  it('does not rewrite or materialize a recording for an unchanged projection', async () => {
+    const { db, journal } = await local(), server = new Server(), asset = recording()
+    await db.audio.add(asset)
+    await synchronize(journal, server)
+    const put = vi.spyOn(db.audio, 'put'), read = vi.spyOn(Blob.prototype, 'arrayBuffer')
+    await journal.merge([], await journal.cursor())
+    await journal.merge([], await journal.cursor())
+    expect(put).not.toHaveBeenCalled()
+    expect(read).not.toHaveBeenCalled()
+    expect((await db.audio.get(asset.id))?.blob.size).toBe(asset.blob.size)
+  })
+  it('materializes independent original bytes only when remote recording metadata changes', async () => {
+    const { db, journal } = await local(), server = new Server(), asset = recording()
+    await db.audio.add(asset)
+    await synchronize(journal, server)
+    const { blob, ...metadata } = asset, cursor = await journal.cursor()
+    const changed = op('audioMetadata', { ...metadata, label: 'Updated label', processed: true }, cursor + 1, deviceB, metadata)
+    const read = vi.spyOn(Blob.prototype, 'arrayBuffer')
+    await journal.merge([{ ...changed, cursor: cursor + 1, receivedAt: now }], cursor + 1)
+    expect(read).toHaveBeenCalledTimes(1)
+    const saved = (await db.audio.get(asset.id))!
+    expect(saved).toMatchObject({ label: 'Updated label', processed: true, mimeType: metadata.mimeType })
+    expect(saved.blob.type).toBe(blob.type)
+    expect(await saved.blob.arrayBuffer()).toEqual(await blob.arrayBuffer())
+    read.mockClear()
+    await journal.merge([], cursor + 1)
+    expect(read).not.toHaveBeenCalled()
+  })
+  it.each(['unavailable', 'incomplete'])('rolls back the whole merge if original bytes are %s during a metadata change', async failure => {
+    const { db, journal } = await local(), server = new Server(), asset = recording()
+    await db.audio.add(asset)
+    await synchronize(journal, server)
+    const { blob, ...metadata } = asset, cursor = await journal.cursor()
+    const before = { operations: await db.syncOperations.toArray(), snapshots: await db.syncSnapshots.toArray(), meta: await db.syncMeta.toArray() }
+    const changed = op('audioMetadata', { ...metadata, label: 'Must not replace original' }, cursor + 1, deviceB, metadata)
+    const read = vi.spyOn(Blob.prototype, 'arrayBuffer')
+    if (failure === 'unavailable') read.mockRejectedValueOnce(new DOMException('Fixture original unavailable', 'NotFoundError'))
+    else read.mockResolvedValueOnce(new ArrayBuffer(1))
+    await expect(journal.merge([{ ...changed, cursor: cursor + 1, receivedAt: now }], cursor + 1)).rejects.toThrow(failure === 'unavailable' ? 'Fixture original unavailable' : 'Original recording bytes are incomplete')
+    expect(await journal.cursor()).toBe(cursor)
+    expect(await db.syncOperations.toArray()).toEqual(before.operations)
+    expect(await db.syncSnapshots.toArray()).toEqual(before.snapshots)
+    expect(await db.syncMeta.toArray()).toEqual(before.meta)
+    expect((await db.audio.get(asset.id))?.label).toBe(metadata.label)
+    expect(await (await db.audio.get(asset.id))!.blob.arrayBuffer()).toEqual(await blob.arrayBuffer())
+  })
+})
+
 describe('event union and deterministic projections', () => {
   it('preserves independent offline evidence, deduplicates retries and converges regardless of arrival order', async () => {
     const a = op('events', event('heard') as unknown as RecordValue), b = op('events', event('spoke', 0.4) as unknown as RecordValue, 1, deviceB)

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vu
 import { onBeforeRouteLeave } from "vue-router";
 import { useApp } from "../stores/app";
 import { db } from "../db/db";
+import { updateAudioMetadata } from "../db/audio";
 import type { AudioAsset } from "../domain/types";
 import { AudioError, startRecording } from "../audio/recorder";
 import { attachRecording, recordingDrafts, retainRecording, saveRecording } from "../audio/recovery";
@@ -148,7 +149,7 @@ async function transcribe(): Promise<void> {
     if (result === undefined || disposed || id !== audioId.value) return;
     transcript.value = result;
     emit("transcribed", result);
-    try { await db.audio.update(id, { processed: true }); await app.refresh(); }
+    try { await updateAudioMetadata(db, id, { processed: true }); await app.refresh(); }
     catch { statusError.value = "The transcript is ready below. Its recording status could not be updated; your original audio is still retained."; }
   } finally { transcribing.value = false; }
 }

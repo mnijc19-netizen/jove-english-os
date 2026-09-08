@@ -1,6 +1,7 @@
 import type { JoveDatabase } from '../db/db'
 import Dexie from 'dexie'
 import { audioMetadataSchema } from '../db/schema'
+import { updateAudioMetadata } from '../db/audio'
 import { canonical, changedFields, compare, entitySchemas, entityTypes, eventOccurrenceKey, isPrivateAudio, parseOperation, projectOperations, stripReceipt, validateReceipt, withoutCacheAudioReferences, type EntityType, type RecordValue, type StoredOperation, type SyncOperation } from './protocol'
 import { canonicalReviewCard, hasReviewAttemptIdentity, restoreReviewAttempt, type ReviewAttempt } from './review'
 
@@ -239,8 +240,7 @@ export class SyncJournal {
         if (type === 'audioMetadata') {
           await this.database.syncMeta.put({ id: 'remoteAudio', value: rows })
           for (const row of rows) {
-            const local = await this.database.audio.get(row.id)
-            if (local) await this.database.audio.put({ ...audioMetadataSchema.parse(row), blob: local.blob })
+            await updateAudioMetadata(this.database, row.id, audioMetadataSchema.parse(row))
           }
         }
       }

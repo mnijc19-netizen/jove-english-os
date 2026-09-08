@@ -13,6 +13,7 @@ import * as shortcuts from '../src/audio/shortcuts'
 import * as cache from '../src/audio/cache'
 import { AudioError } from '../src/audio/recorder'
 import { defaultSettings, type AudioAsset } from '../src/domain/types'
+import { updateAudioMetadata } from '../src/db/audio'
 
 // Exercise the actual compiled SFCs and Vue lifecycle without adding jsdom/test-utils.
 class HostNode {
@@ -103,6 +104,7 @@ function loadSfc(name: string): Vue.Component {
   const dependencies: Record<string, unknown> = {
     vue: Vue, 'vue-router': { onBeforeRouteLeave: (guard: () => Promise<boolean>) => guards.push(guard) },
     '../stores/app': { useApp: () => appState }, '../db/db': { db }, '../audio/recorder': { AudioError, startRecording },
+    '../db/audio': { updateAudioMetadata },
     '../audio/recovery': recovery, '../audio/shortcuts': shortcuts, '../audio/cache': cache,
     '../composables/useRequest': { useRequest }, '../composables/useRecordingUrl': { useRecordingUrl }, '../audio/speech': localSpeech,
     './Icon.vue': { default: { setup: () => () => Vue.h('i') } },
@@ -295,12 +297,27 @@ describe('Recorder component recovery lifecycle', () => {
   })
   it('keeps the transcript when recording metadata update fails', async () => {
     const asset = makeAsset('existing'); rows.set(asset.id, asset); appState.audio = [asset]
-    db.audio.update.mockRejectedValue(new Error('metadata'))
+    db.audio.put.mockRejectedValueOnce(new Error('metadata'))
     const view = mount(Recorder, { savedAudioId: asset.id })
     await invoke(button(view.root, 'Transcribe recording'), 'onClick'); await flush()
     expect(view.transcribed).toHaveBeenCalledWith('My original words.')
     expect(content(view.root)).toContain('Transcript: My original words.')
     expect(rows.get(asset.id)?.blob).toBe(asset.blob)
+  })
+  it('preserves transcribed recording bytes and does not re-put an already processed original', async () => {
+    const asset = makeAsset('processed-original'); rows.set(asset.id, asset); appState.audio = [asset]
+    const view = mount(Recorder, { savedAudioId: asset.id })
+    await invoke(button(view.root, 'Transcribe recording'), 'onClick'); await flush()
+    const stored = rows.get(asset.id)!
+    expect(stored.processed).toBe(true)
+    expect(stored.blob).not.toBe(asset.blob)
+    expect(stored.blob.type).toBe(asset.blob.type)
+    expect(await stored.blob.arrayBuffer()).toEqual(await asset.blob.arrayBuffer())
+    db.audio.put.mockClear()
+    await invoke(button(view.root, 'Transcribe recording'), 'onClick'); await flush()
+    expect(appState.provider.transcribe).toHaveBeenCalledTimes(2)
+    expect(db.audio.put).not.toHaveBeenCalled()
+    expect(rows.get(asset.id)?.blob).toBe(stored.blob)
   })
   it('R starts only one visible recorder and ignores form editing/repeat/modifiers', async () => {
     const first = mount(Recorder), second = mount(Recorder, { label: 'Another' })
@@ -387,16 +404,16 @@ describe('Recorder parent activity guard', () => {
 
   it('keeps the parent active through STT result delivery and metadata completion', async () => {
     const asset = makeAsset('saved'); rows.set(asset.id, asset); appState.audio = [asset]
-    const response = deferred<string>(), metadata = deferred<number>()
+    const response = deferred<string>(), metadata = deferred<string>()
     appState.provider.transcribe.mockReturnValueOnce(response.promise)
-    db.audio.update.mockReturnValueOnce(metadata.promise)
+    db.audio.put.mockReturnValueOnce(metadata.promise)
     const view = mount(Recorder, { savedAudioId: asset.id })
     const transcribing = invoke(button(view.root, 'Transcribe recording'), 'onClick')
     expect(view.active.mock.calls).toEqual([[false], [true]])
     await flush(); response.resolve('The current transcript.'); await flush()
     expect(view.transcribed).toHaveBeenCalledWith('The current transcript.')
     expect(view.active.mock.calls).toEqual([[false], [true]])
-    metadata.resolve(1); await transcribing
+    metadata.resolve(asset.id); await transcribing
     expect(view.active.mock.calls).toEqual([[false], [true], [false]])
     expect(view.transcribed.mock.invocationCallOrder[0]!).toBeLessThan(view.active.mock.invocationCallOrder[2]!)
   })
@@ -623,7 +640,8 @@ describe('AudioPlayer completion, fallback and request identity', () => {
     expect(appState.generatedSpeech).toHaveBeenCalledWith('Hello.', expect.any(AbortSignal))
     const audio = find(view.root, node => node.type === 'audio')!
     audio.duration = 3.25; await invoke(audio, 'onLoadedmetadata')
-    expect(db.audio.update).toHaveBeenCalledWith(id, { duration: 3.25 })
+    expect(rows.get(id)?.duration).toBe(3.25)
+    expect(await rows.get(id)!.blob.arrayBuffer()).toEqual(await blob.arrayBuffer())
     invoke(audio, 'onEnded'); expect(view.ended).toHaveBeenCalledTimes(1)
     expect(localSpeech.speakLocalText).not.toHaveBeenCalled()
   })

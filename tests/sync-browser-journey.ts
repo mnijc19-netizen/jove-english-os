@@ -2,6 +2,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { chromium, firefox, webkit, expect as browserExpect, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { resolve } from 'node:path'
+import { verifyNativeAudioJournal } from './native-audio-journal'
 
 // Real local browser/Auth/PostgREST/Storage only. No trace, screenshot, session
 // export or console capture: test keys and OTPs exist exclusively in memory.
@@ -12,6 +13,7 @@ const api = 'http://127.0.0.1:55321', appOrigin = 'http://127.0.0.1:55173', appU
 // WebKit Blob/offline emulation is not a substitute for a regular Linux profile.
 const engines = (process.env.JOVE_SYNC_BROWSERS ?? (process.platform === 'win32' ? 'chromium,firefox' : 'chromium,firefox,webkit')).split(',')
 const failures: { path: string; status: number }[] = []
+const transportFailures: { service: string; kind: string }[] = []
 const localFetch: typeof fetch = (input, init) => {
   if (new URL(input instanceof Request ? input.url : String(input)).origin !== api) throw new Error('Non-Jove backend refused')
   return fetch(input, init)
@@ -92,6 +94,17 @@ describe('dedicated local browser account/reset/offline sync journeys', enabled,
     })
     const page = await context.newPage()
     page.on('response', response => { if (response.status() >= 400) failures.push({ path: new URL(response.url()).pathname, status: response.status() }) })
+    page.on('requestfailed', request => {
+      if (partitioned.has(context)) return // Expected deliberate network partition.
+      const path = new URL(request.url()).pathname, detail = request.failure()?.errorText ?? ''
+      const service = path.startsWith('/storage/') ? 'storage' : path.startsWith('/auth/') ? 'auth'
+        : path.startsWith('/rest/') ? 'database' : path.startsWith('/functions/') ? 'functions' : 'app'
+      const kind = /file.*(?:missing|not found)|not.*read.*file/i.test(detail) ? 'file-unavailable'
+        : /cancel|abort/i.test(detail) ? 'cancelled' : /disconnect|offline/i.test(detail) ? 'disconnected'
+          : /access|permission|denied/i.test(detail) ? 'denied' : 'other'
+      // Never retain raw errors, URLs, signed queries, headers or request bodies.
+      if (transportFailures.length < 20) transportFailures.push({ service, kind })
+    })
     await page.goto(appURL + '#/settings')
     await page.waitForFunction(async () => {
       const path = '/jove-english-os/src/db/db.ts', { db } = await new Function('path', 'return import(path)')(path)
@@ -245,6 +258,7 @@ describe('dedicated local browser account/reset/offline sync journeys', enabled,
     })
   }
   for (const engine of engines) it(engine + ': real OTP, two offline profiles, verified audio, safe reset/restore, reload and member isolation', async () => {
+    failures.length = 0; transportFailures.length = 0
     if (!['chromium', 'firefox', 'webkit'].includes(engine)) throw new Error('Unknown local browser engine')
     const type = { chromium, firefox, webkit }[engine as 'chromium' | 'firefox' | 'webkit']
     const contexts: BrowserContext[] = []
@@ -258,6 +272,13 @@ describe('dedicated local browser account/reset/offline sync journeys', enabled,
         const context = remoteBrowser ? await remoteBrowser.newContext() : await type.launchPersistentContext('', { headless: true })
         contexts.push(context); if (engine === 'webkit') webkitContexts.add(context)
       }
+      stage = 'native recording metadata and multipart preservation'
+      const probe = await contexts[0]!.newPage()
+      try {
+        await probe.route(appURL, route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Native recording regression</title>' }))
+        await probe.goto(appURL)
+        await verifyNativeAudioJournal(probe)
+      } finally { await probe.close() }
       stage = 'provision'; const fixture = await provision()
       stage = 'first page'; const a = await prepare(contexts[0]!)
       stage = 'existing local work before first account binding'
@@ -337,13 +358,33 @@ describe('dedicated local browser account/reset/offline sync journeys', enabled,
       const diagnostics = await Promise.all(contexts.map(async context => {
         try { return await context.pages().at(-1)?.evaluate(async () => {
           const path = '/jove-english-os/src/stores/cloud.ts', cloud = (await new Function('path', 'return import(path)')(path)).useCloud()
+          const dbPath = '/jove-english-os/src/db/db.ts', { db } = await new Function('path', 'return import(path)')(dbPath)
+          const asset = await db.audio.get('browser-original')
+          const safeName = (error: unknown) => {
+            const name = error && typeof error === 'object' && 'name' in error ? error.name : ''
+            return typeof name === 'string' && ['NotFoundError', 'NotReadableError', 'AbortError', 'SecurityError', 'TypeError', 'InvalidStateError'].includes(name)
+              ? name : 'unavailable'
+          }
+          let originalRead = 'absent', multipartRead = 'not-attempted'
+          if (asset?.blob) {
+            try {
+              const bytes = new Uint8Array(await asset.blob.arrayBuffer())
+              originalRead = bytes.join(',') === '82,73,70,70,1,2,3,4' ? 'verified-fixture' : 'different-bytes'
+            } catch (error) { originalRead = safeName(error) }
+            try {
+              const form = new FormData(); form.append('cacheControl', '3600'); form.append('', asset.blob)
+              const encoded = await new Request('https://example.invalid/', { method: 'POST', body: form }).arrayBuffer()
+              multipartRead = encoded.byteLength > 8 ? 'encoded-fixture' : 'empty'
+            } catch (error) { multipartRead = safeName(error) }
+          }
           return { configured: cloud.configured, signedIn: !!cloud.userId, status: cloud.status, problem: cloud.problem,
-            pending: cloud.pending, hasMore: cloud.hasMore, deferred: cloud.deferred, audioPending: cloud.audioPending, paused: cloud.paused }
+            pending: cloud.pending, hasMore: cloud.hasMore, deferred: cloud.deferred, audioPending: cloud.audioPending,
+            paused: cloud.paused, originalRead, multipartRead, originalIsBlob: asset?.blob instanceof Blob }
         }) } catch { return { appState: false, url: context.pages().at(-1)?.url().split('?')[0] } }
       }))
       const message = String(failure instanceof Error ? failure.message : failure)
       const safeFailure = /code verification/.test(stage) ? (message.startsWith('Local Auth code request denied:') ? message : '') : message.replace(/(?:eyJ|sb_)[A-Za-z0-9_.-]+/g, '[redacted]')
-      throw new Error(engine + ' local account journey failed at: ' + stage + '; detail: ' + safeFailure + '; safe status: ' + JSON.stringify(diagnostics) + '; HTTP failures: ' + JSON.stringify(failures))
+      throw new Error(engine + ' local account journey failed at: ' + stage + '; detail: ' + safeFailure + '; safe status: ' + JSON.stringify(diagnostics) + '; HTTP failures: ' + JSON.stringify(failures) + '; transport failures: ' + JSON.stringify(transportFailures))
     } finally {
       // Playwright may create an automatic failure-context snapshot even with
       // trace/video disabled. Clear sensitive form values and leave a blank page

@@ -6,6 +6,7 @@ import { speechCacheId, speechIdentity } from "../audio/cache";
 import { useRequest } from "../composables/useRequest";
 import { useApp } from "../stores/app";
 import { db } from "../db/db";
+import { updateAudioMetadata } from "../db/audio";
 const props = defineProps<{ src?: string; text?: string; label?: string; compact?: boolean; synthetic?: boolean; startSeconds?: number; endSeconds?: number }>();
 const emit = defineEmits<{ played: []; ended: [] }>();
 const app = useApp();
@@ -203,7 +204,7 @@ async function loadedMetadata(): Promise<void> {
   try {
     const stored = await db.audio.get(id);
     if (stored?.kind === "generated" && stored.blob.size === blob.size && stored.blob.type === blob.type) {
-      await db.audio.update(id, { duration: measured });
+      await updateAudioMetadata(db, id, { duration: measured });
     }
   } catch {
     if (!disposed) error.value = "Audio is available, but its measured duration could not be saved yet.";
