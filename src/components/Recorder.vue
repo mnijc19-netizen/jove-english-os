@@ -199,7 +199,8 @@ defineExpose({ toggle });
       <a v-if="playback" class="text-button" :href="playback" :download="'recording-' + pending.asset.id + '.' + (pending.asset.mimeType.includes('mp4') ? 'm4a' : pending.asset.mimeType.includes('ogg') ? 'ogg' : pending.asset.mimeType.includes('wav') ? 'wav' : 'webm')">Download recording</a>
     </div>
     <div v-if="existing && !pending" class="row wrap">
-      <span class="pill"><Icon name="check" :size="14" />Saved on this device</span>
+      <span v-if="saving" class="muted" role="status">Recording saved; finishing local updates…</span>
+      <span v-else class="pill"><Icon name="check" :size="14" />Saved on this device</span>
       <button class="text-button" :disabled="locked || recording || !app.keySet || !app.online" @click="transcribe">{{ transcribing ? "Transcribing…" : "Transcribe recording" }}</button>
       <button v-if="busy" class="text-button" @click="cancel">Cancel</button>
     </div>
