@@ -25,6 +25,11 @@ export const evaluationSchema = z.strictObject({
   }).optional(),
 })
 
+// Added by the transport from the provider response, never requested from LLM text.
+export const evaluatedResultSchema = evaluationSchema.extend({
+  provenance: z.strictObject({ provider: z.string().min(1).max(100), model: z.string().min(1).max(200) }).optional(),
+})
+
 // The provider owns educational content only, never approval, provenance or audio locations.
 export const materialSchema = z.strictObject({
   title: z.string().min(1).max(160), topic: z.string().min(1).max(200),

@@ -7,6 +7,7 @@ import { indexedDB, IDBKeyRange } from 'fake-indexeddb'
 import * as Vue from 'vue'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useRequest } from '../src/composables/useRequest'
+import { useRecordingUrl } from '../src/composables/useRecordingUrl'
 import * as recovery from '../src/audio/recovery'
 import * as shortcuts from '../src/audio/shortcuts'
 import * as cache from '../src/audio/cache'
@@ -19,7 +20,7 @@ class HostNode {
   children: HostNode[] = []
   props: Record<string, unknown> = {}
   text = ''
-  duration = 0; currentTime = 0; playbackRate = 1
+  duration = 0; currentTime = 0; playbackRate = 1; readyState = 1
   play = vi.fn(async () => { invoke(this, 'onPlay') })
   pause = vi.fn(() => { invoke(this, 'onPause') })
   constructor(readonly type: string) {}
@@ -88,7 +89,7 @@ let capture: { stop: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> 
 const startRecording = vi.fn()
 const db = { audio: { put: vi.fn(), get: vi.fn(), update: vi.fn(), toArray: vi.fn() }, transaction: vi.fn() }
 const localSpeech = { speakLocalText: vi.fn(), stopSpeech: vi.fn(), pauseSpeech: vi.fn(), resumeSpeech: vi.fn() }
-let Recorder: Vue.Component, AudioPlayer: Vue.Component
+let Recorder: Vue.Component, AudioPlayer: Vue.Component, SavedRecording: Vue.Component
 function makeState() {
   return Vue.reactive({ audio: [] as AudioAsset[], settings: { ...defaultSettings, ttsModel: 'test/tts', voice: 'a' }, keySet: true, online: true,
     refresh: vi.fn(async () => { appState.audio = [...rows.values()] }),
@@ -103,7 +104,7 @@ function loadSfc(name: string): Vue.Component {
     vue: Vue, 'vue-router': { onBeforeRouteLeave: (guard: () => Promise<boolean>) => guards.push(guard) },
     '../stores/app': { useApp: () => appState }, '../db/db': { db }, '../audio/recorder': { AudioError, startRecording },
     '../audio/recovery': recovery, '../audio/shortcuts': shortcuts, '../audio/cache': cache,
-    '../composables/useRequest': { useRequest }, '../audio/speech': localSpeech,
+    '../composables/useRequest': { useRequest }, '../composables/useRecordingUrl': { useRecordingUrl }, '../audio/speech': localSpeech,
     './Icon.vue': { default: { setup: () => () => Vue.h('i') } },
   }
   const exports: { default?: Vue.Component } = {}
@@ -114,7 +115,7 @@ function loadSfc(name: string): Vue.Component {
   }, exports)
   return exports.default!
 }
-beforeAll(() => { Recorder = loadSfc('Recorder.vue'); AudioPlayer = loadSfc('AudioPlayer.vue') })
+beforeAll(() => { Recorder = loadSfc('Recorder.vue'); AudioPlayer = loadSfc('AudioPlayer.vue'); SavedRecording = loadSfc('SavedRecording.vue') })
 beforeEach(() => {
   rows = new Map(); guards.length = 0; recovery.recordingDrafts.clear()
   appState = makeState()
@@ -127,7 +128,7 @@ beforeEach(() => {
   db.audio.update.mockReset().mockImplementation(async (id: string, changes: Partial<AudioAsset>) => { const row = rows.get(id); if (row) rows.set(id, { ...row, ...changes }); return row ? 1 : 0 })
   for (const mock of Object.values(localSpeech)) mock.mockReset()
   vi.stubGlobal('window', new EventTarget())
-  vi.stubGlobal('document', { activeElement: null })
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { activeElement: null, visibilityState: 'visible' }))
   vi.stubGlobal('Element', HostNode)
   vi.stubGlobal('location', { hash: '#/speak' })
   vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:test/' + crypto.randomUUID())
@@ -138,6 +139,68 @@ afterEach(async () => {
   await flush()
   recovery.recordingDrafts.clear()
   vi.restoreAllMocks(); vi.unstubAllGlobals()
+})
+
+describe.each(['Recorder', 'SavedRecording'])('%s playback identity during hydration', name => {
+  const show = (id: string) => mount(name === 'Recorder' ? Recorder : SavedRecording, name === 'Recorder' ? { savedAudioId: id } : { audioId: id })
+  const audio = (root: HostNode) => find(root, node => node.type === 'audio')!
+  function trackComparisons() {
+    const pending: Promise<ArrayBuffer>[] = [], digest = crypto.subtle.digest.bind(crypto.subtle)
+    vi.spyOn(crypto.subtle, 'digest').mockImplementation((algorithm, data) => {
+      const result = digest(algorithm, data); pending.push(result); return result
+    })
+    return async () => {
+      // Observe actual crypto completion, not a fixed number of event-loop turns.
+      await vi.waitFor(() => expect(pending).toHaveLength(2))
+      await Promise.all(pending); await flush()
+    }
+  }
+  it('keeps the active source when IndexedDB refresh returns the same original bytes in a new Blob', async () => {
+    const compared = trackComparisons()
+    const original = makeAsset('stable')
+    appState.audio = [original]
+    const view = show(original.id); await flush()
+    const player = audio(view.root), source = player.props.src
+    await player.play(); player.currentTime = 0.6
+    appState.audio = [{ ...original, blob: new Blob([await original.blob.arrayBuffer()], { type: original.mimeType }), processed: true }]
+    await compared()
+    expect(audio(view.root)).toBe(player)
+    expect(player.props.src).toBe(source)
+    expect(player.currentTime).toBe(0.6)
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled()
+    view.unmount()
+    expect(URL.revokeObjectURL).toHaveBeenCalledExactlyOnceWith(source)
+  })
+  it('replaces changed bytes even when ID and byte length are unchanged', async () => {
+    const compared = trackComparisons()
+    const original = makeAsset('changed')
+    appState.audio = [original]
+    const view = show(original.id); await flush()
+    const source = audio(view.root).props.src
+    const changed = new Blob(['modified-' + original.id], { type: original.mimeType })
+    expect(changed.size).toBe(original.blob.size)
+    appState.audio = [{ ...original, blob: changed }]; await compared()
+    expect(audio(view.root).props.src).not.toBe(source)
+    expect(URL.createObjectURL).toHaveBeenLastCalledWith(changed)
+    expect(URL.revokeObjectURL).toHaveBeenCalledExactlyOnceWith(source)
+  })
+  it('does not let a late comparison replace the next recording or recreate a URL after unmount', async () => {
+    const original = makeAsset('old'), next = makeAsset('next')
+    const bytes = await original.blob.arrayBuffer(), delayed = deferred<ArrayBuffer>()
+    vi.spyOn(original.blob, 'arrayBuffer').mockReturnValue(delayed.promise)
+    appState.audio = [original]
+    const view = show(original.id); await flush()
+    appState.audio = [{ ...original, blob: new Blob([bytes], { type: original.mimeType }) }, next]
+    await Vue.nextTick()
+    view.props[name === 'Recorder' ? 'savedAudioId' : 'audioId'] = next.id; await flush()
+    const nextSource = audio(view.root).props.src
+    view.unmount()
+    delayed.resolve(bytes); await flush()
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(2)
+    expect(URL.revokeObjectURL).toHaveBeenLastCalledWith(nextSource)
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('Recorder component recovery lifecycle', () => {
@@ -468,6 +531,78 @@ describe('Recorder configured audio capacity', () => {
 })
 
 describe('AudioPlayer completion, fallback and request identity', () => {
+  it('plays a reviewed range with relative position and clamps seeking', async () => {
+    const view = mount(AudioPlayer, { src: 'audio/excerpt.wav', startSeconds: 2, endSeconds: 7 })
+    const audio = find(view.root, node => node.type === 'audio')!
+    audio.duration = 10; await invoke(audio, 'onLoadedmetadata'); await flush()
+    expect(audio.currentTime).toBe(2)
+    const seek = find(view.root, node => node.props['aria-label'] === 'Audio position')!
+    expect(seek.props.max).toBe(5)
+    await view.child.value!.toggle()
+    invoke(seek, 'onInput', { target: { value: '3' } })
+    expect(audio.currentTime).toBe(5)
+    invoke(seek, 'onInput', { target: { value: '99' } })
+    expect(audio.currentTime).toBe(7); expect(audio.pause).toHaveBeenCalled()
+    expect(view.ended).not.toHaveBeenCalled()
+    view.child.value!.stop()
+  })
+  it('does not turn elapsed wall time or buffering into a completed playback', async () => {
+    vi.useFakeTimers()
+    try {
+      const view = mount(AudioPlayer, { src: 'audio/excerpt.wav', startSeconds: 2, endSeconds: 3 })
+      const audio = find(view.root, node => node.type === 'audio')!
+      audio.duration = 10; await invoke(audio, 'onLoadedmetadata')
+      await view.child.value!.toggle()
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(audio.currentTime).toBe(2); expect(view.ended).not.toHaveBeenCalled()
+      invoke(audio, 'onWaiting')
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(audio.currentTime).toBe(2); expect(view.ended).not.toHaveBeenCalled()
+      invoke(audio, 'onPlaying')
+      audio.currentTime = 3
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(view.ended).toHaveBeenCalledOnce()
+      view.child.value!.stop()
+    } finally { vi.useRealTimers() }
+  })
+  it('does not credit a paused or native seek to the end as listening', async () => {
+    const view = mount(AudioPlayer, { src: 'audio/excerpt.wav', startSeconds: 2, endSeconds: 7 })
+    const audio = find(view.root, node => node.type === 'audio')!
+    audio.duration = 10; await invoke(audio, 'onLoadedmetadata'); await view.child.value!.toggle()
+    invoke(audio, 'onPause')
+    audio.currentTime = 7
+    invoke(audio, 'onSeeking'); invoke(audio, 'onSeeked'); invoke(audio, 'onTimeupdate'); invoke(audio, 'onEnded')
+    expect(view.ended).not.toHaveBeenCalled()
+    view.child.value!.stop()
+  })
+  it('accepts the documented rounding tolerance only on a real media end', async () => {
+    const view = mount(AudioPlayer, { src: 'audio/excerpt.wav', startSeconds: 2, endSeconds: 7.03 })
+    const audio = find(view.root, node => node.type === 'audio')!
+    audio.duration = 7; await invoke(audio, 'onLoadedmetadata'); await view.child.value!.toggle()
+    audio.currentTime = 7
+    invoke(audio, 'onTimeupdate')
+    expect(view.ended).not.toHaveBeenCalled()
+    invoke(audio, 'onEnded')
+    expect(view.ended).toHaveBeenCalledOnce()
+    view.child.value!.stop()
+  })
+  it('rejects an inconsistent range instead of playing the wrong audio', async () => {
+    const view = mount(AudioPlayer, { src: 'audio/excerpt.wav', startSeconds: 2, endSeconds: 12 })
+    const audio = find(view.root, node => node.type === 'audio')!
+    audio.duration = 10; await invoke(audio, 'onLoadedmetadata'); await view.child.value!.toggle(); await flush()
+    expect(audio.play).not.toHaveBeenCalled(); expect(view.played).not.toHaveBeenCalled()
+    expect(find(view.root, node => node.props.role === 'alert')).toBeDefined()
+  })
+  it('changing sentence ranges stops playback and updates the relative duration', async () => {
+    const view = mount(AudioPlayer, { src: 'audio/excerpt.wav', startSeconds: 2, endSeconds: 7 })
+    const audio = find(view.root, node => node.type === 'audio')!
+    audio.duration = 10; await invoke(audio, 'onLoadedmetadata'); await view.child.value!.toggle()
+    view.props.startSeconds = 4; view.props.endSeconds = 6; await flush()
+    expect(audio.currentTime).toBe(4)
+    expect(find(view.root, node => node.props['aria-label'] === 'Audio position')?.props.max).toBe(2)
+    document.dispatchEvent(new Event('visibilitychange'))
+    view.child.value!.stop()
+  })
   it('emits played separately and ended only on actual bundled audio completion', async () => {
     const view = mount(AudioPlayer, { src: 'audio/demo.wav', text: 'Hello.' })
     await view.child.value!.toggle(); await flush()

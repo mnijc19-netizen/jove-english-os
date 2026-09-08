@@ -181,9 +181,9 @@ test("listening first, durable draft, gaps, recall, review scheduling and backup
       mimeType: "application/json",
       buffer: content,
     });
-  await page.getByRole("button", { name: "Validate & restore backup" }).click();
+  await page.getByRole("button", { name: "Validate & merge backup" }).click();
   await expect(
-    page.getByRole("status").filter({ hasText: "restored" }),
+    page.getByRole("status").filter({ hasText: "Backup merged with retained learning history." }),
   ).toBeVisible();
   expect((await rows(page, "chunks")).length).toBe(chunks.length);
   await page
@@ -193,7 +193,7 @@ test("listening first, durable draft, gaps, recall, review scheduling and backup
       mimeType: "application/json",
       buffer: Buffer.from("{invalid"),
     });
-  await page.getByRole("button", { name: "Validate & restore backup" }).click();
+  await page.getByRole("button", { name: "Validate & merge backup" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
   expect((await rows(page, "chunks")).length).toBe(chunks.length);
   expect(errors).toEqual([]);
@@ -214,7 +214,7 @@ test("recording is saved before transcription and survives an API error", async 
   await page.waitForTimeout(1200);
   await page.getByRole("button", { name: "Stop & save", exact: true }).click();
   await expect(
-    page.getByText("Saved on this device", { exact: true }),
+    page.locator(".recorder").getByText("Saved on this device", { exact: true }),
   ).toBeVisible();
   expect((await rows(page, "audio")).length).toBe(1);
   await page
@@ -240,6 +240,8 @@ test("recording is saved before transcription and survives an API error", async 
   await open(page, "settings");
   await page.locator("#api-key").fill("test-key-not-real");
   await page.getByRole("button", { name: "Save key", exact: true }).click();
+  await expect(page.getByText("Key saved locally", { exact: true })).toBeVisible();
+  expect((await rows(page, "secrets")).filter(row => row.id === "openrouter")).toHaveLength(1);
   await page.route("https://openrouter.ai/api/v1/**", (r) =>
     r.fulfill({
       status: 401,
@@ -253,7 +255,15 @@ test("recording is saved before transcription and survives an API error", async 
   await expect(page.getByRole("alert")).toBeVisible();
   expect((await rows(page, "audio")).length).toBe(1);
   await page.getByRole("button", { name: "Remove key", exact: true }).click();
-  await expect(page.getByText("Not connected", { exact: true })).toBeVisible();
+  await expect(page.getByText("No browser key", { exact: true })).toBeVisible();
+  await expect(page.locator("#api-key")).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Remove key", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Test connection", exact: true })).toBeDisabled();
+  expect((await rows(page, "secrets")).filter(row => ["openrouter", "provider-mode"].includes(String(row.id)))).toHaveLength(0);
+  await page.reload();
+  await expect(page.getByText("No browser key", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Test connection", exact: true })).toBeDisabled();
+  expect((await rows(page, "audio")).length).toBe(1);
   expect(errors).toEqual([]);
 });
 

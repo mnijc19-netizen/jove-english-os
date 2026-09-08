@@ -4,13 +4,15 @@ import { pauseSpeech, resumeSpeech, speakLocalText, speakText, stopSpeech } from
 
 class FakeRecorder {
   static instance: FakeRecorder
+  static autoStart = true
   static isTypeSupported = vi.fn((type: string) => type.startsWith('audio/webm'))
   mimeType: string
   state = 'inactive'
   ondataavailable: ((event: { data: Blob }) => void) | null = null
   onstop: (() => void) | null = null
   onerror: (() => void) | null = null
-  start = vi.fn(() => { this.state = 'recording' })
+  onstart: (() => void) | null = null
+  start = vi.fn(() => { this.state = 'recording'; if (FakeRecorder.autoStart) queueMicrotask(() => this.onstart?.()) })
   stop = vi.fn(() => {
     this.state = 'inactive'
     queueMicrotask(() => { this.ondataavailable?.({ data: new Blob(['final-audio'], { type: this.mimeType }) }); this.onstop?.() })
@@ -24,12 +26,61 @@ beforeEach(() => {
   track = { stop: vi.fn(), onended: null }
   getUserMedia = vi.fn(async () => ({ getTracks: () => [track] }))
   FakeRecorder.isTypeSupported.mockImplementation(type => type.startsWith('audio/webm'))
+  FakeRecorder.autoStart = true
   vi.stubGlobal('navigator', { mediaDevices: { getUserMedia } })
   vi.stubGlobal('MediaRecorder', FakeRecorder)
 })
 afterEach(() => { stopSpeech(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('browser recording lifecycle', () => {
+  it('does not expose a recording handle or count preparation time before the native start event', async () => {
+    FakeRecorder.autoStart = false
+    let ready = false
+    const pending = startRecording().then(handle => { ready = true; return handle })
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(ready).toBe(false)
+    FakeRecorder.instance.onstart?.()
+    const handle = await pending
+    await vi.advanceTimersByTimeAsync(2100)
+    expect((await handle.stop()).duration).toBeCloseTo(2.1)
+    expect(track.stop).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('bounds a missing native start event and preserves final bytes without inventing capture time', async () => {
+    FakeRecorder.autoStart = false
+    const pending = startRecording().catch(error => error)
+    await vi.advanceTimersByTimeAsync(5001)
+    const error = await pending
+    expect(error.code).toBe('RECORDING')
+    expect(await error.recovery.blob.text()).toBe('final-audio')
+    expect(error.recovery.duration).toBe(0)
+    expect(track.stop).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('bounds missing start and stop events and cannot activate after setup failure', async () => {
+    FakeRecorder.autoStart = false
+    const pending = startRecording().catch(error => error)
+    await vi.advanceTimersByTimeAsync(1)
+    FakeRecorder.instance.stop.mockImplementation(() => { FakeRecorder.instance.state = 'inactive' })
+    await vi.advanceTimersByTimeAsync(5000)
+    FakeRecorder.instance.onstart?.()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await pending).toMatchObject({ code: 'RECORDING', recovery: undefined })
+    expect(track.stop).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('retains already delivered bytes when native setup errors before its start event', async () => {
+    FakeRecorder.autoStart = false
+    const pending = startRecording().catch(error => error)
+    await vi.advanceTimersByTimeAsync(1)
+    FakeRecorder.instance.ondataavailable?.({ data: new Blob(['original-before-start'], { type: 'audio/webm' }) })
+    FakeRecorder.instance.onerror?.()
+    const error = await pending
+    expect(error.code).toBe('RECORDING')
+    expect(await error.recovery.blob.text()).toBe('original-before-start')
+    expect(track.stop).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
   it('returns final real audio, correct MIME and seconds; stop is idempotent and releases microphone', async () => {
     const handle = await startRecording()
     expect(getUserMedia).toHaveBeenCalledWith({ audio: true })
@@ -120,6 +171,188 @@ describe('browser recording lifecycle', () => {
     vi.stubGlobal('MediaRecorder', class { static isTypeSupported() { return true }; constructor() { throw new Error('private device info') } })
     await expect(startRecording()).rejects.toMatchObject({ code: 'UNSUPPORTED' })
     expect(track.stop).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('PCM capture lifecycle (unit doubles; real audio graph covered by browser tests)', () => {
+  class PcmContext {
+    static instance: PcmContext
+    static addModule = vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined)
+    sampleRate = 48000
+    state = 'running'
+    destination = {}
+    onstatechange: (() => void) | null = null
+    input = { connect: vi.fn(), disconnect: vi.fn() }
+    get audioWorklet() { return { addModule: PcmContext.addModule } }
+    resume = vi.fn(async () => undefined)
+    close = vi.fn(async () => { this.state = 'closed' })
+    createMediaStreamSource = vi.fn(() => this.input)
+    constructor() { PcmContext.instance = this }
+  }
+  class PcmNode {
+    static instance: PcmNode
+    onprocessorerror: (() => void) | null = null
+    port = {
+      onmessage: null as ((event: { data: unknown }) => void) | null,
+      close: vi.fn(),
+      postMessage: vi.fn((message: string) => {
+        if (message === 'stop') queueMicrotask(() => {
+          this.emit(new Float32Array([0.25]))
+          this.port.onmessage?.({ data: { type: 'done' } })
+        })
+      }),
+    }
+    connect = vi.fn()
+    disconnect = vi.fn()
+    constructor() { PcmNode.instance = this; queueMicrotask(() => this.port.onmessage?.({ data: { type: 'ready' } })) }
+    emit(samples: Float32Array) { this.port.onmessage?.({ data: { type: 'data', samples } }) }
+  }
+  beforeEach(() => {
+    PcmContext.addModule.mockReset().mockResolvedValue(undefined)
+    vi.stubGlobal('MediaRecorder', undefined)
+    vi.stubGlobal('AudioContext', PcmContext)
+    vi.stubGlobal('AudioWorkletNode', PcmNode)
+  })
+  it('uses getUserMedia, flushes the final PCM sample, writes a valid WAV and reports captured sample duration', async () => {
+    const handle = await startRecording()
+    const context = PcmContext.instance, node = PcmNode.instance
+    node.emit(new Float32Array([-1, -0.5, 0, 0.5, 1]))
+    await vi.advanceTimersByTimeAsync(5000)
+    const first = handle.stop()
+    expect(handle.stop()).toBe(first)
+    const capture = await first
+    const bytes = await capture.blob.arrayBuffer(), view = new DataView(bytes)
+    expect(capture.blob.type).toBe('audio/wav')
+    expect(capture.duration).toBe(6 / 48000)
+    expect(new TextDecoder().decode(bytes.slice(0, 4))).toBe('RIFF')
+    expect(view.getUint32(4, true)).toBe(bytes.byteLength - 8)
+    expect(view.getUint16(20, true)).toBe(1)
+    expect(view.getUint16(22, true)).toBe(1)
+    expect(view.getUint32(24, true)).toBe(48000)
+    expect(view.getUint32(40, true)).toBe(12)
+    expect(Array.from({ length: 6 }, (_, i) => view.getInt16(44 + i * 2, true))).toEqual([-32768, -16384, 0, 16384, 32767, 8192])
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true })
+    expect(node.port.postMessage).toHaveBeenCalledTimes(1)
+    expect(context.close).toHaveBeenCalledTimes(1)
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('recovers through PCM when native encoder construction fails without requesting a second stream', async () => {
+    vi.stubGlobal('MediaRecorder', class { static isTypeSupported() { return false }; constructor() { throw new Error('encoder unavailable') } })
+    const handle = await startRecording()
+    expect((await handle.stop()).blob.type).toBe('audio/wav')
+    expect(getUserMedia).toHaveBeenCalledTimes(1)
+  })
+  it('cancels without returning recorded samples and releases every resource', async () => {
+    const handle = await startRecording()
+    PcmNode.instance.emit(new Float32Array([0.2, 0.3]))
+    handle.cancel(); handle.cancel()
+    await expect(handle.stop()).rejects.toMatchObject({ code: 'CANCELLED', recovery: undefined })
+    expect(PcmNode.instance.port.close).toHaveBeenCalledOnce()
+    expect(PcmContext.instance.input.disconnect).toHaveBeenCalledOnce()
+    expect(track.stop).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it.each(['processorerror', 'suspended'])('retains captured PCM when the audio graph is %s, without inventing gap time', async failure => {
+    const handle = await startRecording()
+    PcmNode.instance.emit(new Float32Array([0.5, -0.5]))
+    await vi.advanceTimersByTimeAsync(5000)
+    // The audio thread is unavailable: no acknowledgement, but already queued
+    // PCM must still be accepted after the failure event from another task source.
+    PcmNode.instance.port.postMessage.mockImplementation(() => undefined)
+    if (failure === 'processorerror') PcmNode.instance.onprocessorerror?.()
+    else { PcmContext.instance.state = 'suspended'; PcmContext.instance.onstatechange?.() }
+    PcmNode.instance.emit(new Float32Array([0.25]))
+    const pending = handle.stop().catch(error => error)
+    await vi.advanceTimersByTimeAsync(2001)
+    const error = await pending
+    expect(error.code).toBe('RECORDING')
+    expect(error.recovery.duration).toBe(3 / 48000)
+    expect(error.recovery.blob.size).toBe(50)
+    expect(error.recovery.blob.type).toBe('audio/wav')
+    expect(track.stop).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('bounds a lost flush acknowledgement and preserves the available partial recording', async () => {
+    const handle = await startRecording()
+    PcmNode.instance.emit(new Float32Array([0.25]))
+    PcmNode.instance.port.postMessage.mockImplementation(() => undefined)
+    const assertion = expect(handle.stop()).rejects.toMatchObject({ code: 'RECORDING', recovery: { duration: 1 / 48000 } })
+    await vi.advanceTimersByTimeAsync(2001)
+    await assertion
+    expect(track.stop).toHaveBeenCalledOnce()
+  })
+  it('auto-stops on the wall-clock limit and on a device ending', async () => {
+    const first = await startRecording()
+    await vi.advanceTimersByTimeAsync(MAX_RECORDING_SECONDS * 1000)
+    expect((await first.stop()).duration).toBe(1 / 48000)
+    const second = await startRecording()
+    track.onended?.()
+    expect((await second.stop()).blob.type).toBe('audio/wav')
+  })
+  it('does not manufacture a recording from an empty graph', async () => {
+    const handle = await startRecording()
+    PcmNode.instance.port.postMessage.mockImplementation(() => { queueMicrotask(() => PcmNode.instance.port.onmessage?.({ data: { type: 'done' } })) })
+    await expect(handle.stop()).rejects.toMatchObject({ code: 'EMPTY' })
+  })
+  it('releases the microphone on a failed or stalled same-origin worklet load', async () => {
+    PcmContext.addModule.mockRejectedValueOnce(new Error('load failure'))
+    await expect(startRecording()).rejects.toMatchObject({ code: 'RECORDING' })
+    expect(track.stop).toHaveBeenCalledOnce()
+    PcmContext.addModule.mockImplementationOnce(() => new Promise(() => undefined))
+    const assertion = expect(startRecording()).rejects.toMatchObject({ code: 'RECORDING' })
+    await vi.advanceTimersByTimeAsync(5001)
+    await assertion
+    expect(track.stop).toHaveBeenCalledTimes(2)
+    expect(PcmContext.instance.close).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+  it('does not miss a device ending while its worklet module is still loading', async () => {
+    PcmContext.addModule.mockImplementationOnce(() => new Promise(() => undefined))
+    const pending = startRecording()
+    const assertion = expect(pending).rejects.toMatchObject({ code: 'RECORDING' })
+    await vi.advanceTimersByTimeAsync(1)
+    expect(track.onended).toBeTypeOf('function')
+    track.onended?.()
+    await assertion
+    expect(track.stop).toHaveBeenCalledOnce()
+    expect(PcmContext.instance.close).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('PCM worklet buffering and hard sample limit', () => {
+  let Processor: new (options: { processorOptions: { maxSeconds: number; maxBytes: number } }) => {
+    port: { postMessage: ReturnType<typeof vi.fn>; onmessage: (event: { data: string }) => void }
+    process: (inputs: Float32Array[][]) => boolean
+  }
+  beforeEach(async () => {
+    vi.resetModules()
+    vi.stubGlobal('sampleRate', 48000)
+    vi.stubGlobal('AudioWorkletProcessor', class { port = { postMessage: vi.fn(), onmessage: null } })
+    vi.stubGlobal('registerProcessor', (_name: string, constructor: typeof Processor) => { Processor = constructor })
+    await import('../src/audio/pcm-recorder')
+  })
+  it('flushes variable render quanta exactly once, omitting empty input', () => {
+    const processor = new Processor({ processorOptions: { maxSeconds: 180, maxBytes: 1000 } })
+    expect(processor.port.postMessage).not.toHaveBeenCalled()
+    processor.process([])
+    processor.process([[new Float32Array()]])
+    expect(processor.port.postMessage).not.toHaveBeenCalled()
+    processor.process([[new Float32Array([0.1, 0.2, 0.3])]])
+    processor.process([[new Float32Array([0.4])]])
+    processor.port.onmessage({ data: 'stop' })
+    processor.port.onmessage({ data: 'stop' })
+    const messages = processor.port.postMessage.mock.calls.map(call => call[0])
+    expect(messages.map(message => message.type)).toEqual(['ready', 'data', 'done'])
+    expect(messages[1].samples).toEqual(new Float32Array([0.1, 0.2, 0.3, 0.4]))
+    expect(processor.process([[new Float32Array([0.5])]])).toBe(false)
+  })
+  it('enforces the byte ceiling inside the audio thread before another main-thread event', () => {
+    const processor = new Processor({ processorOptions: { maxSeconds: 180, maxBytes: 50 } })
+    expect(processor.process([[new Float32Array([1, 2, 3, 4, 5])]])).toBe(false)
+    expect(processor.port.postMessage.mock.calls[1][0].samples).toEqual(new Float32Array([1, 2, 3]))
+    expect(processor.port.postMessage.mock.calls[2][0]).toEqual({ type: 'done' })
   })
 })
 

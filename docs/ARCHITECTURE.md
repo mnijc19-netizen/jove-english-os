@@ -13,3 +13,7 @@ Content has source kind, provenance, approval, transcript, sentence structure, c
 The deterministic planner balances weaknesses/due work/new input/fluency with minimum speaking and strain-aware duration. AI chooses phrasing, explanations and context variants within task constraints. Evidence scores express estimates with counts/confidence, not calibrated proficiency or phoneme measurements.
 
 Verify deployment exact commit + successful Actions + public URL + fresh-browser journey. Existing visibility cannot be changed without owner authorization. Never add runtime secrets to Actions or static builds.
+
+## Final-upgrade architecture boundary
+
+Retain this SPA/Dexie/Pages architecture. Add a dedicated Supabase backend (never reuse another project's backend): Auth, append-only RLS-owned sync operations/events, private Storage, authenticated AI/Speech functions and scheduled content processing. The browser retains local learning and an offline journal; upload/download/merge rebuild derived evidence instead of replacing a whole database. Server-only production keys supersede the browser-only key rule for normal operation. Public frontend configuration may contain only project URL and publishable key. Entity/draft conflicts and audio retention must be specified/tested before production. Full requirement map: `FINAL_UPGRADE.md`.

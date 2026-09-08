@@ -1,10 +1,18 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { useApp } from "../stores/app";
 import { skillLabel } from "../domain/engine";
 import Icon from "../components/Icon.vue";
 import type { PlanTask } from "../domain/types";
+import { planRecovery, selectMeaningfulReviews } from "../domain/longitudinal";
 const app = useApp();
+const router = useRouter(), starting = ref(false), startError = ref("");
+const recovery = computed(() => planRecovery(app.profile, app.events, app.clock));
+const reviewSelection = computed(() => selectMeaningfulReviews(app.cards, app.events, app.clock, {
+  budgetSeconds: Math.min(recovery.value.reviewBudgetSeconds, (app.plan.tasks.find(t => t.kind === 'review' && !t.done)?.minutes ?? 0) * 60),
+  maxCards: recovery.value.maxReviewCards,
+}));
 const date = computed(() =>
   new Intl.DateTimeFormat("en", {
     weekday: "long",
@@ -13,7 +21,7 @@ const date = computed(() =>
   }).format(new Date(app.clock)),
 );
 const completed = computed(() => app.plan.tasks.filter((t) => t.done).length);
-const next = computed(() => app.plan.tasks.find((t) => !t.done));
+const next = computed(() => app.plan.tasks.find((t) => !t.done && t.minutes > 0));
 const path = (task: PlanTask) => ({
   path:
     task.kind === "shadow"
@@ -30,6 +38,7 @@ const path = (task: PlanTask) => ({
       ? { mode: task.kind }
       : {}),
     ...(task.kind === "assessment" ? { assess: "1" } : {}),
+    ...(task.kind === "learn" && task.id.endsWith(":reading") ? { mode: "reading" } : {}),
   },
 });
 const material = computed(
@@ -38,6 +47,27 @@ const material = computed(
       (m) => m.id === app.plan.tasks.find((t) => t.materialId)?.materialId,
     ) || app.materials[0],
 );
+const offered = new Set<string>();
+watch(() => app.plan.tasks.filter(t => !t.done && t.minutes > 0).map(t => t.id).join('|'), async () => {
+  for (const task of app.plan.tasks.filter(t => !t.done && t.minutes > 0)) {
+    if (offered.has(task.id)) continue;
+    offered.add(task.id);
+    try { await app.evidence({ id: `offered:${task.id}`, type: 'TASK_OFFERED', source: 'objective',
+      data: { taskId: task.id, kind: task.id.endsWith(':reading') ? 'reading' : task.kind } }); }
+    catch { offered.delete(task.id); }
+  }
+}, { immediate: true });
+async function start(task: PlanTask) {
+  if (starting.value) return;
+  starting.value = true; startError.value = '';
+  try {
+    await app.beginTask(task.id);
+    await app.evidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
+      data: { taskId: task.id, kind: task.id.endsWith(':reading') ? 'reading' : task.kind } });
+    await router.push(path(task));
+  } catch { startError.value = 'Could not save your place. Please try starting again.'; }
+  finally { starting.value = false; }
+}
 </script>
 <template>
   <div class="page today-page">
@@ -88,6 +118,16 @@ const material = computed(
           /></span>
         </div>
         <p class="muted">Your focus · {{ skillLabel(app.plan.focus) }}</p>
+        <p v-if="app.contentState === 'loading'" class="help-text" role="status">Preparing suitable lessons and short audio. Your saved practice stays available.</p>
+        <p v-else-if="app.contentState === 'empty'" class="help-text" role="status">No new human recording has passed the quality checks yet. Saved lessons remain available; new content will be checked automatically.</p>
+        <p v-else-if="app.contentState === 'error'" class="help-text" role="status">New lessons or audio could not finish loading. Your saved work is safe.
+          <button class="text-button" @click="app.loadContent(true)">Retry loading</button>
+        </p>
+        <p v-else-if="app.contentState === 'offline'" class="help-text">Offline practice uses downloaded audio. New lessons will be checked when you reconnect.</p>
+        <p v-if="recovery.mode !== 'none'" class="help-text" role="status">
+          Ease back in with {{ app.plan.minutes }} minutes today. Shorter input and a small review selection;
+          your load returns gradually as you practise again.
+        </p>
         <div class="time-options" aria-label="Practice duration">
           <button
             v-for="minutes in [45, 90, 150]"
@@ -109,23 +149,25 @@ const material = computed(
           <div class="progress-track">
             <i
               :style="{
-                width: (completed / app.plan.tasks.length) * 100 + '%',
+                width: (app.plan.tasks.length ? completed / app.plan.tasks.length : 0) * 100 + '%',
               }"
             ></i>
           </div>
         </div>
-        <RouterLink
+        <button
           v-if="next"
-          :to="path(next)"
           class="button primary wide"
-          @click="app.beginTask(next.id)"
+          :disabled="starting"
+          @click="start(next)"
           >{{ completed ? "Continue my practice" : "Start today’s practice"
           }}<Icon name="arrow" :size="18"
-        /></RouterLink>
+        /></button>
         <div v-else class="success-note">
-          <Icon name="check" />Today’s plan is complete. Let it settle; your
-          next review will appear when it’s due.
+          <Icon name="check" />{{ completed === app.plan.tasks.length ? 'Today’s plan is complete.' : 'Your planned time is covered for today. Unfinished work stays saved.' }}
+          Let it settle; there is no need to clear the backlog.
         </div>
+        <RouterLink v-if="!next && app.due.length" :to="{ path: '/review', query: { extra: '1' } }" class="button secondary">Optional extra review</RouterLink>
+        <p v-if="startError" class="error" role="alert">{{ startError }}</p>
         <p class="card-footnote">
           <Icon name="shield" :size="14" />Your progress saves as you go.
         </p>
@@ -151,8 +193,8 @@ const material = computed(
         <section class="review-teaser">
           <Icon name="review" :size="25" />
           <div>
-            <strong>{{ app.due.length }} ready to revisit</strong>
-            <p>A little retrieval goes a long way.</p>
+            <strong>{{ reviewSelection.selected.length }} selected to revisit</strong>
+            <p>{{ reviewSelection.deferredCount ? 'Other due cards stay saved for later.' : 'A little retrieval goes a long way.' }}</p>
           </div>
           <RouterLink
             to="/review"
@@ -189,7 +231,7 @@ const material = computed(
           :to="path(task)"
           class="task-row"
           :class="{ done: task.done }"
-          @click="app.beginTask(task.id)"
+          @click.prevent="start(task)"
           ><span class="task-number"
             ><Icon v-if="task.done" name="check" :size="17" /><span v-else>{{
               String(index + 1).padStart(2, "0")
@@ -208,7 +250,7 @@ const material = computed(
           ><span class="task-copy"
             ><strong>{{ task.title }}</strong
             ><small>{{ task.reason }}</small></span
-          ><span class="task-duration">{{ task.minutes }} min</span
+          ><span class="task-duration">{{ task.minutes ? `${task.minutes} min` : 'Saved for later' }}</span
           ><Icon name="right" :size="17"
         /></RouterLink>
       </div>

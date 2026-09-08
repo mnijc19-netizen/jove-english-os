@@ -8,6 +8,7 @@ import { AudioError, startRecording } from "../audio/recorder";
 import { attachRecording, recordingDrafts, retainRecording, saveRecording } from "../audio/recovery";
 import { registerRecorderShortcut } from "../audio/shortcuts";
 import { useRequest } from "../composables/useRequest";
+import { useRecordingUrl } from "../composables/useRecordingUrl";
 import Icon from "./Icon.vue";
 const props = defineProps<{ label?: string; savedAudioId?: string; disabled?: boolean }>();
 const emit = defineEmits<{
@@ -17,7 +18,7 @@ const emit = defineEmits<{
 }>();
 const app = useApp();
 const root = ref<HTMLElement>(), recording = ref(false), starting = ref(false), saving = ref(false);
-const audioId = ref(""), seconds = ref(0), statusError = ref(""), playback = ref(""), transcript = ref("");
+const audioId = ref(""), seconds = ref(0), statusError = ref(""), transcript = ref("");
 const savedAsset = shallowRef<AudioAsset>();
 const transcribing = ref(false);
 const { busy, error, run, cancel } = useRequest();
@@ -26,6 +27,7 @@ const scope = (typeof location === "undefined" ? "" : location.hash) + "|" + (pr
 const pending = computed(() => [...recordingDrafts.values()].find(draft => draft.scope === scope));
 const existing = computed(() => savedAsset.value?.id === audioId.value ? savedAsset.value : app.audio.find(asset => asset.id === audioId.value));
 const playable = computed(() => pending.value?.asset ?? existing.value);
+const playback = useRecordingUrl(playable);
 const active = computed(() => starting.value || recording.value || saving.value || Boolean(pending.value) || transcribing.value);
 const locked = computed(() => props.disabled || busy.value || transcribing.value || starting.value || saving.value || Boolean(pending.value));
 // Parent finish/mode guards must engage before the first await, without handoff gaps.
@@ -50,11 +52,6 @@ watch(() => props.savedAudioId, value => {
   audioId.value = value || "";
   savedAsset.value = undefined;
   transcript.value = "";
-}, { immediate: true });
-watch(playable, asset => {
-  const old = playback.value;
-  playback.value = asset ? URL.createObjectURL(asset.blob) : "";
-  if (old) URL.revokeObjectURL(old);
 }, { immediate: true });
 
 async function savePending(): Promise<boolean> {
@@ -182,7 +179,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("pagehide", salvage);
   // Async teardown cannot block a forced unmount. The retained draft outlives this component.
   if (handle) void stop();
-  if (playback.value) URL.revokeObjectURL(playback.value);
 });
 defineExpose({ toggle });
 </script>

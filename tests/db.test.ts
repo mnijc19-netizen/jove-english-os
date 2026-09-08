@@ -160,7 +160,8 @@ describe('transactional persistence and FSRS', () => {
     expect((await db.chunks.get(chunk.id))!.spontaneousUses).toBe(1)
     await reviewCard(id, 3, { source: 'text', score: 1, audioObserved: true, transcriptVerified: true })
     expect((await db.chunks.get(chunk.id))!.spontaneousUses).toBe(1)
-    expect((await db.events.get(`review:${id}:2`))!.data).toMatchObject({ audioObserved: true, transcriptVerified: true })
+    expect((await db.events.where('type').equals('review').filter(e => e.data?.cardId === id && e.data?.previousReps === 1).first())!.data)
+      .toMatchObject({ audioObserved: true, transcriptVerified: true })
     for (const skill of ['pronunciation', 'prosody', 'speakingFluency'] as const) expect((await db.skills.get(skill))!.evidenceCount).toBe(0)
   })
   it('records error recurrence and prompted repairs from idempotent events', async () => {
@@ -309,10 +310,10 @@ describe('repair retests and review submission concurrency', () => {
     await recordEvent({ id: `review-response:${id}:0`, type: 'REVIEW_RESPONSE', timestamp: now, source: 'text',
       chunkId: chunk.id, modality: 'transfer', contextId: 'new-context', data: { response: 'My complete answer.' } })
     await reviewCard(id, 3, { expectedReps: 0, source: 'objective', score: 1, contextId: 'new-context' })
-    expect((await db.events.get(`review:${id}:1`))!.data?.novelContext).toBe(true)
+    expect((await db.events.where('type').equals('review').filter(e => e.data?.cardId === id && e.data?.previousReps === 0).first())!.data?.novelContext).toBe(true)
     await recordEvent(evidence('old-exposure', { chunkId: chunk.id, modality: 'speaking', source: 'self-report', contextId: 'known-elsewhere' }))
     await reviewCard(id, 3, { expectedReps: 1, source: 'objective', score: 1, contextId: 'known-elsewhere' })
-    expect((await db.events.get(`review:${id}:2`))!.data?.novelContext).toBe(false)
+    expect((await db.events.where('type').equals('review').filter(e => e.data?.cardId === id && e.data?.previousReps === 1).first())!.data?.novelContext).toBe(false)
     expect((await db.skills.get('realWorld'))!.evidenceCount).toBe(1)
   })
   it('schedules exactly once for expectedReps, keeps the response, and rejects a future expected counter', async () => {
@@ -320,7 +321,7 @@ describe('repair retests and review submission concurrency', () => {
     const responseId = `review-response:${id}:0`
     await recordEvent({ id: responseId, type: 'REVIEW_RESPONSE', timestamp: now, source: 'text', chunkId: chunk.id,
       modality: 'recall', data: { response: phrase.text } })
-    const options = { expectedReps: 0, source: 'text' as const, score: 1 }
+    const options = { eventId: 'stable-review-attempt', expectedReps: 0, source: 'text' as const, score: 1 }
     await Promise.all([reviewCard(id, 3, options), reviewCard(id, 3, options)])
     expect((await db.cards.get(id))!.card.reps).toBe(1)
     expect(await db.events.get(responseId)).toBeDefined()
@@ -329,6 +330,24 @@ describe('repair retests and review submission concurrency', () => {
     await reviewCard(id, 3, options)
     await expect(reviewCard(id, 3, { expectedReps: 2 })).rejects.toThrow('below the expected')
     expect(await exportBackup()).toBe(before)
+  })
+  it('does not let an advanced repetition counter substitute for this attempt’s evidence', async () => {
+    const chunk = await seedChunk(), id = `${chunk.id}:recall`
+    await reviewCard(id, 3)
+    const event = (await db.events.where('type').equals('review').first())!
+    expect(event.id).toMatch(/^review:[a-f0-9-]{36}$/)
+    expect(event.data).toMatchObject({ attemptId: event.id, previousReps: 0 })
+    await expect(reviewCard(id, 3, { expectedReps: 0, eventId: 'another-attempt' })).rejects.toThrow('another device')
+    expect(await db.events.where('type').equals('review').count()).toBe(1)
+  })
+  it('recovers an actual matching aliased attempt before comparing rebased repetitions', async () => {
+    const chunk = await seedChunk(), id = `${chunk.id}:recall`
+    await reviewCard(id, 3, { eventId: 'projected-review', expectedReps: 0 })
+    await db.syncMeta.bulkPut([{ id: 'cardAliases', value: { 'old-card': id } },
+      { id: 'eventAliases', value: { 'original-review': ['projected-review'] } }])
+    await reviewCard('old-card', 3, { eventId: 'original-review', expectedReps: 0 })
+    expect(await db.events.where('type').equals('review').count()).toBe(1)
+    await expect(reviewCard('old-card', 4, { eventId: 'original-review', expectedReps: 0 })).rejects.toThrow('already used')
   })
   it('keeps expectedReps retryable when scheduling fails after the answer was saved', async () => {
     const chunk = await seedChunk(), id = `${chunk.id}:recall`
@@ -538,7 +557,9 @@ describe('versioned migration', () => {
     const upgraded = new JoveDatabase(name)
     try {
       await upgraded.open()
-      expect(upgraded.verno).toBe(2)
+      expect(upgraded.verno).toBe(3)
+      expect(await upgraded.syncOperations.count()).toBe(0)
+      expect(await upgraded.syncSnapshots.count()).toBe(0)
       expect(await upgraded.cards.count()).toBe(6)
       expect((await upgraded.cards.get('original-card'))!.card).toMatchObject({ due: scheduled.due, last_review: scheduled.last_review, reps: 1, learning_steps: 0 })
       expect((await upgraded.cards.toArray()).filter(c => c.id !== 'original-card').every(c => c.card.reps === 0)).toBe(true)

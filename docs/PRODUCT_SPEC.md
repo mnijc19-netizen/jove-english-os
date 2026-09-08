@@ -31,4 +31,8 @@ Replaceable LLM/STT/TTS/discovery adapter. Verify actual current OpenRouter cont
 
 No-key demo must support onboarding/listening/basic review/core navigation with real embedded audio. External capabilities explain configuration need. Offline supports app shell, history, existing material/reviews/audio. SW update requires deliberate safe refresh.
 
-Excluded: multi-user/auth/cloud DB, social/economy/rankings, marketplace/payment, universal scraping, DRM bypass/downloaders, 3D teacher/avatar, custom phoneme engine. Minimal backend only if an indispensable capability requires it; not planned.
+## Final-upgrade scope (supersedes V1 exclusions)
+
+The complete binding requirements and original section mapping are in `FINAL_UPGRADE.md`. Retain all current pages and UI while adding single-owner email authentication, automatic event-based cloud sync including recoverable drafts and selected recordings, authenticated server AI/Speech, scheduled licensed authentic-content supply, stable General American reference practice with real acoustic assessment, longitudinal adaptive reading/planning, recovery mode and WebKit acceptance. Imports and browser BYOK become optional advanced paths, not prerequisites for normal long-term use. Content discovery/quality approval is system work. Local data must survive migration and offline conflicts.
+
+Still excluded: social/economy/rankings, marketplace/payment product, universal scraping, DRM bypass/downloaders, 3D teacher/avatar and a home-built purportedly calibrated phoneme engine. No guarantee of individual learning outcomes.

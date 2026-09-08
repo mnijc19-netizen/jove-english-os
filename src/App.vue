@@ -4,6 +4,8 @@ import { useRoute } from "vue-router";
 import { registerSW } from "virtual:pwa-register";
 import { useApp } from "./stores/app";
 import Icon from "./components/Icon.vue";
+import { useCloud } from "./stores/cloud";
+const cloud = useCloud();
 const app = useApp(),
   route = useRoute(),
   menu = ref(false),
@@ -76,6 +78,17 @@ watch(
     menu.value = false;
   },
 );
+watch(
+  [() => app.ready, () => route.path],
+  ([ready]) => {
+    // The initial route can resolve before IndexedDB bootstrap renders main.
+    // Focus after the real DOM update, without taking focus from an interaction
+    // already started while the workspace was opening (for example Skip).
+    if (ready && document.activeElement === document.body)
+      document.querySelector<HTMLElement>("#main h1")?.focus({ preventScroll: true });
+  },
+  { flush: "post" },
+);
 onMounted(() => {
   // A first-install Workbox instance keeps isUpdate=false even on a later
   // controller handoff. Reload on that native event only after explicit consent.
@@ -140,7 +153,7 @@ function focusPractice() {
       <div class="sidebar-bottom">
         <div class="local-note">
           <Icon name="shield" :size="18" /><span
-            >Your space. Your progress.<small>Saved on this device</small></span
+            >Your space. Your progress.<small role="status">{{ cloud.status }}</small></span
           >
         </div>
         <RouterLink to="/settings" class="nav-item"

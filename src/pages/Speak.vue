@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute } from "vue-router";
 import { useApp } from "../stores/app";
 import { db } from "../db/db";
 import { saveError } from "../db/repository";
@@ -8,8 +8,11 @@ import { missions } from "../content/materials";
 import { useRequest } from "../composables/useRequest";
 import AudioPlayer from "../components/AudioPlayer.vue";
 import SavedRecording from "../components/SavedRecording.vue";
-import type { Conversation, Evaluation } from "../domain/types";
+import type { Conversation, Evaluation, StudyEvent } from "../domain/types";
 import Recorder from "../components/Recorder.vue";
+import PronunciationPractice from "../components/PronunciationPractice.vue";
+import { usePronunciationSession } from "../speech/practice";
+import { comparableObservation, assessmentEvaluator, planLongitudinal } from "../domain/longitudinal";
 import Icon from "../components/Icon.vue";
 const app = useApp(),
   route = useRoute(),
@@ -31,8 +34,17 @@ const selected = computed(
   () => missions.find((m) => m.id === missionId.value) || missions[0],
 );
 const evaluation = computed(() => conversation.value?.evaluation);
+const pronunciationScope = computed(() => conversation.value?.id || 'speak-practice');
+const pronunciation = usePronunciationSession(pronunciationScope);
+const { reference: pronunciationReference, savedAudioId: pronunciationAudioId, savedReferenceId: pronunciationReferenceId,
+  pendingAttempt: pronunciationAttempt, active: pronunciationActive, loading: pronunciationLoading,
+  problem: pronunciationProblem, disabled: pronunciationDisabled, recoveredResults: pronunciationResults } = pronunciation;
 const recordingStates = ref<Record<string, boolean>>({});
-const captureActive = computed(() => Object.values(recordingStates.value).some(Boolean));
+const captureActive = computed(() => pronunciationActive.value || Object.values(recordingStates.value).some(Boolean));
+const observation = ref<{ sessionId: string; priorExposure: boolean; difficulty: number; level: string; mode: string } | null>(null);
+const evidenceOutbox = ref<StudyEvent[]>([]);
+let persistence: Promise<unknown> = Promise.resolve(), evidenceQueue: Promise<void> = Promise.resolve();
+const speakingRubric = 'conversation-language-accuracy-v1';
 const hasUnsentResponse = computed(() => !!text.value.trim() || !!audioId.value);
 const labels = [
   { id: "guided", name: "Guided conversation" },
@@ -43,9 +55,8 @@ const labels = [
 let lastPromptAt = Date.now();
 async function persist() {
   if (!loaded.value) return;
-  if (conversation.value)
-    await db.conversations.put(JSON.parse(JSON.stringify(conversation.value)));
-  await db.sessions.put({
+  const savedConversation = conversation.value ? JSON.parse(JSON.stringify(conversation.value)) as Conversation : undefined;
+  const row = {
     id: "speak-draft",
     kind: "speak",
     startedAt: conversation.value?.startedAt || Date.now(),
@@ -61,8 +72,32 @@ async function persist() {
       repairResults: JSON.parse(JSON.stringify(repairResults.value)),
       repairAudio: JSON.parse(JSON.stringify(repairAudio.value)),
       lastPromptAt,
+      observation: observation.value,
+      evidenceOutbox: evidenceOutbox.value,
     },
+  };
+  const snapshot = JSON.parse(JSON.stringify(row));
+  const operation = persistence.catch(() => undefined).then(async () => {
+    if (savedConversation) await db.conversations.put(savedConversation);
+    await db.sessions.put(snapshot);
   });
+  persistence = operation;
+  await operation;
+}
+function flushSpeakEvidence(): Promise<void> {
+  const operation = evidenceQueue.catch(() => undefined).then(async () => {
+    await persist();
+    while (evidenceOutbox.value.length) {
+      await app.evidence(evidenceOutbox.value[0]!);
+      evidenceOutbox.value.shift(); await persist();
+    }
+  });
+  evidenceQueue = operation; return operation;
+}
+async function recordEvidence(event: Omit<StudyEvent, 'id' | 'timestamp'> & { id?: string; timestamp?: number }) {
+  const row = { ...event, id: event.id ?? crypto.randomUUID(), timestamp: event.timestamp ?? Date.now() };
+  if (!evidenceOutbox.value.some(e => e.id === row.id) && !app.events.some(e => e.id === row.id)) evidenceOutbox.value.push(row);
+  await flushSpeakEvidence();
 }
 async function start() {
   if (busy.value || captureActive.value) return;
@@ -85,9 +120,18 @@ async function start() {
     ],
     startedAt: Date.now(),
   };
+  const adjustment = planLongitudinal({ profile: app.profile, skills: app.skills, events: app.events, cards: app.cards, materials: app.materials, now: Date.now() }).adjustments;
+  // Freeze actual prompt difficulty for this new session; never relabel old work.
+  const difficulty = adjustment.targetDifficulty;
+  const level = difficulty < 0.5 ? 'Beginner; clear natural short sentences, one follow-up at a time.'
+    : 'Natural pace, occasional ambiguity or polite disagreement. Ask why; avoid teaching.';
+  const olderConversations = await db.conversations.filter(c => c.scenario === conversation.value!.scenario && c.id !== conversation.value!.id).count();
+  observation.value = { sessionId: conversation.value.id, priorExposure: olderConversations > 0 || app.events.some(e => e.data?.missionId === missionId.value), difficulty, level, mode: mode.value };
   lastPromptAt = Date.now();
   pending.value = false;
   await persist();
+  await recordEvidence({ id: conversation.value.id + '-prompt', type: 'SPEAK_PROMPT_PRESENTED', source: 'objective', sessionId: conversation.value.id,
+    data: { missionId: missionId.value, mode: mode.value, difficulty, priorExposure: observation.value.priorExposure } });
 }
 async function send() {
   if (!text.value.trim() || busy.value || pending.value || captureActive.value) return;
@@ -102,10 +146,10 @@ async function send() {
   };
   conversation.value!.messages.push(msg);
   await persist();
-  await app.evidence({
+  await recordEvidence({
     id: msg.id,
     type: "SPEAK_ATTEMPT",
-    source: audioId.value ? "acoustic" : "text",
+    source: audioId.value ? "objective" : "text",
     sessionId: conversation.value!.id,
     data: {
       duration: duration.value,
@@ -114,6 +158,8 @@ async function send() {
       chineseFallback: /[\u3400-\u9fff]/.test(value),
       audioRecorded: !!audioId.value,
       transcriptVerified: !!audioId.value && sttText.value.trim() === value,
+      missionId: missionId.value, mode: mode.value,
+      ...(observation.value?.sessionId === conversation.value!.id ? { priorExposure: observation.value.priorExposure } : {}),
     },
   });
   text.value = "";
@@ -136,12 +182,7 @@ async function reply() {
         {
           scenario: c.scenario,
           mode: c.mode,
-          level: app.skills.some(
-            (s) =>
-              s.id === "interaction" && s.evidenceCount > 3 && s.score > 0.7,
-          )
-            ? "Natural pace, occasional ambiguity or polite disagreement. Ask why; avoid teaching."
-            : "Beginner; clear natural short sentences, one follow-up at a time.",
+          level: observation.value?.sessionId === c.id ? observation.value.level : 'Clear natural short sentences, one follow-up at a time.',
           targets: app.chunks.slice(-4).map((ch) => ch.text),
         },
         (t) => {
@@ -188,6 +229,7 @@ async function finish() {
           kind: "end-of-conversation language feedback",
           text: c.messages.map((m) => `${m.role}: ${m.text}`).join("\n"),
           targets: app.chunks.slice(-8).map((ch) => ch.text),
+          rubric: 'Judge the learner language transcript only: grammar and word-choice accuracy 0..1. Meaning-preserving formulations are acceptable. Do not estimate acoustic pronunciation, rhythm or spontaneous fluency. Rubric conversation-language-accuracy-v1.',
         },
         signal,
       ),
@@ -230,15 +272,23 @@ async function finish() {
     spokenMessages.length ===
       c.messages.filter((m) => m.role === "user").length;
   if (result.accuracy !== null)
-    await app.evidence({
+    await recordEvidence({
       id: c.id + "-accuracy",
       type: "CONVERSATION_EVALUATION",
       source: "ai",
       skill: allSpoken ? "speakingAccuracy" : "grammarProduction",
       score: result.accuracy,
       sessionId: c.id,
-      prompted: false,
-      data: { audioObserved: allSpoken, transcriptVerified: allSpoken },
+      prompted: c.mode === 'guided' || c.mode === 'retell',
+      data: { audioObserved: allSpoken, transcriptVerified: allSpoken, textOnlyEvaluation: true, missionId: missionId.value,
+        ...(observation.value?.sessionId === c.id ? { priorExposure: observation.value.priorExposure,
+          ...(comparableObservation({ rubricVersion: speakingRubric,
+            comparisonKey: JSON.stringify(['conversation', c.mode, c.scenario, c.messages.filter(m => m.role === 'assistant').map(m => m.text)]),
+            difficulty: observation.value.difficulty, evaluator: assessmentEvaluator(result),
+            conditions: allSpoken ? JSON.stringify({ transcriptVerified: true, mode: c.mode,
+              chineseFallback: c.messages.some(m => m.role === 'user' && /[\u3400-\u9fff]/.test(m.text)), level: observation.value.level }) : null,
+            firstPass: !observation.value.priorExposure, priorExposure: observation.value.priorExposure,
+            prompted: c.mode === 'guided' || c.mode === 'retell' }) ?? {}) } : {}) },
     });
   for (const expression of result.successfulChunks) {
     const chunk = app.chunks.find(
@@ -249,20 +299,22 @@ async function finish() {
     );
     if (!chunk || !message) continue;
     const contextId = c.scenario;
-    await app.evidence({
+    const supplied = c.mode === 'guided' || c.mode === 'retell' || c.messages.some(m => m.role === 'assistant' && m.text.toLowerCase().includes(expression.toLowerCase()));
+    await recordEvidence({
       id: c.id + "-chunk-" + chunk.id,
       type: "CHUNK_PRODUCTION",
       source: "ai",
       chunkId: chunk.id,
       modality: c.mode === "mission" ? "transfer" : "speaking",
       contextId,
-      score: result.accuracy ?? 0.7,
+      ...(result.accuracy !== null ? { score: result.accuracy } : {}),
       sessionId: c.id,
-      prompted: false,
+      prompted: supplied,
       data: {
         audioObserved: true,
         transcriptVerified: true,
-        novelContext: !app.events.some(
+        suppliedLanguage: supplied,
+        novelContext: !supplied && !app.events.some(
           (e) => e.chunkId === chunk.id && e.contextId === contextId,
         ),
         audioId: message.audioId!,
@@ -294,7 +346,7 @@ async function repair(id: string) {
   repairResults.value[id] = correct
     ? "Full sentence repaired. Next: retrieve it in a new situation."
     : "Try once more. Check the hint, then say the whole sentence.";
-  await app.evidence({
+  await recordEvidence({
     type: "SPEAK_RETRY",
     source: "text",
     skill: "grammarProduction",
@@ -350,6 +402,8 @@ watch(
 onMounted(async () => {
   const draft = await db.sessions.get("speak-draft");
   if (draft) {
+    observation.value = draft.draft.observation as typeof observation.value ?? null;
+    evidenceOutbox.value = Array.isArray(draft.draft.evidenceOutbox) ? draft.draft.evidenceOutbox as StudyEvent[] : [];
     const strings = (value: unknown) =>
       value && typeof value === "object"
         ? (Object.fromEntries(
@@ -390,7 +444,24 @@ onMounted(async () => {
     }
   }
   loaded.value = true;
+  try { await flushSpeakEvidence(); } catch { error.value = 'Your saved speaking evidence needs another save attempt. No recordings were removed.'; }
 });
+async function savedSpokenRecording(value: { audioId: string; duration: number }) {
+  audioId.value = value.audioId; duration.value = value.duration;
+  try {
+    await persist();
+    const original = await db.audio.get(value.audioId);
+    if (!original || original.kind !== 'recording' || !original.blob.size || !Number.isFinite(original.duration) || original.duration <= 0 || original.duration > 7200) return;
+    await recordEvidence({ id: value.audioId + '-output-time', type: 'PRACTICE_LOGGED', source: 'objective', sessionId: conversation.value?.id ?? 'speak-draft',
+      data: { strand: 'output', activeSeconds: original.duration, audioId: value.audioId, measured: 'saved-recording-duration', missionId: missionId.value } });
+  } catch { error.value = 'Original recording retained. Retry saving its practice evidence.'; }
+}
+async function beforeNavigation() {
+  if (captureActive.value || busy.value) { error.value = 'Finish or cancel recording and analysis before leaving.'; return false; }
+  try { await persist(); await flushSpeakEvidence(); }
+  catch { error.value = 'Could not save before leaving. Keep this page open and retry.'; return false; }
+}
+onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
 </script>
 <template>
   <div class="page">
@@ -489,13 +560,9 @@ onMounted(async () => {
           <div v-if="!evaluation" class="conversation-composer">
             <Recorder
               :saved-audio-id="audioId"
-              :disabled="busy || pending"
+              :disabled="busy || pending || pronunciationActive"
               @active="recordingStates.conversation = $event"
-              @recorded="
-                audioId = $event.audioId;
-                duration = $event.duration;
-                persist();
-              "
+              @recorded="savedSpokenRecording"
               @transcribed="
                 text = $event;
                 sttText = $event;
@@ -583,6 +650,17 @@ onMounted(async () => {
             Skip for now
           </button>
         </div>
+        <details class="section">
+          <summary>Separate sentence pronunciation practice · not conversation fluency</summary>
+          <PronunciationPractice
+            :reference="pronunciationReference" :saved-audio-id="pronunciationAudioId"
+            :saved-reference-id="pronunciationReferenceId" :pending-attempt="pronunciationAttempt"
+            :recovered-results="pronunciationResults"
+            :persist-attempt="pronunciation.persistAttempt" :disabled="pronunciationDisabled || busy || pending || Object.values(recordingStates).some(Boolean)"
+            @recorded="pronunciation.recorded" @evaluated="pronunciation.evaluated" @active="pronunciationActive = $event" />
+          <p v-if="pronunciationProblem" class="error" role="alert">{{ pronunciationProblem }}</p>
+          <button class="text-button" :disabled="pronunciationLoading || captureActive" @click="pronunciation.retry">Reload reviewed pronunciation reference / recover saved evidence</button>
+        </details>
       </section>
       <aside class="panel mission-selector">
         <p class="eyebrow">PRACTICE FOR REAL LIFE</p>

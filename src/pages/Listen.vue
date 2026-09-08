@@ -6,15 +6,21 @@ import { db } from "../db/db";
 import { addChunk } from "../db/repository";
 import { useRequest } from "../composables/useRequest";
 import { demoMaterials } from "../content/materials";
+import { contentAudioIsTransient, prepareContentAudio } from "../cloud/content";
 import type { Evaluation, MaterialChunk, StudyEvent, StudySession } from "../domain/types";
 import AudioPlayer from "../components/AudioPlayer.vue";
 import Recorder from "../components/Recorder.vue";
-const captureActive = ref(false);
+import PronunciationPractice from "../components/PronunciationPractice.vue";
+import { usePronunciationSession } from "../speech/practice";
+import { ObservedPracticeClock } from "../speech/events";
+import { comparableObservation, assessmentEvaluator } from "../domain/longitudinal";
+const shadowCaptureActive = ref(false);
 import Icon from "../components/Icon.vue";
 
 interface FirstResponse {
   answer: string; estimate: number; playCount: number; completedPlays: number;
   priorExposure: boolean; revealed: boolean; chineseUsed: boolean; synthetic: boolean;
+  playbackRates: number[] | null;
 }
 interface WordLookup {
   id: string; expression: string; sourceSentence: string; sentence: number;
@@ -29,22 +35,34 @@ interface ListeningDraft {
   taskId: string; taskKind: string; first: FirstResponse | null; feedback: Evaluation | null;
   outbox: StudyEvent[];
   lookups: WordLookup[]; lookupId: string;
+  playbackRates: number[]; playbackRateUnknown: boolean;
 }
 const freshDraft = (): ListeningDraft => ({
   stage: 0, answer: "", estimate: 50, listened: false, selfCheck: null, audioId: "",
   sentence: -1, phrase: -1, chinese: false, chineseUsed: false, revealed: false,
   answerRevealed: false, chunked: false, playCount: 0, completedPlays: 0,
   priorExposure: false, taskId: "", taskKind: "listen", first: null, feedback: null, outbox: [],
-  lookups: [], lookupId: "",
+  lookups: [], lookupId: "", playbackRates: [], playbackRateUnknown: false,
 });
 const app = useApp(), route = useRoute(), router = useRouter();
 const player = ref<InstanceType<typeof AudioPlayer>>();
 const materialId = ref(""), sid = ref(""), startedAt = ref(0), completedAt = ref<number>();
+const pronunciation = usePronunciationSession(sid, materialId);
+const { reference: pronunciationReference, savedAudioId: pronunciationAudioId, savedReferenceId: pronunciationReferenceId,
+  pendingAttempt: pronunciationAttempt, active: pronunciationActive, loading: pronunciationLoading, problem: pronunciationProblem,
+  disabled: pronunciationDisabled, recoveredResults: pronunciationResults } = pronunciation;
+const captureActive = computed(() => shadowCaptureActive.value || pronunciationActive.value);
+watch(captureActive, active => { if (active) player.value?.stop(); });
+const listeningMedia = ref<HTMLElement>();
+const listeningClock = new ObservedPracticeClock();
+let listeningTimer: ReturnType<typeof setInterval> | undefined;
+const listeningRubric = 'listening-main-idea-detail-v1';
 const draft = reactive<ListeningDraft>(freshDraft());
 const { stage, answer, estimate, listened, selfCheck, sentence, chinese, chunked, feedback } = toRefs(draft);
 const savedAudioId = computed({ get: () => draft.audioId, set: (value: string) => { draft.audioId = value; } });
 const material = computed(() => app.materials.find(m => m.id === materialId.value));
 const blobUrl = ref(""), hydrating = ref(true), restoreFailed = ref(false), localError = ref(""), working = ref(false), repeating = ref(false);
+const audioLoading = ref(false), audioError = ref(""), audioReload = ref(0), audioTransient = ref(false);
 const { busy, error, run, cancel } = useRequest();
 const { busy: lookupBusy, error: lookupError, run: runLookup, cancel: cancelLookup } = useRequest();
 const lookupInput = ref("");
@@ -68,20 +86,78 @@ const phrases = computed(() => {
   // Editorial phrase boundaries are practice scaffolding, not forced-alignment timestamps.
   return line.split(/(?<=[,;:])\s+|\s+(?=(?:but|because|so|then|and|instead of)\b)/i).filter(Boolean);
 });
-const audioText = computed(() => wordLookup.value ? wordLookup.value.expression : sentence.value < 0 ? material.value?.transcript :
+const supplementaryAudio = computed(() => !!wordLookup.value || sentence.value >= 0 && draft.phrase >= 0);
+const authenticAudio = computed(() => !!material.value?.authenticPlayback && !supplementaryAudio.value);
+const playbackRange = computed(() => {
+  if (!authenticAudio.value) return undefined;
+  const playback = material.value!.authenticPlayback!;
+  const { startSeconds, endSeconds, durationSeconds } = playback;
+  if (![startSeconds, endSeconds, durationSeconds].every(Number.isFinite) || startSeconds < 0 ||
+    endSeconds <= startSeconds || endSeconds > durationSeconds + 0.05) return undefined;
+  if (sentence.value < 0) return { startSeconds, endSeconds };
+  const range = playback.sentenceRanges?.[sentence.value];
+  if (!range || !Number.isInteger(sentence.value) || ![range.startSeconds, range.endSeconds].every(Number.isFinite) ||
+    range.startSeconds < 0 || range.endSeconds <= range.startSeconds || range.endSeconds > endSeconds - startSeconds + 0.05) return undefined;
+  // Sentence times start at lesson zero; source timestamps must never seek into the saved clip.
+  return { startSeconds: startSeconds + range.startSeconds, endSeconds: startSeconds + range.endSeconds };
+});
+// Omitting text also removes AudioPlayer's explicit device/provider TTS fallback on media errors.
+const audioText = computed(() => authenticAudio.value ? undefined : wordLookup.value ? wordLookup.value.expression : sentence.value < 0 ? material.value?.transcript :
   draft.phrase >= 0 ? phrases.value[draft.phrase] : material.value?.sentences[sentence.value]);
-const sentenceFallback = computed(() => sentence.value >= 0 && (!hasSentenceFiles.value || draft.phrase >= 0));
-const audioSrc = computed(() => wordLookup.value ? undefined : sentence.value >= 0
+const sentenceFallback = computed(() => !authenticAudio.value && sentence.value >= 0 && (!hasSentenceFiles.value || draft.phrase >= 0));
+const audioSrc = computed(() => supplementaryAudio.value ? undefined : authenticAudio.value ? blobUrl.value || undefined : sentence.value >= 0
   ? hasSentenceFiles.value && draft.phrase < 0 ? `audio/${materialId.value}-${sentence.value}.wav` : undefined
   : blobUrl.value || material.value?.audioPath);
-const syntheticPlayback = computed(() => !!wordLookup.value || sentenceFallback.value || !!material.value?.synthetic || !audioSrc.value);
+const syntheticPlayback = computed(() => !authenticAudio.value && (!!wordLookup.value || sentenceFallback.value || !!material.value?.synthetic || !audioSrc.value));
+const audioReady = computed(() => (supplementaryAudio.value || !audioLoading.value && !audioError.value) &&
+  (!authenticAudio.value || !!blobUrl.value && !!playbackRange.value));
 const audioLabel = computed(() => wordLookup.value
   ? `Word / phrase pronunciation: “${wordLookup.value.expression}” · synthetic demonstration, not original recorded speech.`
+  : authenticAudio.value
+  ? sentence.value >= 0 ? `Original recorded speech · sentence ${sentence.value + 1} of ${material.value?.sentences.length}. Use 1× → 0.85× → 1×.`
+    : "Original recorded speech · listen without the transcript. Playback starts and repeats are recorded."
   : sentenceFallback.value
   ? `Synthesized ${draft.phrase >= 0 ? "phrase" : "sentence"} demonstration · not a segment of the imported recording.`
   : sentence.value >= 0 ? `Sentence ${sentence.value + 1} of ${material.value?.sentences.length}. Use 1× → 0.85× → 1×.`
     : stage.value === 0 ? "Listen without the transcript. Playback starts and repeats are recorded." : "Full passage replay.");
 const locked = computed(() => !!draft.first || completedAt.value !== undefined);
+// Store refresh replaces Material objects after evidence writes. Identical content must keep playing.
+const audioIdentity = computed(() => hydrating.value || restoreFailed.value || !material.value ? "" :
+  JSON.stringify([material.value.id, material.value.authenticPlayback, material.value.audioId,
+    material.value.sentences, material.value.transcript, material.value.synthetic, material.value.approved]));
+watch([audioIdentity, audioReload], async ([identity], _previous, onCleanup) => {
+  const controller = new AbortController();
+  let url = "";
+  onCleanup(() => {
+    controller.abort(); player.value?.stop();
+    if (url) URL.revokeObjectURL(url);
+    blobUrl.value = ""; audioTransient.value = false;
+  });
+  audioError.value = ""; audioLoading.value = false;
+  const currentMaterial = material.value;
+  if (!identity || !currentMaterial || disposed) return;
+  if (!currentMaterial.authenticPlayback && !currentMaterial.audioId) return;
+  audioLoading.value = true;
+  try {
+    const blob = currentMaterial.authenticPlayback
+      ? await prepareContentAudio(currentMaterial, controller.signal)
+      : (await db.audio.get(currentMaterial.audioId!))?.blob;
+    if (controller.signal.aborted || disposed) return;
+    if (!blob?.size) throw new Error('Missing saved audio');
+    url = URL.createObjectURL(blob); blobUrl.value = url;
+    audioTransient.value = !!currentMaterial.authenticPlayback && contentAudioIsTransient(blob);
+  } catch {
+    if (!controller.signal.aborted && !disposed) audioError.value = "The original audio could not be loaded or verified. Your answer stays here. Check your connection and retry.";
+  } finally {
+    if (!controller.signal.aborted && !disposed) audioLoading.value = false;
+  }
+}, { immediate: true, flush: "sync" });
+function retryAudio() { if (!audioLoading.value && !captureActive.value) audioReload.value++; }
+function audioPlaybackFailed() {
+  if (!authenticAudio.value) return;
+  player.value?.stop(); repeating.value = false;
+  audioError.value = "The original audio could not play. Your answer stays here. Retry loading the recording.";
+}
 function snapshot(): StudySession {
   return JSON.parse(JSON.stringify({
     id: sid.value, kind: "listen", materialId: materialId.value, startedAt: startedAt.value,
@@ -154,6 +230,7 @@ async function createAttempt(id: string, taskId: string, taskKind: string) {
   return row;
 }
 async function load(fresh = false) {
+  if (sid.value && !hydrating.value) await flushListeningTime();
   const token = ++generation;
   hydrating.value = true; restoreFailed.value = false; localError.value = ""; repeating.value = false;
   player.value?.stop(); cancel(); cancelLookup(); lookupError.value = "";
@@ -163,8 +240,6 @@ async function load(fresh = false) {
       app.plan.tasks.find(t => t.kind === "listen")?.materialId || app.materials[0]?.id || "");
     if (!app.materials.some(m => m.id === id)) {
       materialId.value = id; sid.value = "";
-      if (blobUrl.value) URL.revokeObjectURL(blobUrl.value);
-      blobUrl.value = "";
       return;
     }
     const requestedTask = String(route.query.task || route.query.taskId || "");
@@ -190,12 +265,6 @@ async function load(fresh = false) {
       if (token !== generation || disposed) return;
       draft.priorExposure = exposed;
     }
-    if (blobUrl.value) URL.revokeObjectURL(blobUrl.value);
-    blobUrl.value = "";
-    const assetId = material.value?.audioId;
-    const asset = assetId ? await db.audio.get(assetId) : undefined;
-    if (token !== generation || disposed) return;
-    if (asset) blobUrl.value = URL.createObjectURL(asset.blob);
   } catch {
     restoreFailed.value = true;
     localError.value = "Could not restore your attempt. Nothing was overwritten. Retry loading.";
@@ -228,7 +297,7 @@ function conditions(first = draft.first) {
   };
 }
 async function heard() {
-  if (hydrating.value) return;
+  if (hydrating.value || !audioReady.value || captureActive.value) return;
   if (wordLookup.value) {
     const lookup = wordLookup.value;
     try {
@@ -246,7 +315,7 @@ async function heard() {
   catch { localError.value = "Playback worked, but its record could not be saved. Retry saving."; }
 }
 async function ended() {
-  if (hydrating.value || wordLookup.value) return;
+  if (hydrating.value || !audioReady.value || captureActive.value || wordLookup.value) return;
   draft.completedPlays++;
   if (repeating.value && sentence.value >= 0) {
     await nextTick();
@@ -259,7 +328,8 @@ async function check(localOnly = false) {
     const token = generation, currentMaterial = material.value, currentSid = sid.value;
     if (!draft.first) draft.first = { answer: answer.value, estimate: estimate.value,
       playCount: draft.playCount, completedPlays: draft.completedPlays, priorExposure: draft.priorExposure,
-      revealed: draft.revealed, chineseUsed: draft.chineseUsed, synthetic: !!material.value.synthetic || !audioSrc.value };
+      revealed: draft.revealed, chineseUsed: draft.chineseUsed, synthetic: !!material.value.synthetic || !audioSrc.value,
+      playbackRates: draft.playbackRates.length && !draft.playbackRateUnknown ? [...draft.playbackRates] : null };
     await save(); // Freeze response and assistance before any network operation or answer reveal.
     if (token !== generation || disposed) return;
     const data = conditions();
@@ -270,13 +340,23 @@ async function check(localOnly = false) {
     if (app.keySet && !localOnly) {
       const result = await run(signal => app.provider.evaluate({
         kind: "listening comprehension", text: draft.first!.answer, reference: currentMaterial.transcript,
+        rubric: 'Judge the first response only against the reference: main meaning and accurate relevant details. Score comprehension 0..1; meaning-preserving paraphrases are acceptable. No acoustic, fluency or accent score. Rubric listening-main-idea-detail-v1.',
       }, signal));
       if (!result || token !== generation || disposed) return;
       feedback.value = result;
       if (result.comprehension !== null) await evidence({
         id: currentSid + "-meaning", type: "COMPREHENSION_RESPONSE", sessionId: currentSid,
         skill: "listeningSentences", score: result.comprehension, source: "ai", prompted: !data.firstPass,
-        data: { ...data, response: draft.first.answer, textOnlyEvaluation: true },
+        data: { ...data, response: draft.first.answer, textOnlyEvaluation: true,
+          ...(comparableObservation({ rubricVersion: listeningRubric,
+            // Exact prompt/transcript prevent unequal editorial forms being pooled.
+            comparisonKey: JSON.stringify(['listen', currentMaterial.id, currentMaterial.transcript, currentMaterial.question]),
+            difficulty: currentMaterial.difficulty, evaluator: assessmentEvaluator(result),
+            conditions: draft.first.playbackRates ? JSON.stringify({ playbackStarts: data.playbackStarts, completedPlays: data.completedPlays,
+              playbackRates: draft.first.playbackRates,
+              synthetic: data.synthetic, transcriptRevealed: data.transcriptRevealed, chineseUsed: data.chineseUsed,
+              chineseResponse: data.chineseResponse, rubric: listeningRubric }) : null,
+            firstPass: data.firstPass && data.completedPlays === 1, priorExposure: data.priorExposure, prompted: !data.firstPass }) ?? {}) },
       });
     }
     if (token !== generation || disposed) return;
@@ -425,7 +505,7 @@ async function recorded(value: { audioId: string; duration: number }) {
   savedAudioId.value = value.audioId;
   try {
     await evidence({ id: sid.value + "-shadow-" + value.audioId, type: "PRONUNCIATION_ATTEMPT",
-      source: "acoustic", sessionId: sid.value, prompted: true,
+      source: "objective", sessionId: sid.value, prompted: true,
       data: { duration: value.duration, audioId: value.audioId, materialId: materialId.value, sentence: sentence.value, imitation: true } });
   } catch { localError.value = "Your recording reference is retained. Retry saving its learning evidence before leaving."; }
 }
@@ -434,7 +514,7 @@ function finish() {
   return safely(async () => {
     const taskId = draft.taskId, id = materialId.value, taskKind = draft.taskKind, sessionId = sid.value, token = generation;
     completedAt.value ??= Date.now(); repeating.value = false; player.value?.stop();
-    await save(); await flushEvidence();
+    await flushListeningTime(); await save(); await flushEvidence();
     const assignment = app.plan.tasks.find(t => t.id === taskId);
     if (assignment?.materialId && assignment.materialId !== id) {
       app.notice = "Practice saved. This route's assignment belongs to another material, so it was not marked complete.";
@@ -453,7 +533,8 @@ async function retrySave() {
   await safely(async () => { await save(); await flushEvidence(); });
 }
 async function beforeNavigation() {
-  try { await save(); }
+  if (captureActive.value) { localError.value = "Finish or cancel the recording/assessment before leaving."; return false; }
+  try { await flushListeningTime(); await save(); }
   catch {
     localError.value = "Could not save before leaving. Retry saving; your draft is still here.";
     return false;
@@ -462,7 +543,7 @@ async function beforeNavigation() {
 onBeforeRouteLeave(beforeNavigation);
 onBeforeRouteUpdate(beforeNavigation);
 function hotkey(e: KeyboardEvent) {
-  if (hydrating.value || /INPUT|TEXTAREA|SELECT|BUTTON/.test((e.target as HTMLElement).tagName)) return;
+  if (hydrating.value || captureActive.value || /INPUT|TEXTAREA|SELECT|BUTTON/.test((e.target as HTMLElement).tagName)) return;
   if (e.code === "Space") { e.preventDefault(); void player.value?.toggle(); }
   if (stage.value >= 2 && material.value && ["ArrowLeft", "ArrowRight"].includes(e.key)) {
     e.preventDefault();
@@ -470,11 +551,43 @@ function hotkey(e: KeyboardEvent) {
   }
 }
 watch(() => [route.query.material, route.query.task, route.query.taskId], () => { void load(); }, { immediate: true });
-onMounted(() => window.addEventListener("keydown", hotkey));
+let lastMediaTime: number | null = null, lastMediaSample: number | null = null, mediaIdentity: HTMLAudioElement | undefined;
+function observePlaybackRate() {
+  if (draft.first) return;
+  const audio = listeningMedia.value?.querySelector('audio');
+  if (!audio || !Number.isFinite(audio.playbackRate) || audio.playbackRate <= 0) { draft.playbackRateUnknown = true; return; }
+  if (!draft.playbackRates.includes(audio.playbackRate)) draft.playbackRates.push(audio.playbackRate);
+}
+function sampleListeningTime() {
+  const audio = listeningMedia.value?.querySelector('audio');
+  const now = performance.now();
+  const elapsed = lastMediaSample === null ? 0 : (now - lastMediaSample) / 1000;
+  const advanced = !!audio && audio === mediaIdentity && lastMediaTime !== null && audio.currentTime > lastMediaTime &&
+    audio.currentTime - lastMediaTime <= elapsed * audio.playbackRate + 0.3;
+  if (audio && !audio.paused) observePlaybackRate();
+  listeningClock.sample(now, advanced && !!audio && audio.readyState >= 3 && !audio.paused && !audio.ended && !audio.seeking &&
+    document.visibilityState === 'visible' && document.hasFocus() && !captureActive.value && !hydrating.value);
+  lastMediaTime = audio?.currentTime ?? null; lastMediaSample = now; mediaIdentity = audio ?? undefined;
+}
+async function flushListeningTime() {
+  sampleListeningTime();
+  const activeSeconds = listeningClock.takeSeconds();
+  if (!activeSeconds || !sid.value || hydrating.value || disposed) return;
+  await evidence({ type: 'PRACTICE_LOGGED', source: 'objective', sessionId: sid.value,
+    data: { strand: 'input', activeSeconds, materialId: materialId.value, measured: 'visible-media-playback-wall-time' } });
+}
+onMounted(() => {
+  window.addEventListener("keydown", hotkey);
+  let ticks = 0;
+  listeningTimer = setInterval(() => {
+    sampleListeningTime();
+    if (++ticks % 15 === 0) void flushListeningTime().catch(() => { localError.value = 'Observed listening time is pending in your draft. Retry saving.'; });
+  }, 1000);
+});
 onBeforeUnmount(() => {
   disposed = true; generation++; repeating.value = false; cancel(); cancelLookup();
   window.removeEventListener("keydown", hotkey);
-  if (blobUrl.value) URL.revokeObjectURL(blobUrl.value);
+  clearInterval(listeningTimer);
 });
 </script>
 <template>
@@ -513,16 +626,28 @@ onBeforeUnmount(() => {
           Playback starts: {{ draft.playCount }} · completed plays: {{ draft.completedPlays }}.
         </p>
         <button class="text-button" :disabled="working || busy || captureActive" @click="restart">Start a fresh attempt</button>
-        <AudioPlayer
+        <p v-if="audioLoading" role="status">Loading the original recording…</p>
+        <p v-if="authenticAudio && audioTransient && audioReady && !captureActive" class="help-text" role="status">Ready to play now. This audio could not be saved offline; stay online or free browser storage.</p>
+        <p v-if="audioError" class="error" role="alert">{{ audioError }}
+          <button class="text-button" :disabled="audioLoading || captureActive" @click="retryAudio">Retry original audio</button>
+        </p>
+        <p v-if="authenticAudio && !playbackRange" role="status" class="help-text">
+          The original recording has no valid timing for this selection.
+          <button v-if="sentence >= 0" class="text-button" :disabled="captureActive" @click="selectSentence(-1)">Return to full passage</button>
+        </p>
+        <div ref="listeningMedia" @error.capture="audioPlaybackFailed" @ratechange.capture="observePlaybackRate" @play.capture="observePlaybackRate"><AudioPlayer
+          v-if="audioReady && !captureActive"
           :key="sid + ':' + sentence + ':' + draft.phrase + ':' + draft.lookupId"
           ref="player"
           :src="audioSrc"
           :text="audioText"
           :synthetic="syntheticPlayback"
+          :start-seconds="playbackRange?.startSeconds"
+          :end-seconds="playbackRange?.endSeconds"
           :label="audioLabel"
           @played="heard"
           @ended="ended"
-        />
+        /></div>
         <div v-if="stage === 0" class="response-area">
           <h3>How much did you catch?</h3>
           <div class="choice-row">
@@ -737,12 +862,20 @@ onBeforeUnmount(() => {
             </p>
             <Recorder
               :saved-audio-id="savedAudioId"
-              :disabled="working || busy"
+              :disabled="working || busy || pronunciationActive"
               label="Shadowing practice"
-              @active="captureActive = $event"
+              @active="shadowCaptureActive = $event"
               @recorded="recorded"
             />
           </details>
+          <PronunciationPractice
+            :reference="pronunciationReference" :saved-audio-id="pronunciationAudioId"
+            :saved-reference-id="pronunciationReferenceId" :pending-attempt="pronunciationAttempt"
+            :recovered-results="pronunciationResults"
+            :persist-attempt="pronunciation.persistAttempt" :disabled="pronunciationDisabled || working || busy || shadowCaptureActive"
+            @recorded="pronunciation.recorded" @evaluated="pronunciation.evaluated" @active="pronunciationActive = $event" />
+          <p v-if="pronunciationProblem" class="error" role="alert">{{ pronunciationProblem }}</p>
+          <button class="text-button" :disabled="pronunciationLoading || captureActive" @click="pronunciation.retry">Reload reviewed pronunciation reference / recover saved evidence</button>
           <button class="button primary wide" :disabled="working || busy || captureActive" @click="finish">
             Continue to active recall <Icon name="arrow" :size="17" />
           </button>

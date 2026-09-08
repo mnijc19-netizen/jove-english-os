@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { useApp } from "../stores/app";
 import { reviewCard } from "../db/repository";
 import { useRequest } from "../composables/useRequest";
@@ -9,6 +10,11 @@ import Recorder from "../components/Recorder.vue";
 import Icon from "../components/Icon.vue";
 import { db } from "../db/db";
 import { missions } from "../content/materials";
+import { planRecovery, selectMeaningfulReviews } from "../domain/longitudinal";
+import { liveQuery } from "dexie";
+import { onUnmounted } from "vue";
+import { resolveEventAliases, resolveReviewAttempts } from "../sync/journal";
+import { reviewAttempt, reviewAttemptCompleted, selectedReviewCard, type ReviewAttempt } from "../sync/review";
 const app = useApp(),
   filter = ref("all"),
   response = ref(""),
@@ -23,12 +29,80 @@ const app = useApp(),
   sttText = ref(""),
   evaluated = ref<number | null>(null);
 const ai = useRequest();
+const route = useRoute();
+const router = useRouter();
+const extra = computed(() => typeof route.query.extra === 'string' && /^\d{1,6}$/.test(route.query.extra) ? route.query.extra : null);
 const loaded = ref(false);
-const queue = computed(() =>
-  app.due.filter((c) => filter.value === "all" || c.modality === filter.value),
-);
+const block = ref<{ id: string; taskId?: string; startedAt: number; items: ReviewAttempt[] }>();
+const aliases = ref<{ cards: Record<string, string>; events: Record<string, string[]> }>({ cards: {}, events: {} });
+const aliasSubscription = liveQuery(async () => ({
+  cards: ((await db.syncMeta.get('cardAliases'))?.value ?? {}) as Record<string, string>,
+  events: ((await db.syncMeta.get('eventAliases'))?.value ?? {}) as Record<string, string[]>,
+})).subscribe(value => { aliases.value = value; });
+onUnmounted(() => aliasSubscription.unsubscribe());
+const blockReady = ref(false);
+const blockScope = computed(() => (typeof route.query.task === 'string' && !extra.value ? route.query.task : new Date(app.clock).toLocaleDateString('en-CA'))
+  + (extra.value ? `:extra:${extra.value}` : ''));
+let blockVersion = 0;
+const reviewed = (item: ReviewAttempt) => reviewAttemptCompleted(item, app.events, aliases.value.cards, aliases.value.events);
+const blockDone = computed(() => blockReady.value && !!block.value?.items.length && block.value.items.every(reviewed));
+let completing: Promise<void> | undefined;
+async function finishBlock() {
+  if (!blockDone.value || !block.value) return;
+  if (completing) return completing;
+  const saved = block.value;
+  completing = (async () => {
+    await app.evidence({ id: `${saved.id}:completed`, type: 'REVIEW_BLOCK_COMPLETED', source: 'objective', sessionId: saved.id,
+      data: { reviewedCardIds: saved.items.map(item => item.cardId), attemptIds: saved.items.map(item => item.attemptId),
+        ...(saved.taskId ? { taskId: saved.taskId } : {}) } });
+    if (saved.taskId) await app.completeTask('review', { taskId: saved.taskId });
+  })();
+  try { await completing; } finally { completing = undefined; }
+}
+watch(blockDone, done => { if (done) void finishBlock().catch(() => { error.value = 'Your reviews are saved. Reload to retry completing this block.'; }); });
+const missingSelection = computed(() => blockReady.value && block.value?.items.some(item => !reviewed(item)
+  && !selectedReviewCard(item, app.cards, aliases.value.cards)));
+const queue = computed(() => !blockReady.value ? [] : (block.value?.items ?? []).filter(item => !reviewed(item)).flatMap(item => {
+  const current = selectedReviewCard(item, app.cards, aliases.value.cards);
+  return current ? [current] : [];
+}));
+watch([blockScope, filter], async () => {
+  const version = ++blockVersion, id = `review-block:${blockScope.value}:${filter.value}`;
+  blockReady.value = false;
+  try {
+    const saved = await db.sessions.get(id);
+    if (version !== blockVersion) return;
+    const savedItems = Array.isArray(saved?.draft.items) ? saved.draft.items : [];
+    const cardAliases = ((await db.syncMeta.get('cardAliases'))?.value ?? {}) as Record<string, string>;
+    const items = await resolveReviewAttempts(db, id, savedItems, cardAliases);
+    const taskId = extra.value ? undefined : typeof route.query.task === 'string' ? route.query.task : app.plan.tasks.find(t => t.kind === 'review' && !t.done)?.id;
+    if (!items.length) {
+      const recovery = planRecovery(app.profile, app.events, app.clock);
+      const assigned = !extra.value && typeof route.query.task === 'string' ? app.plan.tasks.find(t => t.id === taskId) : undefined;
+      const selection = selectMeaningfulReviews(app.cards.filter(c => filter.value === 'all' || c.modality === filter.value), app.events, app.clock, {
+        budgetSeconds: Math.min(recovery.reviewBudgetSeconds, assigned ? assigned.minutes * 60 : Infinity), maxCards: recovery.maxReviewCards,
+      });
+      for (const cardId of selection.selectedIds) {
+        const current = app.cards.find(c => c.id === cardId)!;
+        items.push(reviewAttempt(cardId, current.card.reps));
+      }
+    }
+    const started = saved?.startedAt ?? Date.now();
+    const owner = typeof saved?.draft.taskId === 'string' ? saved.draft.taskId : taskId;
+    if (owner) await app.beginTask(owner);
+    await db.sessions.put({ id, kind: 'review-block', startedAt: started, stage: 'selection', draft: { items, ...(owner ? { taskId: owner } : {}) } });
+    if (version !== blockVersion) return;
+    block.value = { id, items, startedAt: started, ...(owner ? { taskId: owner } : {}) };
+    completed.value = items.filter(reviewed).length;
+    blockReady.value = true;
+  } catch (failure) { if (version === blockVersion) error.value = failure instanceof Error && failure.message.startsWith('Legacy review selection')
+    ? failure.message : 'Could not save your review selection. Keep your work and reload to retry.'; }
+}, { immediate: true });
 const card = computed(() => queue.value[0]),
   chunk = computed(() => app.chunks.find((c) => c.id === card.value?.chunkId));
+const attempt = computed(() => card.value ? block.value?.items.find(item => !reviewed(item)
+  && selectedReviewCard(item, app.cards, aliases.value.cards)?.id === card.value!.id) : undefined);
+watch(() => block.value?.items.filter(reviewed).length ?? 0, value => { completed.value = value; });
 const context = ref("");
 const contextReused = ref(false);
 const usesContext = (modality?: Modality) => modality === "speaking" || modality === "transfer";
@@ -42,14 +116,14 @@ const contextVariations = [
 const contexts = missions.flatMap(m => contextVariations.map(variation => `${m.scene} ${variation}`));
 async function contextFor(active: ReviewCard, draft?: Record<string, unknown>) {
   if (!usesContext(active.modality)) return { text: "", reused: false };
-  const responseId = `review-response:${active.id}:${active.card.reps}`;
+  const responseIds = new Set(await resolveEventAliases(db, attempt.value!.responseEventId));
   const [siblings, events] = await Promise.all([
     db.cards.where("chunkId").equals(active.chunkId).toArray(),
     db.events.where("chunkId").equals(active.chunkId).toArray(),
   ]);
   const used = new Set([
     ...siblings.flatMap(card => card.contextIds),
-    ...events.filter(event => event.id !== responseId && event.contextId).map(event => event.contextId!),
+    ...events.filter(event => !responseIds.has(event.id) && event.contextId).map(event => event.contextId!),
   ].map(contextKey));
   const saved = typeof draft?.context === "string" ? draft.context : "";
   // Preserve a response's original prompt. If it has become familiar, label it honestly.
@@ -60,7 +134,7 @@ async function contextFor(active: ReviewCard, draft?: Record<string, unknown>) {
   return { text, reused: used.has(contextKey(text)) };
 }
 const attemptKey = computed(() =>
-  card.value ? `review-draft:${card.value.id}:${card.value.card.reps}` : "",
+  attempt.value?.draftId ?? "",
 );
 let startedAt = Date.now();
 async function persist() {
@@ -73,6 +147,9 @@ async function persist() {
       startedAt,
       stage: revealed.value ? "checked" : "answer",
       draft: {
+        attemptId: attempt.value!.attemptId,
+        responseEventId: attempt.value!.responseEventId,
+        cardId: attempt.value!.cardId,
         response: response.value,
         revealed: revealed.value,
         hint: hint.value,
@@ -180,7 +257,7 @@ async function check() {
 async function rate(rating: 1 | 2 | 3 | 4) {
   if (!loaded.value || !revealed.value || !card.value || saving.value || ai.busy.value || recorderActive.value || !chunk.value) return;
   const submitted = {
-    active: card.value, chunk: chunk.value, sessionId: attemptKey.value,
+    active: card.value, chunk: chunk.value, sessionId: attemptKey.value, attempt: attempt.value!,
     response: response.value, hint: hint.value, heard: heard.value,
     recording: recording.value, sttText: sttText.value, evaluated: evaluated.value,
     context: usesContext(card.value.modality) ? context.value : undefined,
@@ -205,8 +282,13 @@ async function rate(rating: 1 | 2 | 3 | 4) {
       !!submitted.recording &&
       !!submitted.sttText.trim() &&
       submitted.sttText.trim() === submitted.response.trim();
-    await app.evidence({
-      id: `review-response:${active.id}:${active.card.reps}`,
+    // A sync collision can move the original response to a projection alias.
+    // Do not create a second response occurrence when retrying that same attempt.
+    const responseIds = await resolveEventAliases(db, submitted.attempt.responseEventId);
+    const previousResponses = await db.events.bulkGet(responseIds);
+    if (!previousResponses.some(event => event?.type === 'REVIEW_RESPONSE' && event.sessionId === submitted.sessionId
+      && event.chunkId === submitted.chunk.id && event.modality === active.modality)) await app.evidence({
+      id: submitted.attempt.responseEventId,
       type: "REVIEW_RESPONSE",
       source: "text",
       sessionId: submitted.sessionId,
@@ -215,13 +297,20 @@ async function rate(rating: 1 | 2 | 3 | 4) {
       prompted: submitted.hint,
       ...(submitted.context ? { contextId: submitted.context } : {}),
       data: {
+        attemptId: submitted.attempt.attemptId,
         response: submitted.response,
         ...(submitted.recording ? { audioId: submitted.recording } : {}),
         transcriptVerified: verified,
-        heard: submitted.heard,
+      heard: submitted.heard,
+        ...(block.value?.taskId ? { taskId: block.value.taskId } : {}),
       },
     });
+    const oldReviews = await db.events.bulkGet(await resolveEventAliases(db, submitted.attempt.attemptId));
+    const legacyRetry = submitted.attempt.legacy && oldReviews.some(event => event?.type === 'review'
+      && event.sessionId === undefined && event.data?.responseEventId === undefined);
     await reviewCard(active.id, chosen, {
+      eventId: submitted.attempt.attemptId,
+      ...(!legacyRetry ? { responseEventId: submitted.attempt.responseEventId, sessionId: submitted.sessionId } : {}),
       expectedReps: active.card.reps,
       prompted: submitted.hint,
       ...(submitted.context ? { contextId: submitted.context } : {}),
@@ -237,10 +326,13 @@ async function rate(rating: 1 | 2 | 3 | 4) {
       transcriptVerified: verified,
       ...(verified ? { audioId: submitted.recording } : {}),
     });
-    completed.value++;
     await app.refresh();
-    if (!app.due.length) await app.completeTask("review");
+    completed.value = block.value?.items.filter(reviewed).length ?? 0;
+    await finishBlock();
   } catch {
+    // A concurrent replay may change reps while the draft is being saved. Keep
+    // this attempt/draft identity and refresh the CAS value for an honest retry.
+    await app.refresh().catch(() => {});
     error.value =
       "Could not save this review. Your answer is still here; try again.";
   } finally {
@@ -258,8 +350,9 @@ async function rate(rating: 1 | 2 | 3 | 4) {
           Try to recall before revealing. The effort is part of the learning.
         </p>
       </div>
-      <span class="count-badge">{{ app.due.length }} due</span>
+      <span class="count-badge">{{ queue.length }} in this selection</span>
     </div>
+    <p class="help-text">A small, saved selection for this practice. Other due cards remain in your library with their original schedules.</p>
     <div class="review-toolbar">
       <label
         >Practice type<select v-model="filter" :disabled="saving || ai.busy.value || recorderActive">
@@ -398,22 +491,31 @@ async function rate(rating: 1 | 2 | 3 | 4) {
       <span class="round-icon"><Icon name="check" :size="35" /></span>
       <h2>
         {{
-          completed
+          missingSelection
+            ? "Your saved selection is waiting for card history."
+            : completed
             ? "That’s enough for this moment."
             : "Nothing due in this practice type."
         }}
       </h2>
-      <p>
+      <p v-if="missingSelection" role="status">This task has not been marked complete. Keep this saved selection while the matching cards and review history become available.</p>
+      <p v-else>
         Let spacing do its work. New expressions and listening gaps will return
         when they need you.
       </p>
+      <p v-if="error" class="error" role="alert">{{ error }}</p>
+      <button
+        v-if="blockDone && app.due.length" class="button secondary"
+        @click="router.push({ path: '/review', query: { extra: String(Math.min(999999, Number(extra || 0) + 1)) } })">Choose another optional selection</button>
       <RouterLink to="/listen" class="button primary"
         >Explore your next listening <Icon name="arrow" :size="16"
       /></RouterLink>
     </div>
+    <p v-if="card && missingSelection" class="help-text" role="status">Part of your saved selection is waiting for matching card history. This task has not been marked complete.</p>
     <p class="center help-text mt">
       Review timing uses FSRS. Listening, recognition and production have
       separate schedules.
+      <span v-if="extra">This optional practice does not add tasks or minutes to today's plan.</span>
     </p>
   </div>
 </template>

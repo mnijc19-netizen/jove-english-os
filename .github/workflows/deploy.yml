@@ -2,7 +2,7 @@ name: Verify and deploy Jove English
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/final-upgrade]
   pull_request:
   workflow_dispatch:
 
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -27,19 +27,51 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - run: npm run check:cloud-local -- --start
+      - name: Real local Auth, Storage and content persistence
+        run: npx vitest run tests/cloud-live.test.ts tests/content-worker.test.ts
+        env:
+          JOVE_LOCAL_CLOUD_TEST: '1'
+          JOVE_CONTENT_LOCAL_TEST: '1'
+      - run: npm run build:functions
+      - name: Real local Deno authorization and private reference audio
+        shell: bash
+        run: |
+          node node_modules/supabase/dist/supabase.js functions serve >/dev/null 2>&1 &
+          jove_edge_pid=$!
+          trap 'kill -TERM "$jove_edge_pid" 2>/dev/null || true; wait "$jove_edge_pid" 2>/dev/null || true' EXIT
+          npm run check:edge-local
       - run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ vars.JOVE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.JOVE_SUPABASE_PUBLISHABLE_KEY }}
+          JOVE_REQUIRE_CLOUD: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && '1' || '0' }}
       - run: npm run check:security
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit
+      - name: Real local multi-profile migration, offline merge and review recovery
+        run: npx vitest run tests/sync-browser-live.test.ts
+        env:
+          JOVE_LOCAL_BROWSER_TEST: '1'
+          JOVE_SYNC_BROWSERS: chromium,webkit
       - run: npm run test:e2e
       - run: npm audit --audit-level=high
+      - name: Verify commit-bound production backend readiness
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: node scripts/verify-release-readiness.mjs
+        env:
+          JOVE_RELEASE_SHA: ${{ github.sha }}
+          JOVE_PRODUCTION_READY_SHA: ${{ vars.JOVE_PRODUCTION_READY_SHA }}
+          JOVE_PRODUCTION_READY_AT: ${{ vars.JOVE_PRODUCTION_READY_AT }}
+          JOVE_PRODUCTION_PROJECT_REF: ${{ vars.JOVE_PRODUCTION_PROJECT_REF }}
+          VITE_SUPABASE_URL: ${{ vars.JOVE_SUPABASE_URL }}
       - name: Stage verified Pages artifact
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: dist
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -51,6 +83,20 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Recheck the release hold before every deployment attempt
+        run: node scripts/verify-release-readiness.mjs
+        env:
+          JOVE_RELEASE_SHA: ${{ github.sha }}
+          JOVE_PRODUCTION_READY_SHA: ${{ vars.JOVE_PRODUCTION_READY_SHA }}
+          JOVE_PRODUCTION_READY_AT: ${{ vars.JOVE_PRODUCTION_READY_AT }}
+          JOVE_PRODUCTION_PROJECT_REF: ${{ vars.JOVE_PRODUCTION_PROJECT_REF }}
+          VITE_SUPABASE_URL: ${{ vars.JOVE_SUPABASE_URL }}
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - name: Deploy verified artifact
         id: deployment

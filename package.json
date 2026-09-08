@@ -6,36 +6,42 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vue-tsc --noEmit && vite build",
+    "build:functions": "node scripts/build-functions.mjs",
     "typecheck": "vue-tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "check:security": "node scripts/security-check.mjs --build",
+    "check:cloud-local": "node scripts/verify-local-cloud.mjs",
+    "check:edge-local": "node scripts/verify-local-edge.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 4173"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.116.0",
+    "dexie": "^4.0.0",
+    "lucide-vue-next": "^0.468.0",
+    "pinia": "^3.0.0",
+    "ts-fsrs": "^5.0.0",
     "vue": "^3.5.0",
     "vue-router": "^4.5.0",
-    "pinia": "^3.0.0",
-    "dexie": "^4.0.0",
-    "zod": "^4.0.0",
-    "ts-fsrs": "^5.0.0",
-    "lucide-vue-next": "^0.468.0"
+    "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.0.0",
     "@vitejs/plugin-vue": "^6.0.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.0.0",
+    "eslint-plugin-vue": "^10.0.0",
+    "fake-indexeddb": "^6.0.0",
+    "globals": "^16.0.0",
+    "supabase": "^2.117.0",
+    "typescript": "~5.9.0",
+    "typescript-eslint": "^8.0.0",
     "vite": "^7.0.0",
     "vite-plugin-pwa": "^1.0.0",
-    "typescript": "~5.9.0",
-    "vue-tsc": "^3.0.0",
     "vitest": "^3.2.0",
-    "@playwright/test": "^1.55.0",
-    "fake-indexeddb": "^6.0.0",
-    "eslint": "^9.0.0",
-    "@eslint/js": "^9.0.0",
-    "typescript-eslint": "^8.0.0",
-    "eslint-plugin-vue": "^10.0.0",
-    "globals": "^16.0.0",
-    "@types/node": "^24.0.0"
+    "vue-tsc": "^3.0.0"
   }
 }

@@ -21,7 +21,7 @@ export function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<
   })
 }
 
-export async function withDeadline<T>(signal: AbortSignal | undefined, ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withDeadline<T>(signal: AbortSignal | undefined, ms: number, work: (signal: AbortSignal) => Promise<T>, options: { normalizeErrors?: boolean } = {}): Promise<T> {
   checkAbort(signal)
   const controller = new AbortController()
   const abort = () => controller.abort(new ProviderError('CANCELLED'))
@@ -30,7 +30,9 @@ export async function withDeadline<T>(signal: AbortSignal | undefined, ms: numbe
   try { return await abortable(work(controller.signal), controller.signal) }
   catch (error) {
     checkAbort(controller.signal)
-    throw normalizeError(error)
+    // Server domain errors retain their HTTP/recovery contract when explicitly
+    // requested. Cancellation/deadline above still takes precedence.
+    throw options.normalizeErrors === false ? error : normalizeError(error)
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', abort)

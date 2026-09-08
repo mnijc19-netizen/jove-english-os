@@ -7,6 +7,12 @@ import type { ProviderModel } from "../ai/provider";
 import type { Settings } from "../domain/types";
 import { useRequest } from "../composables/useRequest";
 import Icon from "../components/Icon.vue";
+import CloudAccount from "../components/CloudAccount.vue";
+import AccountUsage from "../components/AccountUsage.vue";
+import { useCloud } from "../stores/cloud";
+import { resetDeviceCacheAndKey } from "../sync/local-change";
+const cloud = useCloud();
+const advancedAi = ref(false);
 const app = useApp(),
   key = ref(""),
   models = ref<ProviderModel[]>([]),
@@ -37,6 +43,7 @@ const unknownCosts = computed(
 async function saveKey() {
   if (!key.value.trim()) return;
   await db.secrets.put({ id: "openrouter", value: key.value.trim() });
+  await db.secrets.put({ id: "provider-mode", value: "byok" });
   key.value = "";
   message.value =
     "Key saved on this browser. Test the connection before starting AI practice.";
@@ -55,8 +62,13 @@ async function catalog() {
 }
 async function removeKey() {
   await db.secrets.delete("openrouter");
+  await db.secrets.delete("provider-mode");
   key.value = "";
   message.value = "Key removed from this device.";
+  await app.refresh();
+}
+async function useAccountProvider() {
+  await db.secrets.delete("provider-mode");
   await app.refresh();
 }
 async function preference(field: keyof Settings, event: Event) {
@@ -97,14 +109,21 @@ async function loadFile(event: Event) {
   importName.value = file.name;
 }
 async function restore() {
-  await run(async () => {
-    await restoreBackup(importText.value);
+  const result = await run(async (signal) => {
+    await cloud.withLocalDataChange(async () => {
+      signal.throwIfAborted();
+      await restoreBackup(importText.value);
+      signal.throwIfAborted();
+    });
     await app.refresh();
+    return true;
+  });
+  if (result) {
     importText.value = "";
     importName.value = "";
     message.value =
-      "Learning records, review schedules and preferences restored. Audio files are separate from this backup.";
-  });
+      "Backup merged with retained learning history. Existing recordings and account sync history are safe. Audio files are separate from this backup.";
+  }
 }
 async function persistent() {
   const granted = await navigator.storage?.persist?.();
@@ -119,24 +138,34 @@ async function storageStatus() {
   storage.value = `${((estimate?.usage || 0) / 1024 / 1024).toFixed(1)} MB used · ${persistent ? "persistent storage" : "standard browser storage"}`;
 }
 async function clearCache() {
-  const cached = app.audio.filter((a) => a.kind === "generated");
-  if (cached.length) await db.audio.bulkDelete(cached.map((a) => a.id));
-  await app.refresh();
-  message.value =
-    "Generated audio cache cleared. Your recordings and imported audio are retained.";
-  await storageStatus();
+  const result = await run(async () => {
+    await cloud.withLocalDataChange(async () => {
+      await db.audio.filter((asset) => asset.kind === "generated" || asset.kind === "content-cache").delete();
+    });
+    await app.refresh();
+    await storageStatus();
+    return true;
+  });
+  if (result) message.value = "Downloadable and generated audio caches cleared. Your recordings and imported audio are retained.";
 }
 async function reset() {
   if (resetText.value !== "RESET") return;
-  await run(async () => {
-    await db.transaction("rw", db.tables, async () => {
-      for (const table of db.tables) await table.clear();
+  const result = await run(async (signal) => {
+    await cloud.withLocalDataChange(async () => {
+      signal.throwIfAborted();
+      await resetDeviceCacheAndKey(db);
+      signal.throwIfAborted();
     });
-    await app.init();
+    key.value = "";
+    await app.refresh();
+    await storageStatus();
+    return true;
+  });
+  if (result) {
     resetText.value = "";
     message.value =
-      "Local learning data and key were reset. An exported backup can restore learning records.";
-  });
+      "Optional local API key and audio caches cleared. Learning, drafts, original recordings, preferences and account sync history are retained.";
+  }
 }
 onMounted(storageStatus);
 </script>
@@ -158,20 +187,30 @@ onMounted(storageStatus);
     <button v-if="busy" class="text-button" @click="cancel">
       Cancel current request
     </button>
+    <CloudAccount />
     <section class="settings-section">
       <div class="settings-description">
         <span class="small-icon"><Icon name="sparkle" /></span>
         <h2>AI connection</h2>
-        <p>
+        <p v-if="cloud.configured">Your account connects the AI services for all your devices.</p>
+        <p v-else>
           Use your own OpenRouter key for conversations, language feedback and
           speech.
         </p>
       </div>
       <div class="panel settings-panel">
+        <template v-if="cloud.configured">
+          <h3>Account AI</h3>
+          <p>No production API key is stored on this browser or included in your learning backup.</p>
+          <button class="button secondary" :disabled="!cloud.userId || busy" @click="useAccountProvider().then(test)">Check account connection</button>
+          <p v-if="app.providerMode === 'byok'" class="help-text">This browser is using your optional local key. Other devices keep their own connection mode.</p>
+          <button class="text-button" @click="advancedAi = !advancedAi">{{ advancedAi ? 'Hide advanced connection' : 'Advanced: optional browser key' }}</button>
+        </template>
+        <template v-if="!cloud.configured || advancedAi">
         <div class="row between">
           <h3>OpenRouter</h3>
           <span class="pill">{{
-            app.keySet ? "Key saved locally" : "Not connected"
+            app.browserKeySet ? "Key saved locally" : "No browser key"
           }}</span>
         </div>
         <label for="api-key">Dedicated API key</label
@@ -192,13 +231,13 @@ onMounted(storageStatus);
             Save key</button
           ><button
             class="button secondary"
-            :disabled="!app.keySet || busy"
+            :disabled="!app.browserKeySet || busy"
             @click="test"
           >
             Test connection</button
           ><button
             class="text-button"
-            :disabled="!app.keySet || busy"
+            :disabled="!app.browserKeySet || busy"
             @click="removeKey"
           >
             Remove key
@@ -302,6 +341,7 @@ onMounted(storageStatus);
             </select></label
           >
         </div>
+        </template>
       </div>
     </section>
     <section class="settings-section">
@@ -378,7 +418,9 @@ onMounted(storageStatus);
         <h2>Usage & budget</h2>
         <p>Keep your practice predictable.</p>
       </div>
-      <div class="panel settings-panel">
+      <AccountUsage v-if="cloud.configured" />
+      <div v-if="!cloud.configured || app.browserKeySet" class="panel settings-panel">
+        <h3 v-if="cloud.configured">Optional browser-key usage</h3>
         <div class="usage-total">
           <strong>${{ app.cost.toFixed(2) }}</strong
           ><span>reported cost today</span>
@@ -425,12 +467,12 @@ onMounted(storageStatus);
         <span class="small-icon"><Icon name="shield" /></span>
         <h2>Your data</h2>
         <p>
-          No account or cloud sync. Keep a backup before clearing browser data
-          or moving devices.
+          {{ cloud.configured ? 'Learning sync is managed by your account above. Keep a separate backup before clearing browser data.' : 'Cloud service is not connected to this build. Keep a backup before clearing browser data or moving devices.' }}
         </p>
       </div>
       <div class="panel settings-panel">
         <h3>Backup & restore</h3>
+        <p v-if="cloud.configured" class="help-text">Cloud recording preferences are managed with your account usage above. Unfinished originals remain protected.</p>
         <p>
           Back up your learning, review schedules and preferences. Keys and
           audio blobs are excluded.
@@ -447,11 +489,11 @@ onMounted(storageStatus);
         <div v-if="importText" class="restore-confirm">
           <p>
             Restore <strong>{{ importName }}</strong
-            >? This replaces the current learning records on this device after
-            validation. Export first if you want to keep both versions.
+            >? The validated backup will merge with retained learning history.
+            Missing older records do not delete newer work. Existing audio originals and account identity stay on this device.
           </p>
           <button class="button secondary" :disabled="busy" @click="restore">
-            Validate & restore backup</button
+            Validate & merge backup</button
           ><button
             class="text-button"
             @click="
@@ -469,8 +511,8 @@ onMounted(storageStatus);
         <div class="row wrap">
           <button class="text-button" @click="persistent">
             Request persistent storage</button
-          ><button class="text-button" @click="clearCache">
-            Clear generated audio cache
+          ><button class="text-button" :disabled="busy" @click="clearCache">
+            Clear reusable audio caches
           </button>
         </div>
         <label for="audio-limit">Audio storage budget (MB)</label
@@ -484,11 +526,11 @@ onMounted(storageStatus);
           @change="preference('audioLimitMB', $event)"
         />
         <details class="danger-zone">
-          <summary>Reset this device’s learning space</summary>
+          <summary>Reset local key and audio caches</summary>
           <p>
-            This removes local learning data, saved recordings and the key.
-            Recovery requires a previously exported backup; audio is not in that
-            backup.
+            This clears the optional API key and reusable audio caches on this device.
+            Learning, drafts, original recordings, preferences and the account's sync history are kept.
+            It does not erase your cloud learning or sign you out.
           </p>
           <label for="reset-confirm">Type RESET to confirm</label
           ><input
@@ -500,7 +542,7 @@ onMounted(storageStatus);
             :disabled="resetText !== 'RESET' || busy"
             @click="reset"
           >
-            Reset local data
+            Reset local key & caches
           </button>
         </details>
       </div>

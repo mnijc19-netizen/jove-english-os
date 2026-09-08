@@ -1,15 +1,16 @@
 import { createEmptyCard, fsrs, Rating } from 'ts-fsrs'
 import { aggregateSkills, evidenceWeight } from '../domain/engine'
 import { defaultProfile, defaultSettings, type AudioAsset, type Chunk, type ErrorPattern, type Evaluation, type Material, type MaterialChunk, type ReviewCard, type StudyEvent } from '../domain/types'
-import { db, DB_VERSION } from './db'
+import { db, BACKUP_SCHEMA_VERSION } from './db'
 import { audioMetadataSchema, backupTables, eventSchema, evaluationErrorSchema, materialChunkSchema, materialSchema, modalities, parseBackup, reviewCardSchema, reviewOptionsSchema, repairAttemptOptionsSchema, type Backup, type ReviewOptions, type RepairAttemptOptions } from './schema'
 import { projectChunks, projectErrors } from './projections'
+import { resolveCardAlias, resolveEventAliases } from '../sync/journal'
 
 const scheduler = fsrs({ enable_fuzz: false })
 const normalize = (value: string) => value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US')
 const uuid = () => crypto.randomUUID()
 const projectionTables = [db.events, db.skills, db.chunks, db.errors, db.cards]
-const eventTables = [...projectionTables, db.sessions, db.materials, db.audio, db.conversations, db.assessments]
+const eventTables = [...projectionTables, db.sessions, db.materials, db.audio, db.conversations, db.assessments, db.syncMeta]
 export type { ReviewOptions, RepairAttemptOptions } from './schema'
 export const REPAIR_RETEST_DELAY = 10 * 60_000
 export const REPAIR_TRANSFER_DELAY = 2 * 86_400_000
@@ -169,31 +170,39 @@ export async function reviewCard(cardId: string, rating: 1 | 2 | 3 | 4, input: R
   const score = options.score ?? ({ 1: 0, 2: 0.5, 3: 0.8, 4: 1 }[rating])
   const timestamp = Date.now()
   await db.transaction('rw', eventTables, async () => {
+    cardId = await resolveCardAlias(db, cardId)
     const stored = await db.cards.get(cardId)
     if (!stored) throw new Error('Missing review card')
     const review = reviewCardSchema.parse(stored)
-    if (options.expectedReps !== undefined) {
-      if (review.card.reps > options.expectedReps) return
-      if (review.card.reps < options.expectedReps) throw new Error('Review repetitions are below the expected value')
-    }
     if (options.eventId) {
-      const previous = await db.events.get(options.eventId)
-      if (previous) {
-        if (previous.type !== 'review' || previous.data?.cardId !== cardId || previous.data?.rating !== rating || previous.source !== source
-          || previous.score !== score || previous.contextId !== options.contextId || previous.prompted !== (options.prompted ?? false)
-          || previous.data?.audioObserved !== (options.audioObserved ?? false) || previous.data?.transcriptVerified !== (options.transcriptVerified ?? false)
-          || previous.data?.audioId !== options.audioId) throw new Error('Review event ID already used')
-        return
+      const previous = (await db.events.bulkGet(await resolveEventAliases(db, options.eventId))).filter((event): event is StudyEvent => !!event)
+      for (const event of previous) {
+        if (event.type === 'review' && typeof event.data?.cardId === 'string'
+          && await resolveCardAlias(db, event.data.cardId) === cardId && event.data.rating === rating && event.source === source
+          && event.score === score && event.contextId === options.contextId && event.prompted === (options.prompted ?? false)
+          && event.data.audioObserved === (options.audioObserved ?? false) && event.data.transcriptVerified === (options.transcriptVerified ?? false)
+          && event.data.audioId === options.audioId && event.sessionId === options.sessionId
+          && event.data.responseEventId === options.responseEventId) return
       }
+      if (previous.length) throw new Error('Review event ID already used')
+    }
+    if (options.expectedReps !== undefined) {
+      if (review.card.reps > options.expectedReps) throw new Error('Review changed on another device; reload the saved attempt before scheduling')
+      if (review.card.reps < options.expectedReps) throw new Error('Review repetitions are below the expected value')
     }
     if (review.card.last_review && timestamp < review.card.last_review.getTime()) throw new Error('Review clock precedes last review')
     if (options.audioId) {
       const audio = await db.audio.get(options.audioId)
       if (!audio || audio.kind !== 'recording' || !audio.blob.size) throw new Error('Review audio must be a saved recording')
     }
-    const responseId = `review-response:${cardId}:${review.card.reps}`
+    const responseId = options.responseEventId ?? `review-response:${cardId}:${review.card.reps}`
+    const responseAliases = await resolveEventAliases(db, responseId)
+    const responses = (await db.events.bulkGet(responseAliases)).filter((event): event is StudyEvent => !!event)
+    const ignoredResponses = new Set(responses.filter(event => event.type === 'REVIEW_RESPONSE'
+      && event.chunkId === review.chunkId && event.modality === review.modality
+      && (options.sessionId ? event.sessionId === options.sessionId : event.id === responseId)).map(event => event.id))
     const contextKey = options.contextId ? normalize(options.contextId) : undefined
-    const history = contextKey ? await db.events.where('chunkId').equals(review.chunkId).filter(e => !!e.contextId && normalize(e.contextId) === contextKey && e.id !== responseId).toArray() : []
+    const history = contextKey ? await db.events.where('chunkId').equals(review.chunkId).filter(e => !!e.contextId && normalize(e.contextId) === contextKey && !ignoredResponses.has(e.id)).toArray() : []
     const siblingCards = options.contextId ? await db.cards.where('chunkId').equals(review.chunkId).toArray() : []
     const novelContext = !!contextKey && !history.length && !siblingCards.some(c => c.contextIds.some(context => normalize(context) === contextKey))
     const candidate: StudyEvent = { id: '', type: 'review', timestamp, source, chunkId: review.chunkId, modality: review.modality,
@@ -204,11 +213,14 @@ export async function reviewCard(cardId: string, rating: 1 | 2 | 3 | 4, input: R
     const unprovenTransfer = review.errorId && review.modality === 'transfer' && score >= 0.6 && (!novelContext || !evidenceWeight(candidate))
     const scheduledRating = options.prompted || score === 0 || unprovenTransfer ? Rating.Again : rating
     const result = scheduler.next(review.card, new Date(timestamp), scheduledRating)
+    const eventId = options.eventId ?? `review:${uuid()}`
     const event = eventSchema.parse({
-      id: options.eventId ?? `review:${cardId}:${review.card.reps + 1}`, type: 'review', timestamp, source,
+      id: eventId, type: 'review', timestamp, source, sessionId: options.sessionId,
       chunkId: review.chunkId, modality: review.modality, prompted: options.prompted ?? false,
       contextId: options.contextId, score,
       data: { cardId, rating, scheduledRating, novelContext, nextDue: result.card.due.getTime(),
+        attemptId: eventId, previousReps: review.card.reps,
+        ...(options.responseEventId ? { responseEventId: options.responseEventId } : {}),
         audioObserved: options.audioObserved ?? false, transcriptVerified: options.transcriptVerified ?? false,
         ...(options.audioId ? { audioId: options.audioId } : {}),
         ...(review.errorId ? { errorId: review.errorId } : {}) },
@@ -250,7 +262,7 @@ export async function exportBackup(): Promise<string> {
   return db.transaction('r', backupTables.map(name => db.table(name)), async () => {
     const tables: Record<string, unknown[]> = {}
     for (const name of backupTables) tables[name] = name === 'audio' ? (await db.audio.toArray()).map(audioMetadata) : await db.table(name).toArray()
-    const backup = parseBackup({ format: 'jove-english-os', version: 1, schemaVersion: DB_VERSION, exportedAt: Date.now(), audioPolicy: 'blobs-omitted', tables })
+    const backup = parseBackup({ format: 'jove-english-os', version: 1, schemaVersion: BACKUP_SCHEMA_VERSION, exportedAt: Date.now(), audioPolicy: 'blobs-omitted', tables })
     return JSON.stringify(backup)
   })
 }

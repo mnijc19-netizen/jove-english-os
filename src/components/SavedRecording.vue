@@ -1,21 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed } from "vue";
 import { useApp } from "../stores/app";
+import { useRecordingUrl } from "../composables/useRecordingUrl";
 const props = defineProps<{ audioId: string; label?: string }>();
-const app = useApp(),
-  url = ref("");
+const app = useApp();
 const asset = computed(() => app.audio.find((a) => a.id === props.audioId));
-watch(
-  () => asset.value?.blob,
-  (blob) => {
-    if (url.value) URL.revokeObjectURL(url.value);
-    url.value = blob ? URL.createObjectURL(blob) : "";
-  },
-  { immediate: true },
-);
-onBeforeUnmount(() => {
-  if (url.value) URL.revokeObjectURL(url.value);
-});
+const url = useRecordingUrl(asset);
 </script>
 <template>
   <div v-if="audioId" class="saved-recording">

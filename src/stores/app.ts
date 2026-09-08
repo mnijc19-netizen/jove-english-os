@@ -1,8 +1,9 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { db } from "../db/db";
 import { initialize, recordEvent } from "../db/repository";
 import { makePlan } from "../domain/engine";
+import { hasTaskStarted, planLongitudinal } from "../domain/longitudinal";
 import {
   defaultProfile,
   defaultSettings,
@@ -23,12 +24,19 @@ import {
 import { demoMaterials } from "../content/materials";
 import { OpenRouterProvider } from "../ai/provider";
 import { profileSchema, settingsSchema } from "../db/schema";
+import { useCloud } from "./cloud";
+import { CloudProvider, routeProvider } from "../ai/cloud-provider";
+import { flushContentHistory, prepareContentAudio, refreshContentLessons } from "../cloud/content";
 
 export const useApp = defineStore("app", () => {
   const ready = ref(false),
     fatal = ref(""),
     notice = ref(""),
     keySet = ref(false);
+  const providerMode = ref<'account' | 'byok'>('account');
+  const contentState = ref<'idle' | 'loading' | 'ready' | 'empty' | 'offline' | 'error'>('idle');
+  let contentJob: Promise<void> | undefined, contentController: AbortController | undefined;
+  let contentIdentity = '', lastContentAttempt = 0;
   const profile = ref<Profile>(defaultProfile()),
     settings = ref<Settings>({ ...defaultSettings });
   const skills = ref<Skill[]>([]),
@@ -45,6 +53,7 @@ export const useApp = defineStore("app", () => {
   const online = ref(navigator.onLine);
   window.addEventListener("online", () => {
     online.value = true;
+    void loadContent(true);
   });
   window.addEventListener("offline", () => {
     online.value = false;
@@ -52,11 +61,14 @@ export const useApp = defineStore("app", () => {
   const clock = ref(Date.now());
   const tick = () => {
     clock.value = Date.now();
+    if (document.visibilityState !== 'hidden') void loadContent();
     const messages = provider.takeNotices();
     if (messages.length)
       notice.value = messages
         .map((m) =>
-          m.kind === "model-fallback"
+          m.kind === "result-cache-unconfirmed"
+            ? "The received result is saved on this device. Server recovery is not confirmed; retrying the same request reuses the saved result without another AI call."
+          : m.kind === "model-fallback"
             ? `A selected model was unavailable; ${m.purpose} used ${m.to}. You can change models in Settings.`
             : "The provider used validated JSON fallback for this response.",
         )
@@ -84,7 +96,7 @@ export const useApp = defineStore("app", () => {
   );
   const todayUsage = computed(() =>
     usage.value.filter(
-      (u) => new Date(u.timestamp).toLocaleDateString("en-CA") === today.value,
+      (u) => !u.purpose.startsWith('account:') && new Date(u.timestamp).toLocaleDateString("en-CA") === today.value,
     ),
   );
   const cost = computed(() =>
@@ -111,6 +123,7 @@ export const useApp = defineStore("app", () => {
     profile.value = results[0] ?? defaultProfile();
     settings.value = { ...defaultSettings, ...results[1]?.value };
     keySet.value = !!results[2]?.value;
+    providerMode.value = (await db.secrets.get('provider-mode'))?.value === 'byok' ? 'byok' : 'account';
     skills.value = results[3];
     events.value = results[4];
     chunks.value = results[5];
@@ -134,11 +147,46 @@ export const useApp = defineStore("app", () => {
       await initialize(demoMaterials);
       await refresh();
       ready.value = true;
+      void useCloud().start(refresh);
     } catch {
       fatal.value =
         "Your browser could not open the local learning database. Allow site storage, then reload. Your existing data has not been reset.";
     }
   }
+  async function loadContent(force = false): Promise<void> {
+    const cloud = useCloud();
+    if (!ready.value || !profile.value.onboarded || !cloud.configured || !cloud.userId) {
+      contentController?.abort(); contentIdentity = ''; contentState.value = 'idle'; return;
+    }
+    if (!online.value) { contentState.value = 'offline'; return; }
+    const key = JSON.stringify([cloud.userId, today.value, profile.value.fatigue, profile.value.interests]);
+    if (key === contentIdentity && (contentJob || (!force && Date.now() - lastContentAttempt < 900_000))) return contentJob;
+    contentController?.abort();
+    const controller = new AbortController(); contentController = controller;
+    contentIdentity = key; lastContentAttempt = Date.now(); contentState.value = 'loading';
+    const current = () => !controller.signal.aborted && contentController === controller && cloud.userId === JSON.parse(key)[0];
+    const job = (async () => {
+      try {
+        await flushContentHistory(events.value, materials.value, controller.signal);
+        const targetDifficulty = planLongitudinal({ profile: profile.value, skills: skills.value,
+          cards: cards.value, events: events.value, materials: materials.value, now: Date.now() }).adjustments.targetDifficulty;
+        const selected = await refreshContentLessons({ targetDifficulty, fatigue: profile.value.fatigue,
+          interests: profile.value.interests.slice(0, 20), requireGeneralAmerican: targetDifficulty < 0.6 }, controller.signal);
+        if (!current()) return;
+        await refresh();
+        // Cache only the next small practice clips. Selection never changes a begun task.
+        const selectedIds = new Set(plan.value.tasks.filter(t => !t.done && ['listen', 'shadow'].includes(t.kind)).map(t => t.materialId));
+        for (const material of materials.value.filter(m => selectedIds.has(m.id) && m.authenticPlayback).slice(0, 2))
+          await prepareContentAudio(material, controller.signal);
+        if (current()) contentState.value = selected.length || materials.value.some(m => m.authenticPlayback) ? 'ready' : 'empty';
+      } catch { if (current()) contentState.value = online.value ? 'error' : 'offline'; }
+      finally { if (contentController === controller) contentJob = undefined; }
+    })();
+    contentJob = job;
+    return job;
+  }
+  watch(() => [ready.value, useCloud().userId, today.value, profile.value.onboarded,
+    profile.value.fatigue, profile.value.interests.join('|')], () => { void loadContent(); });
   async function saveSettings(patch: Partial<Settings>) {
     try {
       const value = settingsSchema.parse(
@@ -171,7 +219,7 @@ export const useApp = defineStore("app", () => {
                 cards.value,
                 events.value,
                 materials.value,
-                { ...previous, tasks: previous.tasks.filter((t) => t.done) },
+                { ...previous, tasks: previous.tasks.filter((t) => t.done || hasTaskStarted(t.id, events.value, clock.value)) },
                 clock.value,
               ),
             );
@@ -259,9 +307,12 @@ export const useApp = defineStore("app", () => {
     return blob;
   }
   async function beginTask(taskId: string) {
-    if (!plan.value.tasks.some((t) => t.id === taskId)) return;
+    const task = plan.value.tasks.find((t) => t.id === taskId)
+    if (!task) return;
     await db.plans.put(JSON.parse(JSON.stringify(plan.value)));
     plans.value = await db.plans.toArray();
+    await evidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
+      data: { taskId: task.id, kind: task.kind, ...(task.materialId ? { materialId: task.materialId } : {}) } })
   }
   async function completeTask(
     kind: string,
@@ -294,7 +345,7 @@ export const useApp = defineStore("app", () => {
       });
     }
   }
-  const provider = new OpenRouterProvider({
+  const localProvider = new OpenRouterProvider({
     getKey: async () => (await db.secrets.get("openrouter"))?.value ?? "",
     getSettings: () => settings.value,
     onUsage: async (u) => {
@@ -313,11 +364,18 @@ export const useApp = defineStore("app", () => {
         );
     },
   });
+  const provider = routeProvider(localProvider, new CloudProvider(localProvider, async (row) => {
+    await db.usage.put(row);
+    usage.value = await db.usage.toArray();
+  }), () => useCloud().configured && providerMode.value !== "byok");
+  const providerAvailable = computed(() => useCloud().configured && providerMode.value !== "byok" ? !!useCloud().userId : keySet.value);
   return {
     ready,
     fatal,
     notice,
-    keySet,
+    keySet: providerAvailable,
+    browserKeySet: keySet,
+    providerMode,
     online,
     clock,
     profile,
@@ -344,5 +402,7 @@ export const useApp = defineStore("app", () => {
     beginTask,
     provider,
     generatedSpeech,
+    contentState,
+    loadContent,
   };
 });

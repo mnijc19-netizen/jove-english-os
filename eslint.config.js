@@ -3,7 +3,7 @@ import ts from 'typescript-eslint'
 import vue from 'eslint-plugin-vue'
 import globals from 'globals'
 export default ts.config(
-  { ignores: ['dist/**', 'node_modules/**', '.work/**', '.serena/**', 'playwright-report/**', 'test-results/**'] },
+  { ignores: ['dist/**', 'node_modules/**', '.work/**', '.serena/**', 'playwright-report/**', 'test-results/**', 'supabase/functions/_shared/jove-runtime.js'] },
   js.configs.recommended, ...ts.configs.recommended, ...vue.configs['flat/recommended'],
   { languageOptions: { globals: { ...globals.browser, ...globals.node } } },
   { files: ['**/*.vue'], languageOptions: { parserOptions: { parser: ts.parser } }, rules: {

@@ -271,7 +271,7 @@ test("periodic assessment makes real turns, sends stable rubric, survives reload
     }
     await card
       .getByRole("button", {
-        name: stage === "Conversation" ? "Save & continue" : "Finish check-in",
+        name: "Save & continue",
         exact: true,
       })
       .click();
@@ -280,6 +280,44 @@ test("periodic assessment makes real turns, sends stable rubric, survives reload
         "Real-life task",
       );
   }
+  await expect(card.locator(".eyebrow").first()).toContainText("Reading");
+  const finish = card.getByRole("button", { name: "Finish five-part check-in", exact: true });
+  await expect(finish).toBeDisabled();
+  expect((await records(page, "events")).filter(e => e.type === "ASSESSMENT_COMPLETED")).toHaveLength(0);
+  await card.getByRole("button", { name: "Start reading", exact: true }).click();
+  // Real visible reading intervals and section confirmations: no fixture writes
+  // to completedAt, no injected reading evidence, and no synthetic completion.
+  let confirmedSections = 0;
+  for (; confirmedSections < 20;) {
+    const next = card.getByRole("button", { name: /^I read this section/ });
+    await expect(next).toBeEnabled();
+    const last = (await next.textContent())?.includes("share the meaning");
+    await next.click();
+    confirmedSections++;
+    if (last) break;
+  }
+  await expect(card.locator("#reading-response")).toBeVisible();
+  const meaning = "The speaker explains a practical problem, considers the available choices and agrees on a useful next step.";
+  const retell = "First they describe what happened. They compare possible solutions and choose a clear plan that works for everyone.";
+  await card.locator("#reading-response").fill(meaning);
+  await page.reload();
+  await expect(card.locator("#reading-response")).toHaveValue(meaning);
+  await expect(finish).toBeDisabled();
+  await card.locator("#reading-retell").fill(retell);
+  await card.getByRole("button", { name: "Save reading & retell", exact: true }).click();
+  await expect(finish).toBeEnabled();
+  const beforeFinish = (await records(page, "assessments"))[0];
+  const readingResponse = beforeFinish.responses as Record<string, unknown>;
+  expect(beforeFinish.completedAt).toBeFalsy();
+  expect(readingResponse.Reading).toBe(meaning);
+  expect(readingResponse.readingRetell).toBe(retell);
+  const reading = (await records(page, "sessions")).find(row => row.id === readingResponse.readingSessionId);
+  expect(reading).toMatchObject({ kind: "reading", stage: "saved" });
+  expect(reading?.completedAt).toBeTruthy();
+  expect(reading?.draft).toMatchObject({ submittedResponse: meaning, retell });
+  expect((reading?.draft as { readSections: number[] }).readSections).toEqual(Array.from({ length: confirmedSections }, (_, i) => i));
+  expect((await records(page, "events")).filter(e => e.type === "ASSESSMENT_COMPLETED")).toHaveLength(0);
+  await finish.click();
   await expect(page.locator(".assessment-history")).toBeVisible();
   expect(
     (await records(page, "events")).filter(
@@ -288,6 +326,8 @@ test("periodic assessment makes real turns, sends stable rubric, survives reload
   ).toHaveLength(1);
   const saved = (await records(page, "assessments"))[0];
   expect(saved.completedAt).toBeTruthy();
+  expect(saved.scores).toHaveProperty("Reading", null);
+  expect(saved.responses).toMatchObject({ Reading: meaning, readingRetell: retell, readingSessionId: reading?.id });
   expect(JSON.stringify(saved.responses)).toContain("dialogue-3");
   expect(requests.filter((r) => r.stream)).toHaveLength(6);
   expect(JSON.stringify(requests)).toContain("anchors");

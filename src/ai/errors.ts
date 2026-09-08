@@ -1,10 +1,14 @@
 export type ProviderErrorCode =
-  | 'NO_KEY' | 'AUTH' | 'CREDITS' | 'BUDGET' | 'RATE_LIMIT' | 'NETWORK'
+  | 'NO_KEY' | 'AUTH' | 'ACCOUNT_REQUIRED' | 'ACCOUNT_SERVICE' | 'CREDITS' | 'BUDGET' | 'RATE_LIMIT' | 'NETWORK'
   | 'TIMEOUT' | 'CANCELLED' | 'MODEL_REQUIRED' | 'MODEL_UNAVAILABLE' | 'VOICE'
   | 'BAD_REQUEST' | 'UNAVAILABLE' | 'INVALID_RESPONSE' | 'TRUNCATED'
-  | 'INPUT' | 'RETRIEVAL' | 'USAGE'
+  | 'INPUT' | 'RETRIEVAL' | 'USAGE' | 'ACCOUNT_PENDING' | 'ACCOUNT_UNCERTAIN'
 
 const messages: Record<ProviderErrorCode, string> = {
+  ACCOUNT_REQUIRED: 'Sign in to your learning account in Settings. Your saved work is still available.',
+  ACCOUNT_SERVICE: 'The account AI service could not finish. Your work is saved; retry later or check the account connection in Settings.',
+  ACCOUNT_PENDING: 'Your earlier request is still pending. Your saved input is safe; retry later to retrieve the same result.',
+  ACCOUNT_UNCERTAIN: 'The earlier request has no confirmed result. Your saved input is safe. Retrying again creates a new request and may incur another charge.',
   NO_KEY: 'Add an OpenRouter API key in Settings to use AI. Your saved work is still available.',
   AUTH: 'OpenRouter could not authenticate this key. Check or replace it in Settings.',
   CREDITS: 'OpenRouter credits are insufficient. Your work is saved; check your account.',

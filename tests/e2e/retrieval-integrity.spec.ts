@@ -2,6 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { createEmptyCard } from "ts-fsrs";
 import { demoMaterials } from "../../src/content/materials";
 import { defaultSettings, type Chunk, type Modality, type ReviewCard, type StudyEvent, type StudySession, type DailyPlan } from "../../src/domain/types";
+import type { ReviewAttempt } from "../../src/sync/review";
 
 // Fresh browser contexts and a completely intercepted provider: no real keys or paid calls.
 async function open(page: Page, route: string) {
@@ -111,6 +112,16 @@ async function selectReview(page: Page, modality: Modality) {
 async function draft(page: Page, id: string) {
   return (await records<StudySession>(page, "sessions")).find(row => row.id === id);
 }
+async function reviewItem(page: Page, cardId: string): Promise<ReviewAttempt> {
+  const filter = await page.getByRole("combobox", { name: "Practice type" }).inputValue();
+  const read = async () => {
+    const block = (await records<StudySession>(page, "sessions"))
+      .find(row => row.id.startsWith("review-block:") && row.id.endsWith(":" + filter));
+    return (block?.draft.items as ReviewAttempt[] | undefined)?.find(item => item.cardId === cardId);
+  };
+  await expect.poll(read).toMatchObject({ cardId, draftId: expect.any(String), attemptId: expect.any(String), responseEventId: expect.any(String) });
+  return (await read())!;
+}
 const normalize = (value: string) => value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
 
 test("Learn delayed evaluation scores the submitted text, never a later edit", async ({ page }) => {
@@ -180,7 +191,8 @@ test("Learn delayed evaluation keeps the original material, session and task aft
 test("Transfer context excludes normalized sibling-card and event history and persists its selection", async ({ page }) => {
   const { chunk, cards } = await reviewFixture(page);
   await selectReview(page, "transfer");
-  const draftId = "review-draft:integrity-transfer:0";
+  const attempt = await reviewItem(page, "integrity-transfer");
+  const draftId = attempt.draftId;
   const first = (await page.locator(".context-prompt").innerText()).trim();
   await expect.poll(async () => (await draft(page, draftId))?.draft.context).toBe(first);
   const sibling = cards.find(card => card.modality === "speaking")!;
@@ -205,7 +217,7 @@ test("Transfer context excludes normalized sibling-card and event history and pe
   await page.locator("#review-answer").fill("Could you explain the next step so I can make a plan?");
   await page.getByRole("button", { name: "Check my answer" }).click();
   await page.getByRole("button", { name: "Good Independent", exact: true }).click();
-  await expect.poll(async () => (await records<StudyEvent>(page, "events")).find(e => e.id === "review:integrity-transfer:1")).toMatchObject({
+  await expect.poll(async () => (await records<StudyEvent>(page, "events")).find(e => e.id === attempt.attemptId)).toMatchObject({
     contextId: third, source: "self-report", data: { novelContext: true, audioObserved: false, transcriptVerified: false },
   });
 });
@@ -213,10 +225,11 @@ test("Transfer context excludes normalized sibling-card and event history and pe
 test("Transfer preserves a started response's prompt and labels a subsequently reused context", async ({ page }) => {
   const { cards } = await reviewFixture(page);
   await selectReview(page, "transfer");
+  const attempt = await reviewItem(page, "integrity-transfer");
   const context = (await page.locator(".context-prompt").innerText()).trim();
   const response = "Could you explain the next step so that I can make a clear plan?";
   await page.locator("#review-answer").fill(response);
-  await expect.poll(async () => (await draft(page, "review-draft:integrity-transfer:0"))?.draft.response).toBe(response);
+  await expect.poll(async () => (await draft(page, attempt.draftId))?.draft.response).toBe(response);
   const sibling = cards.find(card => card.modality === "speaking")!;
   sibling.contextIds = [context];
   await put(page, "cards", [sibling]);
@@ -227,7 +240,7 @@ test("Transfer preserves a started response's prompt and labels a subsequently r
   await expect(page.locator(".context-reuse-note")).toContainText("not new-context evidence");
   await page.getByRole("button", { name: "Check my answer" }).click();
   await page.getByRole("button", { name: "Good Independent", exact: true }).click();
-  await expect.poll(async () => (await records<StudyEvent>(page, "events")).find(e => e.id === "review-response:integrity-transfer:0")?.contextId).toBe(context);
+  await expect.poll(async () => (await records<StudyEvent>(page, "events")).find(e => e.id === attempt.responseEventId)?.contextId).toBe(context);
   await expect.poll(async () => (await records<ReviewCard>(page, "cards")).find(c => c.id === "integrity-transfer")?.card.reps).toBe(1);
   const evidence = (await records<StudyEvent>(page, "events")).filter(e => e.modality === "transfer" && e.type !== "REVIEW_RESPONSE");
   expect(evidence.length).toBeGreaterThan(0);
@@ -238,7 +251,12 @@ test("Transfer preserves a started response's prompt and labels a subsequently r
 test("Recall strips legacy hidden context from drafts, response events and scheduling", async ({ page }) => {
   const { chunk } = await reviewFixture(page);
   const id = "review-draft:integrity-recall:0";
-  await put(page, "sessions", [{ id, kind: "review", startedAt: Date.now(), stage: "answer",
+  // Exercise an actual pre-upgrade block plus its counter-shaped original draft.
+  // New blocks use durable IDs; existing legacy selections must still reopen.
+  const scope = await page.evaluate(() => new Date().toLocaleDateString("en-CA"));
+  await put(page, "sessions", [{ id: `review-block:${scope}:recall`, kind: "review", startedAt: Date.now(), stage: "review",
+    draft: { items: [{ cardId: "integrity-recall", reps: 0 }] },
+  } satisfies StudySession, { id, kind: "review", startedAt: Date.now(), stage: "answer",
     draft: { context: "An old prompt never displayed during recall", response: "" },
   } satisfies StudySession]);
   await selectReview(page, "recall");
@@ -328,7 +346,8 @@ test("Review waits for capture and STT, keeps Stop enabled and locks recording d
     const record = page.locator(".recorder .record-button");
     const filter = page.getByRole("combobox", { name: "Practice type" });
     const good = page.getByRole("button", { name: "Good Independent", exact: true });
-    const id = "review-draft:integrity-transfer:0";
+    const attempt = await reviewItem(page, "integrity-transfer");
+    const id = attempt.draftId;
     await page.locator("#review-answer").fill("My written response must wait for the original recording.");
     await record.click();
     await expect(record).toHaveText("Stop & save");
@@ -381,7 +400,7 @@ test("Review waits for capture and STT, keeps Stop enabled and locks recording d
     await expect.poll(async () => (await draft(page, id))?.draft.sttText).toBe("");
     expect((await draft(page, id))?.draft.recording).not.toBe(firstAudio);
     await good.click();
-    await expect.poll(async () => (await records<StudyEvent>(page, "events")).find(event => event.id === "review:integrity-transfer:1")).toMatchObject({
+    await expect.poll(async () => (await records<StudyEvent>(page, "events")).find(event => event.id === attempt.attemptId)).toMatchObject({
       source: "self-report", data: { audioObserved: false, transcriptVerified: false },
     });
   } finally { mock.releaseSTT(); mock.release(); }

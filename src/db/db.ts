@@ -4,9 +4,12 @@ import type { Assessment, AudioAsset, Chunk, Conversation, DailyPlan, ErrorPatte
 import { aggregateSkills } from '../domain/engine'
 import { eventSchema, modalities, reviewCardSchema } from './schema'
 import { projectChunks, projectErrors } from './projections'
+import type { StoredOperation, EntityType, RecordValue } from '../sync/protocol'
 
 export const DB_NAME = 'jove-english-os'
-export const DB_VERSION = 2
+export const DB_VERSION = 3
+// Sync journals are device/account state, not portable learning backup data.
+export const BACKUP_SCHEMA_VERSION = 2
 // V1 is deliberately retained as an executable migration baseline.
 export const version1Stores = {
   settings: 'id', secrets: 'id', profiles: 'id', skills: 'id', events: 'id,timestamp,skill,chunkId',
@@ -31,11 +34,14 @@ export class JoveDatabase extends Dexie {
   assessments!: Table<Assessment, string>
   audio!: Table<AudioAsset, string>
   usage!: Table<Usage, string>
+  syncOperations!: Table<StoredOperation, string>
+  syncMeta!: Table<{ id: string; value: unknown }, string>
+  syncSnapshots!: Table<{ id: string; entityType: EntityType; entityId: string; record: RecordValue }, string>
 
   constructor(name = DB_NAME) {
     super(name)
     this.version(1).stores(version1Stores)
-    this.version(DB_VERSION).stores({
+    this.version(2).stores({
       ...version1Stores,
       cards: 'id,chunkId,modality,&[chunkId+modality],card.due,errorId',
       events: 'id,timestamp,skill,chunkId,sessionId,type,[chunkId+modality]',
@@ -59,6 +65,10 @@ export class JoveDatabase extends Dexie {
       }
       if (chunks.length) await transaction.table('chunks').bulkPut(chunks)
       if (errors.length) await transaction.table('errors').bulkPut(errors)
+    })
+    this.version(DB_VERSION).stores({
+      syncOperations: 'id,cursor,[entityType+entityId]',
+      syncMeta: 'id', syncSnapshots: 'id,entityType,entityId',
     })
   }
 }

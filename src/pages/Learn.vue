@@ -7,6 +7,8 @@ import { db } from "../db/db";
 import AudioPlayer from "../components/AudioPlayer.vue";
 import { useRequest } from "../composables/useRequest";
 import Icon from "../components/Icon.vue";
+import ReadingPractice from "../components/ReadingPractice.vue";
+import { planLongitudinal } from "../domain/longitudinal";
 const app = useApp(),
   route = useRoute(),
   router = useRouter(),
@@ -21,11 +23,15 @@ const ai = useRequest();
 const writingSaving = ref(false), recallSaving = ref(false), completing = ref(false);
 const material = computed(
   () =>
-    app.materials.find((m) => m.id === route.query.material) ||
-    app.materials[0],
+    typeof route.query.material === 'string'
+      ? app.materials.find((m) => m.id === route.query.material && m.approved)
+      : app.materials.find(m => m.approved),
 );
 const draftId = computed(() => "learn-draft-" + material.value?.id);
 const taskId = computed(() => typeof route.query.task === "string" ? route.query.task : undefined);
+const readingPlan = computed(() => planLongitudinal({ profile: app.profile, skills: app.skills, events: app.events,
+  cards: app.cards, materials: app.materials, now: app.clock }));
+const readingMode = computed(() => route.query.mode === 'reading' || taskId.value?.endsWith(':reading'));
 const hasSavedResponse = computed(() => {
   const dayStart = new Date();
   dayStart.setHours(0, 0, 0, 0);
@@ -208,7 +214,13 @@ async function completeAndContinue() {
 }
 </script>
 <template>
-  <div class="page">
+  <div v-if="readingMode" class="page task-page">
+    <ReadingPractice
+      v-if="material?.approved" :key="`${taskId ?? 'free'}:${material.id}`" :material="material" :task-id="taskId"
+      :segment-words="Math.min(readingPlan.reading.segmentWords, readingPlan.adjustments.segmentSeconds * 2)" />
+    <div v-else class="empty-state"><h1>Reading is waiting for a suitable passage.</h1><p>Choose an approved reader from your library when one is available.</p><RouterLink to="/library">Open library</RouterLink></div>
+  </div>
+  <div v-else class="page">
     <div class="page-heading">
       <div>
         <p class="eyebrow">LESS MEMORIZING · MORE MEANING</p>

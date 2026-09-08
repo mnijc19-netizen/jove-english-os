@@ -8,3 +8,7 @@ playwright-report/
 !.env.example
 *.local
 *.log
+supabase/.temp/
+supabase/.branches/
+supabase/functions/_shared/jove-runtime.js
+*.tsbuildinfo

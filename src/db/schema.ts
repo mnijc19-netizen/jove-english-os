@@ -15,6 +15,7 @@ const ids = z.array(id).max(100_000).refine(a => new Set(a).size === a.length, '
 export const modalities = ['recognition', 'listening', 'recall', 'cloze', 'speaking', 'transfer'] as const
 export const sourceSchema = z.enum(['objective', 'self-report', 'ai', 'text', 'acoustic'])
 export const reviewOptionsSchema = z.strictObject({
+  responseEventId: id.optional(), sessionId: id.optional(),
   eventId: id.optional(), expectedReps: count.optional(), prompted: z.boolean().optional(), contextId: id.refine(value => value.trim().length > 0, 'Empty context').optional(),
   source: sourceSchema.optional(), score: score.optional(), audioObserved: z.boolean().optional(), transcriptVerified: z.boolean().optional(), audioId: id.optional(),
 })
@@ -43,6 +44,7 @@ export const settingsSchema = z.strictObject({
   correctionIntensity: z.number().int().min(0).max(5), fastModel: short, strongModel: short,
   sttModel: short, ttsModel: short, voice: short, dailyBudget: z.number().min(0).max(1_000_000),
   audioLimitMB: z.number().min(1).max(100_000),
+  recordingRetention: z.enum(['minimal', 'assessment-only', 'more-history']).optional(),
 })
 export const profileSchema = z.strictObject({
   id, name: short, goal: short, interests: strings, dailyMinutes: z.number().int().min(1).max(1440),
@@ -74,7 +76,28 @@ export const errorSchema = z.strictObject({
   attempts: count, failures: count, spontaneousSuccesses: count, nextReview: timestampSchema, chunkId: id.optional(),
 }).refine(e => e.failures + e.spontaneousSuccesses <= e.attempts, 'Inconsistent error counts')
 export const materialChunkSchema = z.strictObject({ text: z.string().trim().min(1).max(10_000), meaningEn: text, meaningZh: text, example: text })
+export const authenticPlaybackSchema = z.strictObject({
+  segmentId: z.string().regex(/^authentic-[a-f0-9]{64}$/), audioSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  startSeconds: z.number().finite().min(0), endSeconds: z.number().finite().positive(),
+  sourceAudioSha256: z.string().regex(/^[a-f0-9]{64}$/), sourceStartSeconds: z.number().finite().min(0), sourceEndSeconds: z.number().finite().positive(),
+  clipOriginSeconds: z.number().finite().min(0), timingBasis: z.enum(['complete-container', 'mpeg-frame-count-with-preroll', 'pcm-sample-count']),
+  mimeType: z.enum(['audio/mpeg', 'audio/wav', 'audio/ogg']), byteLength: z.number().int().min(1).max(10 * 1024 * 1024),
+  durationSeconds: z.number().finite().positive().max(86400),
+  sentenceRanges: z.array(z.strictObject({ startSeconds: z.number().finite().min(0), endSeconds: z.number().finite().positive() })).min(1).max(100),
+}).superRefine((p, ctx) => {
+  const duration = p.endSeconds - p.startSeconds
+  if (duration < 30 || duration > 120.01 || p.endSeconds > p.durationSeconds + 0.05
+    || Math.abs(p.sourceStartSeconds - p.clipOriginSeconds - p.startSeconds) > 0.05
+    || Math.abs(p.sourceEndSeconds - p.clipOriginSeconds - p.endSeconds) > 0.05)
+    ctx.addIssue({ code: 'custom', message: 'Inconsistent reviewed audio range' })
+  p.sentenceRanges.forEach((range, index) => {
+    if (range.endSeconds <= range.startSeconds || range.endSeconds > duration + 0.05
+      || (index > 0 && range.startSeconds < p.sentenceRanges[index - 1]!.endSeconds - 0.001))
+      ctx.addIssue({ code: 'custom', message: 'Inconsistent sentence timing', path: ['sentenceRanges', index] })
+  })
+})
 export const materialSchema = z.strictObject({
+  authenticPlayback: authenticPlaybackSchema.optional(),
   id, title: short, topic: short, difficulty: proportion, duration: z.number().min(0).max(1_000_000),
   transcript: text, translation: text.optional(), sentences: strings, audioPath: audioPath.optional(), audioId: id.optional(),
   sourceKind: z.enum(['curated', 'text', 'url', 'audio', 'discovery', 'generated']), sourceUrl: httpUrl.optional(),
@@ -93,6 +116,7 @@ export const planSchema = z.strictObject({
   tasks: z.array(taskSchema).min(1).max(100), evidenceFingerprint: short, createdAt: timestampSchema,
 }).refine(p => new Set(p.tasks.map(t => t.id)).size === p.tasks.length && p.tasks.reduce((n, t) => n + t.minutes, 0) === p.minutes, 'Inconsistent plan tasks')
 const evaluationSchema = z.strictObject({
+  provenance: z.strictObject({ provider: z.string().min(1).max(100), model: z.string().min(1).max(200) }).optional(),
   summary: text, strengths: strings, errors: z.array(evaluationErrorSchema).max(100),
   comprehension: score.nullable(), accuracy: score.nullable(), fluency: score.nullable(), successfulChunks: strings, nextPrompt: text,
   rubricScores: z.strictObject({ vocabulary: score.nullable(), interaction: score.nullable(), taskCompletion: score.nullable() }).optional(),
@@ -108,7 +132,7 @@ export const assessmentSchema = z.strictObject({
 }).refine(a => a.completedAt === undefined || a.completedAt >= a.timestamp, 'Assessment ends before it starts')
 export const audioMetadataSchema = z.strictObject({
   id, mimeType: short, createdAt: timestampSchema, duration: z.number().min(0).max(1_000_000),
-  kind: z.enum(['recording', 'generated', 'import']), processed: z.boolean(), label: short,
+  kind: z.enum(['recording', 'generated', 'import', 'content-cache']), processed: z.boolean(), label: short,
 })
 export const usageSchema = z.strictObject({ id, timestamp: timestampSchema, model: short, purpose: short, tokens: count.nullable(), cost: z.number().min(0).max(1_000_000).nullable() })
 

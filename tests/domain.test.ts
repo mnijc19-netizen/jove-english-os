@@ -103,15 +103,18 @@ describe('adaptive daily plan', () => {
     expect(next.tasks.filter(t => t.done)).toHaveLength(1)
     expect(new Set(next.tasks.map(t => t.id)).size).toBe(next.tasks.length)
   })
-  it('new due cards do not inherit a completed review task and a new day clears done state', () => {
+  it('new due cards do not grow a completed day, remain due, and are assigned on the next day', () => {
     const original = makePlan(profile, [], [card('a')], [], [], undefined, now)
     original.tasks.forEach(t => { t.done = true })
     const unchanged = makePlan(profile, [], [card('a')], [], [], original, now + 1000)
     expect(unchanged.tasks.every(t => t.done)).toBe(true)
-    const more = makePlan(profile, [], [card('b')], [], [], original, now + 1000)
-    expect(more.tasks.some(t => t.kind === 'review' && !t.done)).toBe(true)
-    const tomorrow = makePlan(profile, [], [], [], [], original, now + 86_400_000)
+    const dueCard = card('b'), before = structuredClone(dueCard)
+    const more = makePlan(profile, [], [dueCard], [], [], original, now + 1000)
+    expect(more.tasks).toEqual(original.tasks)
+    expect(dueCard).toEqual(before)
+    const tomorrow = makePlan(profile, [], [dueCard], [], [], original, now + 86_400_000)
     expect(tomorrow.tasks.every(t => !t.done)).toBe(true)
+    expect(tomorrow.tasks.some(t => t.kind === 'review')).toBe(true)
   })
   it('uses completed assessment evidence to schedule a comparable two-week followup', () => {
     const older = { ...profile, onboarded: true, createdAt: now - 15 * 86_400_000 }

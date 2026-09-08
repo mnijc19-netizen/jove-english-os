@@ -2,6 +2,8 @@
 
 Completion is unproven until every gate below has current evidence. Record evidence and residual limits in STATUS.md; demo/mocked adapters cannot prove paid provider integration.
 
+The final-upgrade gates in `FINAL_UPGRADE.md` are additive and mandatory. Older V1 acceptance is historical, not final completion. In particular, actual cloud sync/RLS/migration, autonomous authentic content delivery, real acoustic assessment, long-term recovery/plateau/reading, server secrets/budget/retention and desktop/mobile WebKit must be proven; provider stubs and Pixel emulation alone are insufficient.
+
 1. CONFIG: inspect global/project/ancestor instructions, config/requirements/defaults/old role routing; preserve global settings and verify project Astra Ultra and actual active session metadata.
 2. SPEC: durable product, architecture, learning science, decisions, acceptance and operating docs; full approved scope retained.
 3. DOMAIN: tests prove deterministic plan changes with evidence, fatigue/interests/reviews/balance/completion; speaking always retained; separate modality FSRS cards; events rebuild skills; hints/self-report/text never impersonate independent spoken success.
