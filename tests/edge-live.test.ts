@@ -38,6 +38,8 @@ describe.skipIf(process.env.JOVE_LOCAL_EDGE_TEST !== '1')('actual local Edge and
     const options = { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: localFetch } }
     admin = createClient(api, config.SERVICE_ROLE_KEY, options)
     member = createClient(api, key, options); stranger = createClient(api, key, options)
+    const occupied = await admin.from('app_members').select('user_id', { count: 'exact', head: true })
+    if (occupied.error || occupied.count !== 0) throw new Error('Dedicated local fixture lease unavailable; existing members are preserved')
     for (const [index, client] of [member, stranger].entries()) {
       const email = `jove-edge-${crypto.randomUUID()}@example.invalid`, password = crypto.randomUUID() + crypto.randomUUID()
       const user = await admin.auth.admin.createUser({ email, password, email_confirm: true })
@@ -80,6 +82,61 @@ describe.skipIf(process.env.JOVE_LOCAL_EDGE_TEST !== '1')('actual local Edge and
     expect((await stranger.storage.from('jove-content-audio').download(objectPath)).data).toBeNull()
     expect((await post('speech-assess', { action: 'reference-audio', referenceId }, strangerToken)).status).toBe(403)
   }, 45000)
+  it('keeps lesson and saved references reachable beyond the real database cap without bypassing ownership or revocation', async () => {
+    const materialId = `catalog-${referenceId}`, lateId = `z-late-${referenceId}`, humanId = `z-human-${referenceId}`
+    const foreignId = `z-foreign-${referenceId}`
+    const ordinaryIds = Array.from({ length: 101 }, (_, index) => `a-${referenceId}-${String(index).padStart(3, '0')}`)
+    const ids = [...ordinaryIds, lateId, humanId]
+    // Deliberately synthetic metadata fixtures, including the human sort label.
+    // No audio is fetched/approved and no Speech assessment action is dispatched.
+    const row = (id: string, userId: string, kind: 'human' | 'synthetic', material: string) => ({
+      user_id: userId, id, material_id: material, reference_text: 'Catalog transport fixture, not a real voice.',
+      audio_url: 'https://fixture.invalid/not-a-fetch-target', audio_sha256: sha,
+      source_url: 'https://fixture.invalid/catalog-only', rights_evidence: 'Disposable synthetic metadata fixture only.',
+      voice_review: { kind, locale: 'en-US', rightsApproved: true, transcriptChecked: true, clearSingleSpeaker: true,
+        naturalStressAndRhythm: true, generalAmericanReviewed: true, clippingOrIntrusiveNoise: false, reviewId: id },
+      reviewed_by: userId, reviewed_at: new Date().toISOString(),
+    })
+    async function references(extra: Record<string, string> = {}) {
+      const response = await post('speech-assess', { action: 'references', ...extra }, memberToken)
+      expect(response.status).toBe(200)
+      return (await response.json() as { references: { id: string }[] }).references.map(reference => reference.id)
+    }
+    async function cleanupCatalog() {
+      const results = await Promise.all([
+        admin.from('pronunciation_references').delete().eq('user_id', owner).in('id', ids),
+        admin.from('pronunciation_references').delete().eq('user_id', other).eq('id', foreignId),
+      ])
+      if (results.some(result => result.error)) throw new Error('Local catalog fixture cleanup failed')
+    }
+    try {
+      const records = [...ordinaryIds.map(id => row(id, owner, 'synthetic', materialId)),
+        row(lateId, owner, 'synthetic', materialId), row(humanId, owner, 'human', `other-${materialId}`),
+        row(foreignId, other, 'human', materialId)]
+      if ((await admin.from('pronunciation_references').insert(records)).error) throw new Error('Local catalog fixture setup failed')
+      const global = await references()
+      expect(global).toHaveLength(100); expect(global[0]).toBe(humanId)
+      expect(global).not.toContain(lateId); expect(global).not.toContain(foreignId)
+      const scoped = await references({ materialId })
+      expect(scoped).toEqual(ordinaryIds.slice(0, 100))
+      const preferred = await references({ materialId, preferredReferenceId: lateId })
+      expect(preferred).toEqual([lateId, ...ordinaryIds.slice(0, 99)])
+      expect(new Set(preferred).size).toBe(100)
+      const globalPreferred = await references({ preferredReferenceId: lateId })
+      expect(globalPreferred).toHaveLength(100); expect(globalPreferred.slice(0, 2)).toEqual([lateId, humanId])
+      expect(await references({ materialId, preferredReferenceId: humanId })).toEqual(scoped)
+      expect(await references({ materialId, preferredReferenceId: foreignId })).toEqual(scoped)
+      expect(await references({ materialId: `missing-${materialId}`, preferredReferenceId: lateId })).toEqual([])
+      if ((await admin.from('pronunciation_references').update({ revoked_at: new Date().toISOString() }).eq('user_id', owner).eq('id', lateId)).error) throw new Error('Local catalog revocation failed')
+      expect(await references({ materialId, preferredReferenceId: lateId })).toEqual(scoped)
+      expect((await post('speech-assess', { action: 'references', materialId }, strangerToken)).status).toBe(403)
+      const usage = await admin.from('service_usage').select('id', { count: 'exact', head: true }).eq('user_id', owner)
+      if (usage.error) throw new Error('Local catalog usage readback failed')
+      expect(usage.count).toBe(0)
+    } finally {
+      await cleanupCatalog()
+    }
+  }, 90000)
   it('reads an empty reviewed course list honestly and refuses reference audio after revocation without a paid call', async () => {
     const lessons = await post('content', { action: 'lessons', profile: { targetDifficulty: 0.3, fatigue: 0, interests: ['Daily life'] }, limit: 2, requestId: referenceId }, memberToken)
     expect(lessons.status).toBe(200)
