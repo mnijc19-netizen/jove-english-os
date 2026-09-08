@@ -378,6 +378,17 @@ test("offline browser state saves an editable draft and reconnects without losin
 
 test("all nine routes render in light and dark with no horizontal overflow", async ({ page, isMobile }, testInfo) => {
   test.setTimeout(90000);
+  const headings: Record<string, RegExp> = {
+    today: /A little more natural,\s*every day\./,
+    listen: /Listen for meaning\./,
+    learn: /Make the expression yours\./,
+    speak: /Say what you mean\./,
+    review: /Bring it back\./,
+    library: /Your little library\./,
+    progress: /Progress with evidence\./,
+    settings: /A few thoughtful settings\./,
+    onboarding: /Let’s start with you\./,
+  };
   for (const theme of ["light", "dark"]) {
     await openPractice(page, "settings");
     await page.getByRole("combobox", { name: "Appearance", exact: true }).selectOption(theme);
@@ -386,8 +397,14 @@ test("all nine routes render in light and dark with no horizontal overflow", asy
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     for (const route of ["today", "listen", "learn", "speak", "review", "library", "progress", "settings", "onboarding"]) {
       await openPractice(page, route);
+      // A same-document hash change can return while the previous page's h1
+      // remains visible. Capture only the intended route, including its fonts.
+      await expect(page.locator("main h1")).toHaveText(headings[route]!);
+      await page.evaluate(() => document.fonts.ready);
+      await page.evaluate(() => scrollTo(0, 0));
       expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth), `${theme} ${route} overflow`).toBeLessThanOrEqual(1);
       if (isMobile && route === "speak") await assertSpeakingModeLabels(page);
+      await page.screenshot({ path: testInfo.outputPath(`${theme}-${route}-viewport.png`) });
       await page.screenshot({ path: testInfo.outputPath(`${theme}-${route}.png`), fullPage: true });
     }
   }
