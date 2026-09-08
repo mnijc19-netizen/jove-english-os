@@ -85,7 +85,7 @@ export function usePronunciationSession(scope: Ref<string>, materialId?: Ref<str
       pendingAttempt.value = row.draft.pendingAttempt as PronunciationAttempt | undefined
       outbox.splice(0, outbox.length, ...(Array.isArray(row.draft.outbox) ? row.draft.outbox as StudyEvent[] : []))
       await flush()
-      const references = await speechBrowserClient.references(controller.signal)
+      const references = await speechBrowserClient.references(controller.signal, materialId?.value, savedReferenceId.value || undefined)
       if (token !== version || stopped) return
       const eligible = materialId ? references.filter(ref => ref.materialId === materialId.value) : references
       reference.value = eligible.find(ref => ref.id === savedReferenceId.value) ?? eligible[0] ?? null

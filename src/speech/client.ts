@@ -31,7 +31,7 @@ export type BrowserAssessmentResult = { ok: true; assessmentId: string; assessed
 export type EvaluatedPronunciation = Extract<BrowserAssessmentResult, { ok: true }>
 export interface SpeechCloudConnection {
   auth: SpeechAuth
-  functions: { invoke: (name: string, options: { method: 'POST'; body: FormData | { action: 'references' } | { action: 'reference-audio'; referenceId: string } | ({ action: 'recover' } & PronunciationAttempt); headers: Record<string, string>; signal: AbortSignal }) => Promise<{ data: unknown; error: unknown; response?: Response }> }
+  functions: { invoke: (name: string, options: { method: 'POST'; body: FormData | { action: 'references'; materialId?: string; preferredReferenceId?: string } | { action: 'reference-audio'; referenceId: string } | ({ action: 'recover' } & PronunciationAttempt); headers: Record<string, string>; signal: AbortSignal }) => Promise<{ data: unknown; error: unknown; response?: Response }> }
 }
 export const SPEECH_CLIENT_TIMEOUT_MS = 75000
 const safeId = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(value)
@@ -115,10 +115,12 @@ export function createSpeechBrowserClient(connection: SpeechCloudConnection | nu
         return result
       })
     },
-    async references(external?: AbortSignal): Promise<ReviewedReference[]> {
+    async references(external?: AbortSignal, materialId?: string, preferredReferenceId?: string): Promise<ReviewedReference[]> {
+      if ((materialId !== undefined && !safeId(materialId)) || (preferredReferenceId !== undefined && !safeId(preferredReferenceId))) throw new SpeechError('INVALID_REQUEST')
       if (!connection) return []
       return withSpeechSession(connection.auth, external, 15000, async (signal, session) => {
-        const response = await connection.functions.invoke('speech-assess', { method: 'POST', body: { action: 'references' },
+        const response = await connection.functions.invoke('speech-assess', { method: 'POST', body: { action: 'references',
+          ...(materialId !== undefined ? { materialId } : {}), ...(preferredReferenceId !== undefined ? { preferredReferenceId } : {}) },
           headers: { Authorization: 'Bearer ' + session.access_token }, signal })
         if (response.error) throw new SpeechError('UNAVAILABLE')
         assertSafeSpeechObject(response.data)
@@ -129,7 +131,7 @@ export function createSpeechBrowserClient(connection: SpeechCloudConnection | nu
           const ref = parseReviewedReference({ id: row.id, material_id: row.materialId, reference_text: row.text, audio_url: row.audioUrl,
             audio_sha256: row.audioSha256, source_url: row.sourceUrl, rights_evidence: row.rightsEvidence, reviewed_at: row.reviewedAt,
             voice_review: row.voiceReview, revoked_at: row.revokedAt })
-          if (ref.revokedAt) throw new SpeechError('MALFORMED_RESPONSE')
+          if (ref.revokedAt || (materialId !== undefined && ref.materialId !== materialId)) throw new SpeechError('MALFORMED_RESPONSE')
           return ref
         })
       })

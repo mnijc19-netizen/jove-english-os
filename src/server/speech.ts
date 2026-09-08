@@ -108,12 +108,29 @@ export function createSpeechHandler(options: SpeechHandlerOptions): (request: Re
           // read an Azure credential or acquire another budget reservation.
           return jsonResponse(saved.data.result, headers)
         }
-        if (Object.keys(input).length !== 1 || input.action !== 'references') throw fail(400, 'INVALID_REQUEST', '')
-        const { data, error } = await context.admin.from('pronunciation_references').select(referenceColumns)
-          .eq('user_id', context.ownerId).is('revoked_at', null).order('id').limit(100)
+        const materialId = input.materialId, preferredReferenceId = input.preferredReferenceId
+        if (Object.keys(input).some(key => !['action', 'materialId', 'preferredReferenceId'].includes(key)) || input.action !== 'references' ||
+          (materialId !== undefined && !speechId(materialId)) || (preferredReferenceId !== undefined && !speechId(preferredReferenceId))) throw fail(400, 'INVALID_REQUEST', '')
+        const query = () => {
+          let scoped = context.admin.from('pronunciation_references').select(referenceColumns)
+            .eq('user_id', context.ownerId).is('revoked_at', null)
+          if (materialId !== undefined) scoped = scoped.eq('material_id', materialId)
+          return scoped
+        }
+        // Resume the saved original even when its still-approved reference has
+        // fallen outside the browse cap. This never relaxes the reference gate.
+        let preferred: ReturnType<typeof parseReviewedReference> | undefined
+        if (preferredReferenceId !== undefined) {
+          const selected = await query().eq('id', preferredReferenceId).limit(1).maybeSingle()
+          if (selected.error) throw fail(503, 'REFERENCE', '')
+          if (selected.data) preferred = parseReviewedReference(selected.data)
+        }
+        // Apply material scope and human-before-synthetic ordering before the cap.
+        // Every returned row must still pass the complete review validation below.
+        const { data, error } = await query().order('voice_review->>kind', { nullsFirst: false }).order('id').limit(100)
         if (error) throw fail(503, 'REFERENCE', '')
-        const references = (data ?? []).map(parseReviewedReference).sort((a, b) => Number(a.voiceReview?.kind !== 'human') - Number(b.voiceReview?.kind !== 'human'))
-        return jsonResponse({ references }, headers)
+        const references = (data ?? []).map(parseReviewedReference)
+        return jsonResponse({ references: preferred ? [preferred, ...references.filter(ref => ref.id !== preferred.id)].slice(0, 100) : references }, headers)
       }
       if (!/^multipart\/form-data;\s*boundary=/i.test(contentType)) throw fail(415, 'TYPE', '')
       const bytes = await boundedBody(request, SPEECH_LIMITS.maxWavBytes + 16384)

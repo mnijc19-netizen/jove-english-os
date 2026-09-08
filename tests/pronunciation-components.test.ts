@@ -107,7 +107,7 @@ function mountPage(name: 'Listen' | 'Speak', evaluate: Record<string, unknown> =
     provider: { evaluate: vi.fn(async () => result), chat: vi.fn(async () => 'What happened next?') },
     evidence: vi.fn(async (event: StudyEvent) => { appState.events.push(clone(event)) }), beginTask: vi.fn(), completeTask: vi.fn(), refresh: vi.fn(),
   }
-  const refs = { configured: true, session: vi.fn(sessionFixture), references: vi.fn(async () => []), assess: vi.fn(),
+  const refs = { configured: true, session: vi.fn(sessionFixture), references: vi.fn<ReturnType<typeof createSpeechBrowserClient>['references']>(async () => []), assess: vi.fn(),
     recover: vi.fn<(input: { attemptId: string; referenceText: string }, signal?: AbortSignal) => Promise<Extract<BrowserAssessmentResult, { ok: true }> | null>>(async () => null) }
   const practice = compileInMemory(readFileSync(fileURLToPath(new URL('../src/speech/practice.ts', import.meta.url)), 'utf8'), {
     vue: Vue, '../db/db': { db: storage }, '../stores/app': { useApp: () => appState }, './client': { speechBrowserClient: refs }, './events': { acousticEvents }, './types': { SpeechError },
@@ -368,6 +368,85 @@ describe('compiled Listen/Speak page contracts and actual pronunciation persiste
     expect(view.sessions.get(view.state.sid)?.draft.outbox).toEqual([])
     vi.restoreAllMocks()
   })
+  it('requests current-material references before truncation and keeps missing material separate from global fallback', async () => {
+    const view = mountPage('Listen'); await flush()
+    const reviewed = { ...reference(), materialId: view.state.materialId, sourceUrl: 'https://example.invalid/source', rightsEvidence: 'INERT TEST ONLY', reviewedAt: '2026-09-08T00:00:00Z', revokedAt: null }
+    const late = { ...reviewed, id: 'z-late-reference' }
+    const all = [...Array.from({ length: 100 }, (_, index) => ({ ...reviewed, id: `a-${index}`, materialId: 'other-material' })), late]
+    view.refs.references.mockImplementation(async (_signal, materialId) => (materialId === undefined ? all : all.filter(ref => ref.materialId === materialId)).slice(0, 100))
+    await view.state.pronunciation.retry(); await flush()
+    expect(view.state.pronunciationReference).toEqual(late)
+    expect(view.refs.references).toHaveBeenLastCalledWith(expect.any(AbortSignal), view.state.materialId, undefined)
+    const original = new Blob(['retained original'])
+    view.audios.set('recording-1', { id: 'recording-1', kind: 'recording', blob: original, duration: 3 })
+    await view.state.pronunciation.recorded({ audioId: 'recording-1', duration: 3, referenceId: late.id })
+    const pendingAttempt = { attemptId: 'pending-attempt', recordingId: 'recording-1', referenceId: late.id }
+    await view.state.pronunciation.persistAttempt(pendingAttempt)
+    all.pop()
+    await view.state.pronunciation.retry(); await flush()
+    expect(view.state.pronunciationReference).toBeNull()
+    expect(view.state.pronunciation.problem.value).toBe('')
+    view.refs.references.mockClear().mockRejectedValueOnce(new SpeechError('UNAVAILABLE'))
+    await view.state.pronunciation.retry(); await flush()
+    expect(view.state.pronunciationReference).toBeNull()
+    expect(view.state.pronunciation.problem.value).toContain('Could not restore')
+    expect(view.refs.references).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal), view.state.materialId, late.id)
+    expect(view.sessions.get(`speech-${view.state.sid}`)?.draft).toMatchObject({ audioId: 'recording-1', referenceId: late.id, pendingAttempt, pendingReferenceText: late.text })
+    expect(view.refs.recover).toHaveBeenLastCalledWith({ ...pendingAttempt, referenceText: late.text }, expect.any(AbortSignal))
+    expect(view.audios.get('recording-1')?.blob).toBe(original)
+    expect(view.refs.assess).not.toHaveBeenCalled()
+    await view.state.pronunciation.retry(); await flush()
+    expect(view.state.pronunciation.problem.value).toBe('')
+    const global = mountPage('Speak'); await flush()
+    global.refs.references.mockResolvedValue([reviewed])
+    await global.state.pronunciation.retry(); await flush()
+    expect(global.state.pronunciationReference).toEqual(reviewed)
+    expect(global.refs.references).toHaveBeenLastCalledWith(expect.any(AbortSignal), undefined, undefined)
+  })
+  it.each(['Listen', 'Speak'] as const)('restores %s pending original against its approved reference after it moves beyond the catalog cap', async name => {
+    const view = mountPage(name); await flush()
+    const saved = { ...reference(), id: 'z-saved-reference', materialId: name === 'Listen' ? view.state.materialId : null,
+      voiceReview: { ...reference().voiceReview!, kind: 'synthetic' as const }, sourceUrl: 'https://example.invalid/source',
+      rightsEvidence: 'INERT TEST ONLY', reviewedAt: '2026-09-08T00:00:00Z', revokedAt: null as string | null }
+    const catalog = [saved]
+    view.refs.references.mockImplementation(async (_signal, materialId, preferredReferenceId) => {
+      const eligible = catalog.filter(ref => !ref.revokedAt && (materialId === undefined || ref.materialId === materialId))
+      const preferred = eligible.find(ref => ref.id === preferredReferenceId)
+      return (preferred ? [preferred, ...eligible.filter(ref => ref.id !== preferred.id)] : eligible).slice(0, 100)
+    })
+    await view.state.pronunciation.retry(); await flush()
+    const original = new Blob(['original before catalog growth'])
+    view.audios.set('recording-1', { id: 'recording-1', kind: 'recording', blob: original, duration: 3 })
+    await view.state.pronunciation.recorded({ audioId: 'recording-1', duration: 3, referenceId: saved.id })
+    const pendingAttempt = { attemptId: 'attempt-before-growth', recordingId: 'recording-1', referenceId: saved.id }
+    await view.state.pronunciation.persistAttempt(pendingAttempt)
+    catalog.unshift(...Array.from({ length: 100 }, (_, index) => ({ ...saved, id: `a-${index}` })))
+    await view.state.pronunciation.retry(); await flush()
+    const draft = [...view.sessions.values()].find(row => row.kind === 'pronunciation')!.draft
+    const restored = mount({ reference: view.state.pronunciationReference, savedAudioId: draft.audioId, savedReferenceId: draft.referenceId,
+      pendingAttempt: draft.pendingAttempt, persistAttempt: view.state.pronunciation.persistAttempt })
+    await flush()
+    expect(draft).toMatchObject({ audioId: 'recording-1', referenceId: saved.id, pendingAttempt })
+    expect(view.audios.get('recording-1')?.blob).toBe(original)
+    expect(browser.assess).not.toHaveBeenCalled(); expect(view.refs.assess).not.toHaveBeenCalled()
+    expect(button(restored.root, 'Analyze recording').props.disabled).toBe(false)
+    expect(view.state.pronunciationReference).toEqual(saved)
+    expect(view.refs.recover).toHaveBeenLastCalledWith({ ...pendingAttempt, referenceText: saved.text }, expect.any(AbortSignal))
+    db.audio.get.mockResolvedValue({ id: 'recording-1', kind: 'recording', blob: original })
+    await click(button(restored.root, 'Analyze recording')); await flush()
+    expect(browser.assess).toHaveBeenCalledOnce()
+    expect(browser.assess.mock.calls[0][0]).toMatchObject(pendingAttempt)
+    expect(converter).toHaveBeenCalledWith(original, expect.any(AbortSignal))
+    restored.unmount(); browser.assess.mockClear()
+    saved.revokedAt = '2026-09-08T01:00:00Z'
+    await view.state.pronunciation.retry(); await flush()
+    const revoked = mount({ reference: view.state.pronunciationReference, savedAudioId: draft.audioId, savedReferenceId: saved.id, pendingAttempt })
+    await flush()
+    expect(view.state.pronunciationReference?.id).not.toBe(saved.id)
+    expect(button(revoked.root, 'Analyze recording').props.disabled).toBe(true)
+    expect(find(revoked.root, node => node.props['data-recording'] === 'recording-1')).toBeDefined()
+    expect(browser.assess).not.toHaveBeenCalled()
+  })
   it('logs pronunciation original duration before any assessment and recovers a lost result after voice revocation', async () => {
     const view = mountPage('Speak'); await flush()
     view.state.pronunciationReference = reference()
@@ -432,6 +511,38 @@ describe('authenticated pronunciation client', () => {
     await expect(createSpeechBrowserClient(cloud).references()).rejects.toBeInstanceOf(SpeechError)
     const controller = new AbortController(); controller.abort()
     await expect(createSpeechBrowserClient(cloud).references(controller.signal)).rejects.toMatchObject({ code: 'CANCELLED' })
+  })
+  it('sends the bounded material filter and rejects mismatched response material', async () => {
+    const cloud = connection(), reviewed = { ...reference(), materialId: 'current-material', sourceUrl: 'https://example.invalid/source', rightsEvidence: 'INERT TEST ONLY', reviewedAt: '2026-09-08T00:00:00Z', revokedAt: null }
+    cloud.functions.invoke.mockResolvedValue({ data: { references: [reviewed] }, error: null })
+    const client = createSpeechBrowserClient(cloud)
+    expect(await client.references(undefined, 'current-material')).toEqual([reviewed])
+    expect(cloud.functions.invoke.mock.calls[0][1].body).toEqual({ action: 'references', materialId: 'current-material' })
+    expect(await client.references(undefined, 'current-material', reviewed.id)).toEqual([reviewed])
+    expect(cloud.functions.invoke.mock.calls[1][1].body).toEqual({ action: 'references', materialId: 'current-material', preferredReferenceId: reviewed.id })
+    await expect(client.references(undefined, 'different-material')).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+    cloud.functions.invoke.mockResolvedValue({ data: { references: Array(101).fill(reviewed) }, error: null })
+    await expect(client.references(undefined, 'current-material')).rejects.toMatchObject({ code: 'MALFORMED_RESPONSE' })
+    const controller = new AbortController(); controller.abort(); cloud.functions.invoke.mockClear()
+    await expect(client.references(controller.signal, 'current-material')).rejects.toMatchObject({ code: 'CANCELLED' })
+    expect(cloud.functions.invoke).not.toHaveBeenCalled()
+  })
+  it.each([null, '', ' ', '../invalid', 'a'.repeat(101), [], {}, 42])('rejects invalid material filter before client dispatch %j', async materialId => {
+    const cloud = connection(); cloud.functions.invoke.mockResolvedValue({ data: { references: [] }, error: null })
+    await expect(createSpeechBrowserClient(cloud).references(undefined, materialId as string)).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(cloud.functions.invoke).not.toHaveBeenCalled()
+  })
+  it('propagates scoped API failure without treating it as empty matches or falling back globally', async () => {
+    const cloud = connection()
+    cloud.functions.invoke.mockResolvedValue({ data: null, error: new Error('inert upstream failure'), response: new Response(null, { status: 503 }) })
+    await expect(createSpeechBrowserClient(cloud).references(undefined, 'current-material')).rejects.toMatchObject({ code: 'UNAVAILABLE' })
+    expect(cloud.functions.invoke).toHaveBeenCalledOnce()
+    expect(cloud.functions.invoke.mock.calls[0][1].body).toEqual({ action: 'references', materialId: 'current-material' })
+  })
+  it.each([null, '', '../invalid', 'a'.repeat(101), [], {}, 42])('rejects invalid preferred reference before client dispatch %j', async preferredReferenceId => {
+    const cloud = connection(); cloud.functions.invoke.mockResolvedValue({ data: { references: [] }, error: null })
+    await expect(createSpeechBrowserClient(cloud).references(undefined, 'current-material', preferredReferenceId as string)).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(cloud.functions.invoke).not.toHaveBeenCalled()
   })
   it('preserves safe explicit new-service consent flags but never arbitrary messages', async () => {
     const cloud = connection()

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createClient } from '@supabase/supabase-js'
 import { createSpeechHandler } from '../src/server/speech'
 import { createAzureSpeechAdapter } from '../src/speech/azure.server'
 import { GatewayError, type OwnerContext } from '../src/server/gateway'
@@ -25,17 +26,37 @@ function setup() {
   const tables: Record<string, Row[]> = { pronunciation_references: [reference()], service_preferences: [{ user_id: owner, prosody_enabled: true }], service_usage: [], service_results: [], acoustic_assessments: [] }
   const failures = new Set<string>(), calls: string[] = []
   const from = vi.fn((table: string) => {
-    const filters: [string, unknown][] = []; let update: Row | undefined
+    const filters: [string, unknown][] = [], ordering: [string, boolean, boolean][] = []
+    let update: Row | undefined, maximum: number | undefined
+    const field = (row: Row, key: string) => key.split('->>').reduce<unknown>((value, part) => (value as Row)?.[part], row)
     const result = () => {
       calls.push(table)
       if (failures.has(table)) return { data: null, error: { message: 'PRIVATE DATABASE DETAIL' } }
       const rows = tables[table].filter(row => filters.every(([key, value]) => row[key] === value))
       if (update) rows.forEach(row => Object.assign(row, update))
-      return { data: rows, error: null }
+      rows.sort((a, b) => {
+        for (const [key, ascending, nullsFirst] of ordering) {
+          const left = field(a, key), right = field(b, key)
+          if (left == null || right == null) {
+            const compared = Number(left != null) - Number(right != null)
+            if (compared) return nullsFirst ? compared : -compared
+            continue
+          }
+          const compared = String(left).localeCompare(String(right))
+          if (compared) return ascending ? compared : -compared
+        }
+        return 0
+      })
+      return { data: rows.slice(0, maximum), error: null }
     }
     const chain = {
       select: () => chain, eq: (key: string, value: unknown) => { filters.push([key, value]); return chain },
-      is: (key: string, value: unknown) => { filters.push([key, value]); return chain }, gt: () => chain, order: () => chain, limit: () => chain,
+      is: (key: string, value: unknown) => { filters.push([key, value]); return chain }, gt: () => chain,
+      order: (key: string, options: { ascending?: boolean; nullsFirst?: boolean } = {}) => {
+        const ascending = options.ascending ?? true
+        ordering.push([key, ascending, options.nullsFirst ?? !ascending]); return chain
+      },
+      limit: (count: number) => { maximum = count; return chain },
       update: (value: Row) => { update = value; return chain },
       maybeSingle: async () => { const value = result(); return { ...value, data: value.data?.[0] ?? null } },
       insert: async (value: Row) => { calls.push(table + ':insert'); if (failures.has(table)) return { error: {} }; tables[table].push(value); return { error: null } },
@@ -66,6 +87,146 @@ function setup() {
   return { handler, tables, failures, calls, fetcher, authenticate, env, rpc, context }
 }
 afterEach(() => vi.restoreAllMocks())
+const referenceRequest = (filter: Record<string, unknown> = {}) => new Request('https://example.invalid', {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'references', ...filter }),
+})
+describe('bounded reviewed reference discovery', () => {
+  it.each([undefined, 'saved-reference'])('encodes owner, material, revocation, preferred ID and bound with the installed query builder (%s)', async preferredReferenceId => {
+    const test = setup(), transport = vi.fn<typeof fetch>(async input => Response.json(new URL(String(input)).searchParams.has('id')
+      ? [{ ...reference(), id: preferredReferenceId, material_id: 'current-material' }] : []))
+    test.context.admin = createClient('https://unfetched.invalid', 'inert-fixture', {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: transport },
+    })
+    const response = await test.handler(referenceRequest({ materialId: 'current-material', preferredReferenceId }))
+    expect(response.status).toBe(200)
+    expect((await response.json()).references.map((ref: { id: string }) => ref.id)).toEqual(preferredReferenceId ? [preferredReferenceId] : [])
+    expect(transport).toHaveBeenCalledTimes(preferredReferenceId ? 2 : 1)
+    if (preferredReferenceId) {
+      const preferred = new URL(String(transport.mock.calls[0]![0]))
+      expect(Object.fromEntries(preferred.searchParams)).toMatchObject({ user_id: `eq.${owner}`, material_id: 'eq.current-material',
+        revoked_at: 'is.null', id: 'eq.saved-reference', limit: '1' })
+    }
+    const url = new URL(String(transport.mock.calls.at(-1)![0]))
+    expect(url.pathname).toBe('/rest/v1/pronunciation_references')
+    expect(url.searchParams.has('id')).toBe(false)
+    expect(Object.fromEntries(url.searchParams)).toMatchObject({ user_id: `eq.${owner}`, material_id: 'eq.current-material',
+      revoked_at: 'is.null', order: 'voice_review->>kind.asc.nullslast,id.asc', limit: '100' })
+    expect(test.fetcher).not.toHaveBeenCalled(); expect(test.rpc).not.toHaveBeenCalled()
+  })
+  it('finds the current material after 100 earlier active owner references', async () => {
+    const test = setup(), late = { ...reference(), id: 'z-late-reference', material_id: 'current-material' }
+    test.tables.pronunciation_references = [...Array.from({ length: 100 }, (_, index) => ({ ...reference(), id: `a-${String(index).padStart(3, '0')}`, material_id: 'other-material' })), late]
+    const global = await (await test.handler(referenceRequest())).json()
+    expect(global.references).toHaveLength(100)
+    expect(global.references.some((ref: { id: string }) => ref.id === late.id)).toBe(false)
+    const response = await test.handler(referenceRequest({ materialId: 'current-material' }))
+    expect(response.status).toBe(200)
+    expect((await response.json()).references).toMatchObject([{ id: late.id, materialId: 'current-material' }])
+    expect(test.fetcher).not.toHaveBeenCalled(); expect(test.rpc).not.toHaveBeenCalled()
+  })
+  it.each([{}, { materialId: 'current-material' }])('prioritizes human references before the 100-row bound with filter %j', async filter => {
+    const test = setup(), late = { ...reference(), id: 'z-human', material_id: 'current-material' }
+    test.tables.pronunciation_references = [...Array.from({ length: 100 }, (_, index) => ({ ...reference(), id: `a-${String(index).padStart(3, '0')}`, material_id: 'current-material', voice_review: { ...reference().voice_review, kind: 'synthetic' } })), late]
+    const response = await test.handler(referenceRequest(filter))
+    expect(response.status).toBe(200)
+    const { references } = await response.json()
+    expect(references).toHaveLength(100); expect(references[0]).toMatchObject({ id: late.id, voiceReview: { kind: 'human' } })
+    expect(references[1].id).toBe('a-000'); expect(references[99].id).toBe('a-098')
+  })
+  it.each([{}, { materialId: 'current-material' }])('includes an approved saved reference beyond 100 without duplicates or losing the bound %j', async filter => {
+    const test = setup(), saved = { ...reference(), id: 'z-saved', material_id: 'current-material', voice_review: { ...reference().voice_review, kind: 'synthetic' } }
+    test.tables.pronunciation_references = [...Array.from({ length: 100 }, (_, index) => ({ ...reference(), id: `a-${String(index).padStart(3, '0')}`, material_id: 'current-material' })), saved]
+    const response = await test.handler(referenceRequest({ ...filter, preferredReferenceId: saved.id }))
+    expect(response.status).toBe(200)
+    const { references } = await response.json()
+    expect(references).toHaveLength(100); expect(references[0]).toMatchObject({ id: saved.id, voiceReview: { kind: 'synthetic' } })
+    expect(references[1].id).toBe('a-000'); expect(references[99].id).toBe('a-098')
+    test.tables.pronunciation_references = [saved, reference()]
+    const small = await (await test.handler(referenceRequest({ preferredReferenceId: saved.id }))).json()
+    expect(small.references.map((ref: { id: string }) => ref.id)).toEqual([saved.id, 'review-v1'])
+    expect(test.fetcher).not.toHaveBeenCalled(); expect(test.rpc).not.toHaveBeenCalled()
+  })
+  it.each(['missing', 'revoked', 'other-owner', 'other-material'])('never grants a %s preferred reference', async mode => {
+    const test = setup(), preferred = { ...reference(), id: 'saved-reference', material_id: 'current-material' } as Row
+    const available = { ...reference(), id: 'available', material_id: 'current-material' }
+    if (mode === 'revoked') preferred.revoked_at = '2026-09-08T01:00:00Z'
+    if (mode === 'other-owner') preferred.user_id = 'another-owner'
+    if (mode === 'other-material') preferred.material_id = 'another-material'
+    test.tables.pronunciation_references = mode === 'missing' ? [available] : [preferred, available]
+    const response = await test.handler(referenceRequest({ materialId: 'current-material', preferredReferenceId: preferred.id }))
+    expect(response.status).toBe(200)
+    expect((await response.json()).references).toMatchObject([{ id: available.id }])
+    expect(test.fetcher).not.toHaveBeenCalled(); expect(test.rpc).not.toHaveBeenCalled()
+  })
+  it('fails preferred lookup without querying replacement candidates or inventing a review', async () => {
+    const test = setup()
+    test.tables.pronunciation_references = [{ ...reference(), material_id: 'current-material', voice_review: null }]
+    const input = { materialId: 'current-material', preferredReferenceId: 'review-v1' }
+    expect((await test.handler(referenceRequest(input))).status).toBe(400)
+    expect(test.context.admin.from).toHaveBeenCalledOnce()
+    test.failures.add('pronunciation_references')
+    const response = await test.handler(referenceRequest(input))
+    expect(response.status).toBe(503); expect((await response.json()).references).toBeUndefined()
+    expect(test.context.admin.from).toHaveBeenCalledTimes(2)
+    expect(test.fetcher).not.toHaveBeenCalled(); expect(test.rpc).not.toHaveBeenCalled()
+  })
+  it('keeps missing material empty and leaves unfiltered global discovery available', async () => {
+    const test = setup()
+    test.tables.pronunciation_references.push({ ...reference(), id: 'material-reference', material_id: 'another-material' })
+    expect(await (await test.handler(referenceRequest({ materialId: 'missing-material' }))).json()).toEqual({ references: [] })
+    const global = await (await test.handler(referenceRequest())).json()
+    expect(global.references.map((ref: { materialId: string | null }) => ref.materialId)).toEqual(['another-material', null])
+  })
+  it('places null review kinds after valid candidates before the discovery cap', async () => {
+    const test = setup(), current = { ...reference(), material_id: 'current-material' }
+    test.tables.pronunciation_references = [
+      { ...current, id: 'a-null-review', voice_review: null },
+      { ...current, id: 'a-null-kind', voice_review: { ...current.voice_review, kind: null } },
+      ...Array.from({ length: 100 }, (_, index) => ({ ...current, id: `b-${String(index).padStart(3, '0')}`, voice_review: { ...current.voice_review, kind: 'synthetic' } })),
+      { ...current, id: 'z-human' },
+    ]
+    const response = await test.handler(referenceRequest({ materialId: 'current-material' }))
+    expect(response.status).toBe(200)
+    const { references } = await response.json()
+    expect(references).toHaveLength(100); expect(references[0].id).toBe('z-human')
+    expect(references.slice(1).every((ref: { voiceReview: { kind: string } }) => ref.voiceReview.kind === 'synthetic')).toBe(true)
+  })
+  it('reports scoped query failure without returning empty matches or querying a global fallback', async () => {
+    const test = setup(); test.failures.add('pronunciation_references')
+    const response = await test.handler(referenceRequest({ materialId: 'current-material' }))
+    expect(response.status).toBe(503)
+    const body = await response.json()
+    expect(body.error.code).toBe('REFERENCE'); expect(body.references).toBeUndefined()
+    expect(test.context.admin.from).toHaveBeenCalledOnce(); expect(test.fetcher).not.toHaveBeenCalled()
+  })
+  it('excludes other owners and revoked references even for the same material', async () => {
+    const test = setup(), approved = { ...reference(), material_id: 'current-material' }
+    test.tables.pronunciation_references = [approved, { ...approved, id: 'other-owner', user_id: 'another-owner' },
+      { ...approved, id: 'revoked', revoked_at: '2026-09-08T01:00:00Z' }]
+    expect((await (await test.handler(referenceRequest({ materialId: 'current-material' }))).json()).references).toMatchObject([{ id: approved.id }])
+  })
+  it.each([null, { ...reference().voice_review, kind: null }, { ...reference().voice_review, kind: 'unknown' },
+    { ...reference().voice_review, generalAmericanReviewed: null }])('rejects null or invalid selected reviews without inventing approval %j', async voiceReview => {
+    const test = setup()
+    test.tables.pronunciation_references = [{ ...reference(), material_id: 'current-material', voice_review: voiceReview }]
+    const response = await test.handler(referenceRequest({ materialId: 'current-material' }))
+    expect(response.status).toBe(400); expect((await response.json()).references).toBeUndefined()
+    expect(test.fetcher).not.toHaveBeenCalled(); expect(test.rpc).not.toHaveBeenCalled()
+  })
+  it.each([{ materialId: null }, { materialId: '' }, { materialId: ' ' }, { materialId: '../invalid' }, { materialId: 'a'.repeat(101) },
+    { materialId: [] }, { materialId: {} }, { materialId: 42 }, { materialId: 'valid', user_id: 'another-owner' },
+    { materialId: 'valid', limit: 1000 }, { materialId: 'valid', kind: 'human' },
+    ...[null, '', '../invalid', 'a'.repeat(101), [], {}, 42].map(preferredReferenceId => ({ materialId: 'valid', preferredReferenceId }))])('rejects invalid or unauthorized discovery filters %j', async filter => {
+    const test = setup(), response = await test.handler(referenceRequest(filter))
+    expect(response.status).toBe(400); expect(test.context.admin.from).not.toHaveBeenCalled()
+    expect(test.fetcher).not.toHaveBeenCalled(); expect(test.rpc).not.toHaveBeenCalled()
+  })
+  it.each([401, 403])('rejects unauthorized scoped discovery before any reference query (%i)', async status => {
+    const test = setup(); test.authenticate.mockRejectedValue(new GatewayError(status, status === 401 ? 'SIGN_IN' : 'NOT_OWNER', 'private'))
+    expect((await test.handler(referenceRequest({ materialId: 'current-material', preferredReferenceId: 'saved-reference' }))).status).toBe(status)
+    expect(test.context.admin.from).not.toHaveBeenCalled(); expect(test.fetcher).not.toHaveBeenCalled(); expect(test.rpc).not.toHaveBeenCalled()
+  })
+})
 describe('real Fetch speech handler with official Azure response contract', () => {
   it('recovers historical private evidence without audio, active voice review, credentials or another budget hold', async () => {
     const test = setup(), result = await (await test.handler(request())).json()
