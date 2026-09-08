@@ -80,6 +80,29 @@ describe('explicit dedicated-backend operation fence', () => {
     expect(check('migrations', 'jove-english-os', ref).process.exitCode).toBe(0)
     expect(check('migrations', 'jove-english-os', ref, 'ACTIVE_HEALTHY', {}, '202609080001 | 202609080001 | timestamp').process.exitCode).toBe(0)
   })
+  it('accepts the observed native CLI table with backtick-wrapped migration versions', () => {
+    const rows = 'Local | Remote | Time (UTC)\n---|---|---\n `202609080001` | `202609080001` | `202609080001` '
+    expect(check('migrations', 'jove-english-os', ref, 'ACTIVE_HEALTHY', {}, rows).process.exitCode).toBe(0)
+  })
+  it.each([
+    '`202609080001` | | timestamp',
+    '`202609080001` | `202609080999` | timestamp',
+    '`202609080001 | `202609080001` | timestamp',
+    '`202609080001x` | `202609080001` | timestamp',
+    '`202609080001` | `202609080001` | timestamp\n`202609080001` | `202609080001` | timestamp',
+  ])('rejects incomplete, mismatched, malformed or duplicate formatted versions', rows => {
+    const result = check('migrations', 'jove-english-os', ref, 'ACTIVE_HEALTHY', {}, rows)
+    expect(result.process.exitCode).toBe(1); expect(result.calls.flat()).not.toContain('push')
+  })
+  it.each([
+    '`202609080002 | `202609080002` | timestamp',
+    '202609080002x | 202609080002 | timestamp',
+    'malformed | `202609080002` | timestamp',
+  ])('does not ignore a malformed extra version row after a complete valid listing', extra => {
+    const rows = '`202609080001` | `202609080001` | timestamp\n' + extra
+    const result = check('migrations', 'jove-english-os', ref, 'ACTIVE_HEALTHY', {}, rows)
+    expect(result.process.exitCode).toBe(1); expect(result.calls.flat()).not.toContain('push')
+  })
   it.each(['{}', '{broken', JSON.stringify({ migrations: [{ local: '202609080001', remote: null }] }),
     JSON.stringify({ migrations: [{ local: '202609080001', remote: '202609080999' }] })])(
     'rejects malformed or mismatched JSON version readback', rows => {

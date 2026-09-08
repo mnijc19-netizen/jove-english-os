@@ -45,9 +45,13 @@ try {
         return [row.local, row.remote]
       })
     } else {
-      // Older Go CLI releases print the version table even with -o json.
-      pairs = listing.split(/\r?\n/u).map(line => /^\s*(\d*)\s*\|\s*(\d*)\s*\|/u.exec(line))
-        .filter(Boolean).map(row => [row[1], row[2]])
+      // Native CLI may print a Markdown table even with -o json; Go releases
+      // use bare digits. Only accept balanced backticks around numeric cells.
+      pairs = listing.split(/\r?\n/u).map(line => {
+        const row = /^\s*(?:`(\d+)`|(\d*))\s*\|\s*(?:`(\d+)`|(\d*))\s*\|/u.exec(line)
+        if (!row && (/^\s*(?:`|\d|\|)/u.test(line) || /\|\s*`?\d/u.test(line))) throw new Error('malformed migration row')
+        return row ? [row[1] ?? row[2], row[3] ?? row[4]] : null
+      }).filter(Boolean)
     }
     const local = pairs.map(row => row[0]).filter(Boolean).sort(), remote = pairs.map(row => row[1]).filter(Boolean).sort()
     if (!expected.length || JSON.stringify(expected) !== JSON.stringify(local) || JSON.stringify(expected) !== JSON.stringify(remote)) throw new Error('migration readback')
