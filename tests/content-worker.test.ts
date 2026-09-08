@@ -3,12 +3,12 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, OPEN_YAP_SAMPLE_SOURCE, VOA_LESSON_CANDIDATES } from '../src/content/sources'
-import type { ContentSource, Inspection, ObservationEvidence, TimedTranscript } from '../src/content/pipeline-types'
+import type { ContentSource, FeedEpisode, Inspection, ObservationEvidence, TimedTranscript } from '../src/content/pipeline-types'
 import { createContentFetcher, fetchContentResource, isPublicContentAddress, type ContentFetcher } from '../src/server/content-network'
 import { parseRssFeed, parseOpenYapPreviewManifest, validateSourceUrl } from '../src/content/pipeline'
-import { extractContentPolicy, revalidateContentRights } from '../src/server/content-rights'
+import { CONTENT_POLICY_EVIDENCE, extractContentPolicy, revalidateContentRights } from '../src/server/content-rights'
 import { contentAudioDuration, contentAudioWindow, createContentAudioServices } from '../src/server/content-audio'
-import { auditVoaLessonCandidates } from '../src/server/content-voa'
+import { auditVoaLessonCandidates, type VoaCandidateAudit } from '../src/server/content-voa'
 import { contentPublicOrigin, contentSignedPlaybackUrl, createContentBudget, createContentHandler } from '../src/server/content'
 import { GatewayError, type OwnerContext } from '../src/server/gateway'
 import {
@@ -959,6 +959,251 @@ function postgresAdmin(): ContentAdminClient {
     } catch { return { data: null, error: { code: 'SQL_TEST_ERROR' } } }
   } }
 }
+// Separate opt-in: real publisher metadata + real PostgreSQL, never synthetic audio approval.
+const voaPersistenceSource = ALLOWLISTED_CONTENT_SOURCES.find(source => source.id === 'voa-everyday-grammar')!
+const voaPersistenceGuids = VOA_LESSON_CANDIDATES.map(candidate => `voa-pilot:${candidate.id}`)
+const voaPersistenceConfigHash = createHash('sha256')
+  .update(JSON.stringify([voaPersistenceSource, CONTENT_POLICY_EVIDENCE, VOA_LESSON_CANDIDATES])).digest('hex')
+// Main explicitly approved this one observed local baseline transition; this is not a general override.
+const voaPreviousLocalConfigHash = 'f473de49e3819a90413333278d13599143b95a894e6d5de7cc879db4765b8cbf'
+const voaExistingRssGuids = ['7987362', '7979758', '8008295'].map(id => `https://learningenglish.voanews.com/a/${id}.html`)
+interface VoaExistingRssRow {
+  id: string; guid: string; status: string; attempts: number; nextAttemptAt: string; metadata: Record<string, unknown>
+}
+interface VoaPersistencePreflight {
+  members: number; activeLeases: number; eligibleItems: number; eligibleSegments: number; otherVoaItems: number
+  voaSegments: number; voaRecommendations: number; otherVoaRows: VoaExistingRssRow[]
+  source: { id: string; configId: string; feedUrl: string; configHash: string } | null
+  pilots: { guid: string; pageUrl: string; audioUrl: string; status: string }[]
+}
+function assertVoaPersistencePreflight(state: VoaPersistencePreflight) {
+  if (state.members !== 0 || state.activeLeases !== 0 || state.eligibleItems !== 0 || state.eligibleSegments !== 0 ||
+      state.voaSegments !== 0 || state.voaRecommendations !== 0)
+    throw new Error('voa-local-fixture-lease-unsafe')
+  if (!Number.isInteger(state.otherVoaItems) || state.otherVoaItems < 0 || !Array.isArray(state.pilots) ||
+      !Array.isArray(state.otherVoaRows) || state.otherVoaRows.length !== state.otherVoaItems)
+    throw new Error('voa-local-preflight-incomplete')
+  if (state.source !== null && (!state.source || state.source.id !== voaPersistenceSource.id ||
+      state.source.configId !== voaPersistenceSource.id || state.source.feedUrl !== voaPersistenceSource.feedUrl ||
+      !/^[a-f0-9]{64}$/u.test(state.source.configHash))) throw new Error('voa-local-source-identity-unsafe')
+  if (state.otherVoaRows.some(row => !voaExistingRssGuids.includes(row.guid)) ||
+      new Set(state.otherVoaRows.map(row => row.guid)).size !== state.otherVoaRows.length)
+    throw new Error('voa-local-unknown-rss-item')
+  // Existing004 resets queue state when config changes. Only this exact authorized three-row baseline is safe.
+  if (state.otherVoaItems > 0 && state.source?.configHash !== voaPersistenceConfigHash &&
+      !(state.source?.configHash === voaPreviousLocalConfigHash && state.otherVoaRows.length === 3 &&
+        state.otherVoaRows.every(row => row.status === 'awaiting-analysis')))
+    throw new Error('voa-local-config-would-reset-other-items')
+  if (state.pilots.length > 6 || new Set(state.pilots.map(row => row.guid)).size !== state.pilots.length)
+    throw new Error('voa-local-candidate-identity-unsafe')
+  for (const row of state.pilots) {
+    const candidate = VOA_LESSON_CANDIDATES.find(candidate => `voa-pilot:${candidate.id}` === row.guid)
+    if (!candidate || row.pageUrl !== candidate.pageUrl || row.audioUrl !== candidate.audioUrl ||
+        !['pending', 'awaiting-analysis', 'quarantined', 'retry'].includes(row.status))
+      throw new Error('voa-local-candidate-identity-unsafe')
+  }
+}
+describe('actual VOA persistence preflight guards (no database)', () => {
+  const empty: VoaPersistencePreflight = { members: 0, activeLeases: 0, eligibleItems: 0, eligibleSegments: 0,
+    otherVoaItems: 0, otherVoaRows: [], voaSegments: 0, voaRecommendations: 0, source: null, pilots: [] }
+  it('rejects occupied/missing/null safety counts before creating any owner', () => {
+    expect(() => assertVoaPersistencePreflight(empty)).not.toThrow()
+    for (const field of ['members', 'activeLeases', 'eligibleItems', 'eligibleSegments', 'voaSegments', 'voaRecommendations', 'otherVoaItems'] as const) {
+      for (const absent of [null, undefined]) expect(() => assertVoaPersistencePreflight({ ...empty, [field]: absent } as unknown as VoaPersistencePreflight)).toThrow()
+      if (field !== 'otherVoaItems') expect(() => assertVoaPersistencePreflight({ ...empty, [field]: 1 })).toThrow('lease-unsafe')
+    }
+  })
+  it('rejects unbound pilot rows and config changes that would reset unrelated RSS items', () => {
+    const source = { id: voaPersistenceSource.id, configId: voaPersistenceSource.id,
+      feedUrl: voaPersistenceSource.feedUrl, configHash: voaPersistenceConfigHash }
+    const otherVoaRows = voaExistingRssGuids.map(guid => ({ id: 'test-only', guid, status: 'awaiting-analysis', attempts: 0, nextAttemptAt: '', metadata: {} }))
+    const baseline = { ...empty, source, otherVoaItems: 3, otherVoaRows }
+    expect(() => assertVoaPersistencePreflight(baseline)).not.toThrow()
+    expect(() => assertVoaPersistencePreflight({ ...baseline, source: { ...source, configHash: '0'.repeat(64) } })).toThrow('reset-other-items')
+    const permitted = { ...baseline, source: { ...source, configHash: voaPreviousLocalConfigHash } }
+    expect(() => assertVoaPersistencePreflight(permitted)).not.toThrow()
+    expect(() => assertVoaPersistencePreflight({ ...permitted, otherVoaRows: otherVoaRows.map(row => ({ ...row, status: 'pending' })) })).toThrow('reset-other-items')
+    expect(() => assertVoaPersistencePreflight({ ...permitted, otherVoaRows: otherVoaRows.map(row => ({ ...row, guid: 'unknown' })) })).toThrow('unknown-rss-item')
+    const candidate = VOA_LESSON_CANDIDATES[0]!
+    const row = { guid: voaPersistenceGuids[0]!, pageUrl: candidate.pageUrl, audioUrl: candidate.audioUrl, status: 'pending' }
+    expect(() => assertVoaPersistencePreflight({ ...empty, source, pilots: [row] })).not.toThrow()
+    for (const changed of [{ guid: 'voa-pilot:unknown' }, { audioUrl: 'https://unapproved.example/audio' }, { status: 'eligible' }])
+      expect(() => assertVoaPersistencePreflight({ ...empty, source, pilots: [{ ...row, ...changed }] })).toThrow('identity-unsafe')
+  })
+})
+
+describe.runIf(localEnabled && liveEnabled && process.env.JOVE_CONTENT_VOA_PERSISTENCE === '1')('leased actual six VOA metadata persistence', () => {
+  it('persists and reads back exactly six real VOA candidates without paid services or audio approval', async () => {
+    // Requires an explicit exclusive fixture lease, not just a running DB. Never inspect env/keys/raw stderr.
+    const localSql = (statement: string): string => {
+      try {
+        return execFileSync('docker', ['exec', '-i', '-e', 'PGOPTIONS=-c statement_timeout=10000 -c lock_timeout=3000',
+          localContainer, 'psql', '-U', 'postgres', '-d', 'postgres', '-qAt', '-v', 'ON_ERROR_STOP=1'],
+        { input: statement, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000, maxBuffer: 4 * 1024 * 1024 }).trim()
+      } catch { throw new Error('voa-local-sql-failed-cli-output-suppressed') }
+    }
+    let ports: Record<string, { HostPort: string }[]>
+    try {
+      ports = JSON.parse(execFileSync('docker', ['inspect', '--format', '{{json .NetworkSettings.Ports}}', localContainer],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }))
+    } catch { throw new Error('voa-dedicated-local-container-unavailable') }
+    expect(ports['5432/tcp']?.some(port => port.HostPort === '55322')).toBe(true)
+    const sourceId = sqlLiteral(voaPersistenceSource.id)
+    const guids = voaPersistenceGuids.map(sqlLiteral).join(',')
+    const selected = `source_id=${sourceId} and guid in (${guids})`
+    const readOtherVoaRows = () => JSON.parse(localSql(`select coalesce(jsonb_agg(jsonb_build_object(
+      'id',id,'guid',guid,'status',status,'attempts',attempts,'nextAttemptAt',next_attempt_at,
+      'metadata',to_jsonb(i)-array['status','attempts','next_attempt_at']) order by guid),'[]')
+      from public.content_items i where source_id=${sourceId} and guid not in (${guids});`)) as VoaExistingRssRow[]
+    const before = JSON.parse(localSql(`select jsonb_build_object(
+      'members',(select count(*) from public.app_members),
+      'activeLeases',(select count(*) from public.content_sources where lease_until>clock_timestamp()),
+      'eligibleItems',(select count(*) from public.content_items where status='eligible'),
+      'eligibleSegments',(select count(*) from public.content_segments where status='eligible'),
+      'voaSegments',(select count(*) from public.content_segments s join public.content_items i on i.id=s.item_id where i.source_id=${sourceId}),
+      'voaRecommendations',(select count(*) from public.content_recommendations r join public.content_segments s on s.id=r.segment_id
+        join public.content_items i on i.id=s.item_id where i.source_id=${sourceId}),
+      'otherVoaItems',(select count(*) from public.content_items where source_id=${sourceId} and guid not in (${guids})),
+      'source',(select jsonb_build_object('id',id,'configId',config->>'id','feedUrl',config->>'feedUrl','configHash',config_hash)
+        from public.content_sources where id=${sourceId}),
+      'pilots',(select coalesce(jsonb_agg(jsonb_build_object('guid',guid,'pageUrl',episode->>'pageUrl','audioUrl',episode->>'audioUrl','status',status)),'[]')
+        from public.content_items where source_id=${sourceId} and guid like 'voa-pilot:%'));`)) as VoaPersistencePreflight
+    before.otherVoaRows = readOtherVoaRows()
+    assertVoaPersistencePreflight(before)
+    const upgrading = before.otherVoaItems > 0 && before.source?.configHash !== voaPersistenceConfigHash
+    const unchangedState = () => localSql(`select jsonb_build_object(
+      'otherItems',(select md5(coalesce(jsonb_agg(case when ${upgrading} and source_id=${sourceId}
+        then to_jsonb(t)-array['status','attempts','next_attempt_at'] else to_jsonb(t) end order by id),'[]')::text)
+        from public.content_items t where not (${selected})),
+      'otherSources',(select md5(coalesce(jsonb_agg(to_jsonb(t) order by id),'[]')::text) from public.content_sources t where id<>${sourceId}),
+      ${['content_transcripts', 'content_audio_assets', 'content_segments', 'content_segment_audio', 'content_speakers', 'content_scores',
+        'content_usage', 'content_recommendations', 'content_history', 'content_profiles'].map(table =>
+        `${sqlLiteral(table)},(select md5(coalesce(jsonb_agg(to_jsonb(t) order by to_jsonb(t)::text),'[]')::text) from public.${table} t)`).join(',')});`)
+    const preserved = unchangedState()
+    const fixtureOwner = crypto.randomUUID(), fixtureMarker = crypto.randomUUID()
+    const actions: string[] = [], pages = new Map<string, string>(), policies = new Map<string, string>()
+    const readRows = () => JSON.parse(localSql(`select coalesce(jsonb_agg(jsonb_build_object('id',id,'guid',guid,'revision',revision,'status',status,'episode',episode) order by guid),'[]')
+      from public.content_items where ${selected};`)) as { id: string; guid: string; revision: string; status: string;
+        episode: FeedEpisode & { candidateAudit: Omit<VoaCandidateAudit, 'rights'> } }[]
+    const admin = {
+      async rpc(name: string, input?: Record<string, unknown>): Promise<Awaited<ReturnType<ContentAdminClient['rpc']>>> {
+        const action = input?.action as string
+        if (name !== 'content_worker' || !['owner', 'candidates', 'claim', 'rights-check', 'ingest', 'release'].includes(action))
+          throw new Error('voa-metadata-only-rpc-required')
+        actions.push(action)
+        const args = input?.args as Record<string, unknown>
+        if (!['owner', 'candidates'].includes(action) && args.sourceId !== voaPersistenceSource.id) throw new Error('voa-source-only-required')
+        return { data: JSON.parse(localSql(`select public.content_worker(${sqlLiteral(action)},${sqlLiteral(JSON.stringify(args))}::jsonb);`)), error: null }
+      },
+      from(table: string) {
+        if (table !== 'content_items') throw new Error('voa-pilot-read-only-query-required')
+        return { select(columns: string) {
+          if (columns !== 'guid,episode') throw new Error('voa-pilot-read-only-query-required')
+          let hasSource = false, hasGuids = false
+          return {
+            eq(column: string, value: string) { hasSource = column === 'source_id' && value === voaPersistenceSource.id; return this },
+            in(column: string, values: readonly string[]) { hasGuids = column === 'guid' && JSON.stringify(values) === JSON.stringify(voaPersistenceGuids); return this },
+            async limit(count: number) {
+              if (!hasSource || !hasGuids || count !== 6) throw new Error('voa-pilot-read-only-query-required')
+              return { data: readRows().map(row => ({ guid: row.guid, episode: row.episode })), error: null }
+            },
+          }
+        } }
+      },
+    }
+    const allowedPages = new Set([...VOA_LESSON_CANDIDATES.map(candidate => candidate.pageUrl), ...voaPersistenceSource.rights.evidenceUrls])
+    const transport: ContentFetcher = async request => {
+      if (request.role !== 'page' || !allowedPages.has(request.url)) throw new Error('voa-metadata-only-network-required')
+      const response = await fetchContentResource(request) // Real bounded, allowlisted, DNS-pinned Node transport, not a fixture.
+      pages.set(request.url, createHash('sha256').update(response.body).digest('hex'))
+      const policy = CONTENT_POLICY_EVIDENCE.find(policy => policy.url === request.url)
+      if (policy) policies.set(policy.url, createHash('sha256')
+        .update(extractContentPolicy(new TextDecoder().decode(response.body), policy.extractor)).digest('hex'))
+      return response
+    }
+    const startedAt = new Date().toISOString()
+    const controller = new AbortController(), deadline = setTimeout(() => controller.abort(), 120_000)
+    try {
+      localSql(`begin; lock table public.app_members in exclusive mode;
+        do $$ begin if exists(select 1 from public.app_members) then raise exception 'Fixture lease not empty'; end if;
+          insert into auth.users(id,raw_app_meta_data) values(${sqlLiteral(fixtureOwner)}::uuid,jsonb_build_object('joveContentPilotFixture',${sqlLiteral(fixtureMarker)}));
+          insert into public.app_members(user_id) values(${sqlLiteral(fixtureOwner)}::uuid); end $$; commit;`)
+      const trial = await runVoaCandidatePilot({ adminClient: admin, ownerId: fixtureOwner, probeAudio: false, fetcher: transport, signal: controller.signal })
+      expect(trial.errors).toEqual([])
+      expect(trial.sourcesClaimed).toBe(1)
+      expect(trial.voaPilot.map(candidate => candidate.id)).toEqual(VOA_LESSON_CANDIDATES.map(candidate => candidate.id))
+      expect(trial).toMatchObject({ itemsProcessed: 0, segmentsSaved: 0, eligibleSegments: 0, feedsFetched: 0, recommendations: [] })
+      const rows = readRows()
+      expect(rows.map(row => row.guid)).toEqual([...voaPersistenceGuids].sort())
+      for (const row of rows) {
+        const candidate = VOA_LESSON_CANDIDATES.find(candidate => `voa-pilot:${candidate.id}` === row.guid)!
+        expect(row.status).toBe('pending')
+        expect(row.episode).toMatchObject({ sourceId: voaPersistenceSource.id, pageUrl: candidate.pageUrl, audioUrl: candidate.audioUrl,
+          publishedAt: null, audioBytes: null, durationSeconds: null, transcripts: [],
+          candidateAudit: { taskCoverage: 'unknown', audioProbe: null, candidate: { id: candidate.id, status: 'candidate', eligible: false,
+            humanAudio: 'unknown', thirdPartyAudio: 'unknown', publisherTranscript: { timing: 'unknown', alignment: 'unverified' } } } })
+        const audit = row.episode.candidateAudit
+        expect(audit.transcriptSha256).toBe(createHash('sha256').update(audit.candidate.publisherTranscript.text).digest('hex'))
+        expect(audit.pageSha256).toMatch(/^[a-f0-9]{64}$/u)
+        // An unchanged revision retains its earlier snapshot, not a fabricated latest audit date/body hash.
+        if (!before.pilots.some(prior => prior.guid === row.guid)) expect(audit.pageSha256).toBe(pages.get(candidate.pageUrl))
+        expect(row.episode.attribution).toBe(audit.candidate.attribution)
+        expect(row.episode.licenseNotice).toBe(audit.candidate.thirdPartyNotices.length ? audit.candidate.thirdPartyNotices.join('\n') : null)
+        const policyHashes = voaPersistenceSource.rights.evidenceUrls.map(url => {
+          const observed = policies.get(url)
+          expect(observed).toBe(CONTENT_POLICY_EVIDENCE.find(policy => policy.url === url)?.sha256)
+          expect(observed).toMatch(/^[a-f0-9]{64}$/u)
+          return observed
+        })
+        const notices = [...new Set(audit.candidate.thirdPartyNotices.map(notice => notice.normalize('NFKC')
+          .replace(/[’‘]/gu, "'").replace(/\s+/gu, ' ').trim().toLowerCase()))].sort()
+        expect(row.revision).toBe(createHash('sha256')
+          .update(JSON.stringify([row.guid, candidate.audioUrl, audit.transcriptSha256, notices, policyHashes])).digest('hex'))
+      }
+      const inventory = await readOwnerContentTaskInventory({ adminClient: admin, ownerId: fixtureOwner })
+      expect(inventory.candidateAuditStatus).toBe('observed')
+      expect(inventory.tasks.map(task => task.task)).toEqual(CONTENT_LIFE_TASKS)
+      expect(inventory.tasks.every(task => task.reviewedUsableCount === 0)).toBe(true)
+      expect(new Set(inventory.tasks.flatMap(task => task.configuredCandidateIds)).size).toBe(6)
+      for (const task of inventory.tasks) expect(task.auditedCandidateCount).toBe(task.configuredCandidateIds.length)
+      expect(inventory).toMatchObject({ nextExpectedSupplyAt: null, estimatedDaysRemaining: null })
+      expect(unchangedState()).toBe(preserved)
+      const afterOtherVoaRows = readOtherVoaRows()
+      expect(afterOtherVoaRows.map(row => row.guid)).toEqual(before.otherVoaRows.map(row => row.guid))
+      const originalMetadataHash = (row: VoaExistingRssRow) => createHash('sha256').update(JSON.stringify(row.metadata)).digest('hex')
+      for (const prior of before.otherVoaRows) {
+        const current = afterOtherVoaRows.find(row => row.guid === prior.guid)!
+        expect(originalMetadataHash(current)).toBe(originalMetadataHash(prior))
+        if (upgrading) {
+          expect(current).toMatchObject({ status: 'pending', attempts: 0 })
+          expect(Date.parse(current.nextAttemptAt)).toBeGreaterThanOrEqual(Date.parse(startedAt))
+        } else expect(current).toEqual(prior)
+      }
+      expect(localSql(`select config_hash from public.content_sources where id=${sourceId};`)).toBe(voaPersistenceConfigHash)
+      expect(localSql(`select (lease_id is null and lease_until is null)::text from public.content_sources where id=${sourceId};`)).toBe('true')
+      expect(VOA_LESSON_CANDIDATES.every(candidate => pages.has(candidate.pageUrl))).toBe(true)
+      console.info(JSON.stringify({ actualVoaMetadataPersistence: true, startedAt, completedAt: new Date().toISOString(), runId: trial.runId,
+        rows: rows.length, newlyDiscovered: trial.itemsDiscovered, retainedOtherVoaItems: before.otherVoaItems,
+        eligible: 0, tasks: inventory.tasks.length, reviewedUsable: 0, leaseReleased: true, unrelatedStateUnchanged: true,
+        configurationUpgrade: upgrading, oldConfigHash: before.source?.configHash ?? null, configHash: voaPersistenceConfigHash,
+        existingRss: before.otherVoaRows.map(prior => { const current = afterOtherVoaRows.find(row => row.guid === prior.guid)!; return {
+          guid: prior.guid, beforeStatus: prior.status, afterStatus: current.status, beforeAttempts: prior.attempts, afterAttempts: current.attempts,
+          beforeMetadataSha256: originalMetadataHash(prior), afterMetadataSha256: originalMetadataHash(current) } }),
+        rpcActions: [...new Set(actions)], fetchedPages: pages.size, observedPolicyHashes: [...policies.values()],
+        candidates: rows.map(row => ({ guid: row.guid, itemId: row.id, revision: row.revision,
+          scriptSha256: row.episode.candidateAudit.transcriptSha256, pageSha256: row.episode.candidateAudit.pageSha256 })) }))
+    } finally {
+      clearTimeout(deadline)
+      // Only our random ID carrying our exact marker. Never clean sources/candidates or any other auth user.
+      localSql(`delete from auth.users where id=${sqlLiteral(fixtureOwner)}::uuid and raw_app_meta_data->>'joveContentPilotFixture'=${sqlLiteral(fixtureMarker)};`)
+      expect(localSql(`select count(*) from auth.users where id=${sqlLiteral(fixtureOwner)}::uuid;`)).toBe('0')
+      expect(localSql('select count(*) from public.app_members;')).toBe('0')
+      console.info(JSON.stringify({ actualVoaMetadataFixtureCleanup: true, fixtureOwnerRemaining: 0, membersRemaining: 0,
+        retainedCandidateCount: Number(localSql(`select count(*) from public.content_items where ${selected};`)) }))
+    }
+  }, 150_000)
+})
+
 describe.runIf(localEnabled)('content SQL acceptance assertions fail closed on absent RPC values', () => {
   const acceptance = readFileSync(new URL('../supabase/tests/content.test.sql', import.meta.url), 'utf8')
   it('rolls back a real publisher-notice revision withdrawal through unchanged SQL004', async () => {

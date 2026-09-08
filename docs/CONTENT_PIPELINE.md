@@ -244,7 +244,7 @@ The yearly nontechnical supply gate remains open. Archives are finite, not fresh
 - Targeted content units:196passed/21skipped,217total. Scoped ESLint passed. Regressions cover candidate-vs-reviewed, unique-owner rejection, no-paid metadata persistence/dedupe, changed rights, unknown readback, quote/heard/same-sentence timing/hash/script mismatch,100-row saturation, low-water, source rotation, Technology+Work restriction and both first/new third-party declaration cases. Synthetic analysis/DB fixtures are explicitly test-only.
 - Actual six-page+MP3/frame probe: session27669, final exit0, September8 18:34:08 start,21.94s test time. One test contains all six real assets;96 other tests skipped by name. Each requested30–90s clip contains498207actual bytes with frame/preroll coverage27.977142857–90.253061224s. Acoustic flags remain false/unknown. No Storage upload or paid call; this observation is retained, not rerun after metadata-only fixes.
 - Actual dedicated local004 notice-withdrawal test: September8 18:49:43, exit0,1passed/99 name-filtered skips,661ms. Real worker generated clean/changed-notice revisions; a random isolated source/owner and explicitly synthetic ready/eligible fixture ran inside BEGIN/ROLLBACK. Existing ingest preserved the declaration/new revision, reset the item pending, staled the old segment, deactivated recommendations and made playback raise42501. Exact source/auth-user counts after rollback were both0. No real owner record was modified; no product migration.
-- The new six-candidate ingest itself is verified through worker/RPC unit tests, not yet as six real publisher rows in live PostgreSQL. Earlier SQL evidence is historical and does not substitute for that readback or real acoustic approval. Main owns the functions rebuild, full merge CI and production gates.
+- The subsequent leased no-paid persistence acceptance below closes the six-real-publisher-row gap in the dedicated local PostgreSQL backend. It does not substitute for actual acoustic approval, production HTTP/owner journeys or a functions deployment. Main owns those gates.
 
 ~~~powershell
 npx vitest run tests/content-worker.test.ts tests/content-pipeline.test.ts
@@ -257,3 +257,50 @@ $env:JOVE_CONTENT_LOCAL_TEST='1'
 npx vitest run tests/content-worker.test.ts -t 'rolls back a real publisher-notice revision'
 Remove-Item Env:JOVE_CONTENT_LOCAL_TEST
 ~~~
+
+### Actual six-candidate metadata persistence — September8, 19:30 CST
+
+The existing `runVoaCandidatePilot({adminClient, ownerId, probeAudio:false})` ran against the real dedicated `supabase_db_jove-english-os` container (DB55322, associated local API55321), using its unchanged SQL004 RPC plus a test-only, strictly bounded read adapter. This was committed PostgreSQL persistence, not MemoryRpc, a rollback-only demonstration, an HTTP/Edge deployment or an audio approval. The seven distinct network pages were the exact reviewed publisher policy and six approved lesson pages, through the normal bounded/DNS-pinned Node transport. No fixtures supplied the publisher text; no audio/STT/analyzer/budget/Storage callback was used.
+
+- Authoritative exec session72928, terminal exit0:1passed/102name-filtered skips; test18.12s. Worker runId `044e4ac8-ad9c-4bd0-8ce2-31104f4dc8f0`, `2026-09-08T11:29:51.602Z` to `2026-09-08T11:30:08.095Z` (19:29:51–19:30:08 CST).
+- Six new exact `voa-pilot:*` items persist as `pending`, candidate eligible=false, humanAudio/thirdPartyAudio/taskCoverage=unknown, transcript timing=unknown/alignment=unverified, audioProbe=null, publishedAt=null and transcripts=[]. The source now has9items: the prior3RSS items plus these6. Actual inventory readback reports17tasks, observed candidate inventory and0reviewed usable; it invents neither publication dates nor days of supply.
+- Fresh observed policy evidence hash `108c9e0faf8523aecb90d79ab979f7f47c72a110fa3b2935208bfa99519a43f8` matched the pre-reviewed baseline. Script, audio URL, normalized third-party notices and that policy evidence were recomputed against each stored revision. Publisher attribution/notice fields were checked unchanged. Publisher policy verification is NOT clearance of third-party works in the recordings.
+- Worker post-cleanup SQL readback: members0, this marker's fixture owners0, active leases0, six pending/unknown-human candidates, pilot transcripts0, pilot audio assets0, VOA segments0, global eligible segments0. Main subsequently independently confirmed members0, VOA items9/pending9, VOA segments0 and global eligible segments0. Only the random owner with its exact fixture marker was deleted (its membership cascaded); all genuine candidates remain. The local SQL/Auth fixture lease was returned immediately after readback.
+
+The first real attempt,19:25:01/exit1, deliberately failed closed at `voa-local-config-would-reset-other-items`: it created no owner, made no public request and wrote no database state. SQL004's normal configuration transition would reset the three existing RSS queue entries. Main then explicitly authorized ONLY the observed old hash and GUID/state combination. The guard remains closed on unknown items/configurations, owners, missing/null counts, active leases or existing eligible/VOA segment/recommendation rows. The legitimate config transition was retained:
+
+`f473de49e3819a90413333278d13599143b95a894e6d5de7cc879db4765b8cbf` → `2427e115411b4559c7195f6ccf1f3feef78ebcf82b9ea639b45e998e7ffa4b88`.
+
+Each of the following exact RSS GUIDs changed only awaiting-analysis/attempts1 → pending/attempts0, with next_attempt_at set by the real claim. SHA256 of the complete item metadata excluding ONLY those three mutable queue fields matched before/after; thus episode, revision and all other item fields were preserved. Separate whole-table fingerprints also matched for existing transcripts/audio assets, segments/clips, speakers/scores, usage/history/recommendations/profiles and all other sources/items. No existing audio was downloaded or re-approved.
+
+| RSS GUID suffix | Before = after metadata SHA256 |
+| --- | --- |
+| /7979758.html | 40684d649631363c6d348549cc25e35c5e5b99dfc86aded5cdda5bc73aeeabf3 |
+| /7987362.html | ab40d942ea6ad472b2066c6e09f3a04c5ec05b42a6d7ff12a5a406922d466697 |
+| /8008295.html | 3ef9d6c527e27b86f5068e34a3fb08a5fb74195e0ecadbf08c3396bf6f619ace |
+
+The six persistent snapshots below retain the script hashes already recorded above. Page hashes bind the actual HTML fetched by this run; later unchanged-revision polls intentionally retain the earlier snapshot/check date rather than falsely claiming a rewrite.
+
+| Candidate ID (after voa-pilot:) | Stored revision | Page SHA256 |
+| --- | --- | --- |
+| voa-lle-disagreement | 3d3930e0e00c4096530f6599d914792fde3ea4d54835f67fbddf6d9564b94620 | 40b6546c14f7618f6f2e43c9c9bce75b794496f8a22462b4a17715e6cc31320e |
+| voa-lle-food-trucks | fec088df58e5792712b82994f102d2e64b6c56de58f0d2f0f0e514aac65b729e | 76548a4d276489caba4fd56d568d715a285b0d8b8059269cab99d7e4e6581576 |
+| voa-lle-help | d784524c9c980acb98d9857753e1328623bea2a6c097f4b2b6a243fa24d4945f | 29a0022ccaf1273513a64716f5403b4c66b5aa7fb0ce63da63e4c4abded00a86 |
+| voa-lle-interview | a825e0fb9a57c6539d64ad4e234f13b3e0c07e170a803eed0aa3b02b3bc0b8f5 | 637582b2e7e367ed862bb1f53a4cb2cc856c7b478f8f8c8706922916d759973d |
+| voa-lle-neighborhood | 93ca4e3886746c731871f928df69d48717d724c6fe86e84fa16e8838f21b5b30 | 14de0d4a12869a345a8f6a3d1f69de19769e94b247fe318d5081617ed02b8e4e |
+| voa-lle-plan-b | 2314714b5bce994130c4db3f1848819343d8d6e776960800a9bfc8f920c7812e | 3ad2362aa21960cd01e3442eb0596ab85881e4b51a445ade234c0e57cacbc71e |
+
+Reproducible command: all three opt-ins AND a newly granted exclusive local fixture lease are required. Do not run alongside main's Auth/SQL tests or with a personal member configured. This intentionally does not invoke the older broad synthetic-eligible acceptance suite:
+
+~~~powershell
+$env:JOVE_CONTENT_LOCAL_TEST='1'
+$env:JOVE_CONTENT_PUBLIC_INGEST='1'
+$env:JOVE_CONTENT_VOA_PERSISTENCE='1'
+try {
+  npx vitest run tests/content-worker.test.ts -t 'persists and reads back exactly six real VOA candidates' --reporter=dot
+} finally {
+  Remove-Item Env:JOVE_CONTENT_LOCAL_TEST,Env:JOVE_CONTENT_PUBLIC_INGEST,Env:JOVE_CONTENT_VOA_PERSISTENCE
+}
+~~~
+
+The test-only adapter also has two no-DB safety regressions (occupied/missing/null safety counts; unknown GUIDs/configs and the exact authorized baseline). Whole-project typecheck and scoped test-file ESLint passed before the actual run. A first TypeScript-only adapter return-type failure was corrected to explicit Promise; no production helper changed. The earlier six-audio probe was NOT rerun. Real paid audio inspection, approved clips, complete17-task coverage, continuing nontechnical supply and production owner journeys remain open.
