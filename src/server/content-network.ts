@@ -1,5 +1,6 @@
 import { validateSourceUrl } from '../content/pipeline'
 import type { ContentSource, ResourceRole } from '../content/pipeline-types'
+import { ContentTransportError, pinnedDenoContentHop, type ContentDenoRuntime } from './content-deno-http'
 
 export class ContentNetworkError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ContentNetworkError' }
@@ -13,7 +14,7 @@ export interface ContentFetchRequest {
 export interface ContentFetchResult {
   status: number; body: Uint8Array; finalUrl: string; contentType: string
   etag: string | null; lastModified: string | null; retryAfter: string | null
-  dnsPinning: 'pinned-node-lookup' | 'deno-preflight-only' | 'injected'
+  dnsPinning: 'pinned-node-lookup' | 'pinned-deno-tls' | 'deno-preflight-only' | 'injected'
 }
 export type ContentFetcher = (request: ContentFetchRequest) => Promise<ContentFetchResult>
 export type ContentDnsResolver = (hostname: string) => Promise<string[]>
@@ -43,7 +44,7 @@ export function isPublicContentAddress(address: string): boolean {
     !(a === 0x2001 && (b < 0x0200 || b === 0x0db8))
 }
 
-interface DenoDns { resolveDns(host: string, kind: 'A' | 'AAAA'): Promise<string[]> }
+interface DenoDns extends Partial<ContentDenoRuntime> { resolveDns(host: string, kind: 'A' | 'AAAA'): Promise<string[]> }
 const denoRuntime = () => (globalThis as typeof globalThis & { Deno?: DenoDns }).Deno
 export const resolveContentAddresses: ContentDnsResolver = async hostname => {
   const deno = denoRuntime()
@@ -124,39 +125,12 @@ async function nodeHop(url: string, addresses: string[], headers: Record<string,
     req.end()
   })
 }
-async function denoHop(url: string, headers: Record<string, string>, limit: number, signal: AbortSignal): Promise<Hop> {
-  const response = await fetch(url, { method: 'GET', headers, redirect: 'manual', credentials: 'omit', signal })
-  if ([301, 302, 303, 307, 308, 304].includes(response.status)) {
-    await response.body?.cancel()
-    return { status: response.status, body: new Uint8Array(), headers: response.headers }
-  }
-  if (response.headers.get('content-encoding') && response.headers.get('content-encoding') !== 'identity') {
-    await response.body?.cancel(); return networkError('compressed-response-not-supported')
-  }
-  const length = response.headers.get('content-length')
-  if (length && (!/^\d+$/u.test(length) || Number(length) > limit)) {
-    await response.body?.cancel(); return networkError('response-too-large')
-  }
-  const reader = response.body?.getReader()
-  if (!reader) return { status: response.status, body: new Uint8Array(), headers: response.headers }
-  const parts: Uint8Array[] = []
-  let bytes = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      bytes += value.byteLength
-      if (bytes > limit) networkError('response-too-large')
-      parts.push(value)
-    }
-  } finally { await reader.cancel() }
-  const body = new Uint8Array(bytes)
-  let offset = 0
-  for (const part of parts) { body.set(part, offset); offset += part.length }
-  return { status: response.status, body, headers: response.headers }
+async function denoHop(url: string, addresses: string[], headers: Record<string, string>, limit: number, signal: AbortSignal): Promise<Hop> {
+  try { return await pinnedDenoContentHop(denoRuntime()!, url, addresses, headers, limit, signal) }
+  catch (error) { return networkError(error instanceof ContentTransportError ? error.code : 'network-request-failed') }
 }
 
-/** Node pins the validated address via HTTPS lookup. Deno fetch cannot pin DNS; this is reported in every result. */
+/** Both runtimes pin this hop's validated address and verify the original TLS hostname. No unpinned fallback. */
 export function createContentFetcher(options: {
   resolve?: ContentDnsResolver
   /** Test/controlled-egress injection. Production defaults never bypass URL/DNS checks. */
@@ -188,7 +162,7 @@ export function createContentFetcher(options: {
         if (redirect === 0 && header(request.lastModified ?? null)) headers['if-modified-since'] = request.lastModified!
         const deno = !!denoRuntime()
         const result = options.transport ? await options.transport(url, addresses, headers, request.maxBytes, controller.signal) :
-          deno ? await denoHop(url, headers, request.maxBytes, controller.signal) : await nodeHop(url, addresses, headers, request.maxBytes, controller.signal)
+          deno ? await denoHop(url, addresses, headers, request.maxBytes, controller.signal) : await nodeHop(url, addresses, headers, request.maxBytes, controller.signal)
         if ([301, 302, 303, 307, 308].includes(result.status)) {
           const location = result.headers.get('location')
           if (!location) networkError('redirect-without-location')
@@ -199,7 +173,7 @@ export function createContentFetcher(options: {
           contentType: result.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '',
           etag: header(result.headers.get('etag')), lastModified: header(result.headers.get('last-modified')),
           retryAfter: header(result.headers.get('retry-after')),
-          dnsPinning: options.transport ? 'injected' : deno ? 'deno-preflight-only' : 'pinned-node-lookup' }
+          dnsPinning: options.transport ? 'injected' : deno ? 'pinned-deno-tls' : 'pinned-node-lookup' }
       }
       return networkError('too-many-redirects')
     } finally {
