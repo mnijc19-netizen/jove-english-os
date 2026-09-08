@@ -29,8 +29,8 @@ Do **not** run `config push` with `supabase/config.toml`: its Site URL and SMTP 
 
 - Site URL and the allowed production redirect: `https://mnijc19-netizen.github.io/jove-english-os/`.
 - Email sign-in enabled, public signup disabled; six-digit email OTP, 600-second expiry, 60-second resend interval.
-- Magic-link email template uses `{{ .Token }}` as in `supabase/templates/otp.html`, compatible with the existing code-entry UI.
 - Owner-configured production SMTP; provider credentials remain in the service dashboard. Supabase's restricted default sender is not production delivery acceptance.
+- Configure that SMTP service before editing the magic-link template: the hosted dashboard observed on 2026-09-09 keeps subject/body on its default templates until custom SMTP is configured. Then use `{{ .Token }}` as in `supabase/templates/otp.html`, compatible with the existing code-entry UI. Numeric OTP settings alone do not prove the delivered default email contains a code. Read back the project's resend interval as well as its template after SMTP setup; the documented 60-second default is not a substitute for hosted readback.
 - Through the trusted Dashboard/admin interface, pre-create only the owner's self-confirmed email account. Do not insert directly into `auth.users`, expose admin credentials to a browser or use public signup to bootstrap membership.
 - Use that exact returned Auth identity for the single `public.app_members` row. Read existing membership first; if a different member exists, stop without replacing/deleting it. Verify exactly one intended member. Do not put email, owner UUID or OTP in committed evidence.
 
