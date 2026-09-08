@@ -4,12 +4,33 @@ import { resolve } from 'node:path'
 
 const root = realpathSync(resolve(import.meta.dirname, '..'))
 const container = 'supabase_db_jove-english-os'
+function failureFacts(error) {
+  // Classify in memory; never print CLI lines, objects, connection strings or
+  // arbitrary exception fields. A cold CI failure still needs useful evidence.
+  const raw = [error?.stderr, error?.stdout].filter(value => typeof value === 'string').join('\n')
+  const known = [
+    ['DOCKER_UNAVAILABLE', /cannot connect to (?:the )?docker daemon|docker daemon is not running/i],
+    ['IMAGE_PULL_FAILED', /failed to pull|pull access denied|manifest unknown|toomanyrequests/i],
+    ['PORT_BUSY', /address already in use|port is already allocated/i],
+    ['NO_SPACE', /no space left on device/i],
+    ['HEALTH_CHECK_FAILED', /health.?check|not healthy|unhealthy/i],
+    ['RUNTIME_MODULE_MISSING', /(?:module not found|cannot find|no such file)[^\n]*jove-runtime\.js/i],
+  ]
+  const markers = known.filter(([, pattern]) => pattern.test(raw)).map(([name]) => name)
+  for (const code of ['42P01', '42883', '42501', '42703', '42601', '23505', '23503', '57P03', '53300', 'XX000']) {
+    if (new RegExp(`SQLSTATE[ :]+${code}\\b`, 'i').test(raw)) markers.push(`SQL_${code}`)
+  }
+  return { exitCode: Number.isInteger(error?.status) && error.status >= 0 && error.status <= 255 ? error.status : null,
+    signal: ['SIGTERM', 'SIGKILL', 'SIGABRT'].includes(error?.signal) ? error.signal : null,
+    markers: markers.length ? markers : ['UNCLASSIFIED'] }
+}
 function run(binary, args, label, input) {
   try {
     return execFileSync(binary, args, { cwd: root, encoding: 'utf8', input,
       windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], timeout: 240000, maxBuffer: 8 * 1024 * 1024 })
-  } catch {
+  } catch (error) {
     // CLI status and process errors may contain local credentials. Do not echo them.
+    process.stderr.write(`Local subprocess failure facts: ${JSON.stringify(failureFacts(error))}\n`)
     throw new Error(`Dedicated local verification failed at ${label}; no credentials or raw process output were printed`)
   }
 }
