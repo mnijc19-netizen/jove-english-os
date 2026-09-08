@@ -112,7 +112,14 @@ describe('real Fetch speech handler with official Azure response contract', () =
   it('rejects duplicate multipart fields and oversized audio', async () => {
     const test = setup(), body = await request().formData(); body.append('attemptId', 'duplicate')
     expect((await test.handler(new Request('https://example.invalid', { method: 'POST', body }))).status).toBe(400)
-    expect((await test.handler(request({ audioWav: new Blob([new Uint8Array(980000)], { type: 'audio/wav' }) }))).status).toBe(413)
+    const oversized = request({ audioWav: new Blob([new Uint8Array(980000)], { type: 'audio/wav' }) })
+    // A server receives multipart wire bytes, not Node's outgoing FormData
+    // encoder. Node 24.20's encoder also throws after a plain reader.cancel()
+    // with no app code involved. Preserve its real boundary/bytes and all
+    // rejection assertions without disabling cancellation or error reporting.
+    const wire = await oversized.arrayBuffer()
+    expect(wire.byteLength).toBeGreaterThan(980000)
+    expect((await test.handler(new Request(oversized.url, { method: 'POST', headers: oversized.headers, body: wire }))).status).toBe(413)
     expect(test.fetcher).not.toHaveBeenCalled()
   })
   it.each(['missing', 'revoked', 'unknown-quality', 'other-owner'])('never assesses %s references', async mode => {
