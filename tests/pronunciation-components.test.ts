@@ -708,7 +708,7 @@ beforeEach(() => {
   browser.referenceAudio.mockReset().mockResolvedValue(new Blob([makeWav()], { type: 'audio/wav' }))
   savedAudio.splice(0, savedAudio.length, ...['recording-1', 'recording-2'].map(id => ({ id, blob: new Blob([makeWav()], { type: 'audio/wav' }), mimeType: 'audio/wav', createdAt: 1 })))
 })
-afterEach(() => { for (const app of mounted.splice(0)) app.unmount(); vi.useRealTimers(); vi.unstubAllGlobals() })
+afterEach(() => { for (const app of mounted.splice(0)) app.unmount(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('PronunciationPractice compiled component', () => {
   it('shows and recovers from an initial identity timeout without unlocking a later account change', async () => {

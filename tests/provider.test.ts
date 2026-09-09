@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { OpenRouterProvider, publicUrl } from '../src/ai/provider'
 import { defaultSettings, type Settings, type Usage } from '../src/domain/types'
 import { API, REQUEST_TIMEOUT_MS, SSE_IDLE_TIMEOUT_MS } from '../src/ai/transport'
@@ -26,9 +26,9 @@ function sse(text: string, width = 3): Response {
 
 let settings: Settings
 let provider: OpenRouterProvider
-let fetcher: ReturnType<typeof vi.fn>
-let beforeRequest: ReturnType<typeof vi.fn>
-let onUsage: ReturnType<typeof vi.fn>
+let fetcher: Mock<(url: string, init: RequestInit) => Promise<Response>>
+let beforeRequest: Mock<(purpose: string) => Promise<void>>
+let onUsage: Mock<(usage: Usage) => Promise<void>>
 let handler: (url: string, init: RequestInit) => Response | Promise<Response>
 let models = modelFixtures
 const posts = () => fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')
@@ -448,7 +448,7 @@ describe('dedicated audio request bodies and safe retrieval', () => {
     await expect(provider.transcribe(new Blob([new Uint8Array([0, 1, 255])], { type }))).resolves.toBe('Hello world.')
     expect(posts()[0]![0]).toBe(`${API}/audio/transcriptions`)
     expect(bodyOf()).toEqual({ model: 'test/stt', input_audio: { data: 'AAH/', format }, response_format: 'json' })
-    expect(posts()[0]![1].headers['Content-Type']).toBe('application/json')
+    expect(new Headers(posts()[0]![1].headers).get('Content-Type')).toBe('application/json')
     expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'transcribe', tokens: 6, cost: 0.002 }))
   })
   it('rejects empty/unknown recordings and empty transcript without faking text', async () => {

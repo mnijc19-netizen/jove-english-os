@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { aiRequestSchema, createAIHandler } from '../src/server/ai'
 import { readingRubric } from '../src/domain/longitudinal'
 import { OpenRouterProvider } from '../src/ai/provider'
@@ -14,8 +14,8 @@ const evaluation = { summary: 'Clear request.', strengths: ['Clear meaning.'], e
 const model = (id: string) => ({ id, name: id, context_length: 32000, pricing: { prompt: '0.000001', completion: '0.000002', request: '0' },
   architecture: { input_modalities: ['text'], output_modalities: ['text'] }, supported_parameters: ['structured_outputs'] })
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
-let ledger: Map<string, Row>, results: Map<string, unknown>, budget: number, paid: ReturnType<typeof vi.fn>, handler: ReturnType<typeof createAIHandler>
-let writeResult: ReturnType<typeof vi.fn>, settleGate: ((row: Row, update: Row) => Promise<void>) | undefined
+let ledger: Map<string, Row>, results: Map<string, unknown>, budget: number, paid: Mock<(url: string, init: RequestInit) => Promise<Response>>, handler: ReturnType<typeof createAIHandler>
+let writeResult: Mock<(row: Row) => Promise<{ error: null | { code: string } }>>, settleGate: ((row: Row, update: Row) => Promise<void>) | undefined
 const request = (body: object, origin?: string, signal?: AbortSignal) => new Request('https://jove.example.test/functions/v1/ai', { method: 'POST', signal, headers: { 'Content-Type': 'application/json', ...(origin ? { Origin: origin } : {}) }, body: JSON.stringify(body) })
 const payload = (requestId = crypto.randomUUID()) => ({ action: 'evaluate', requestId, input: { kind: 'meaning', text: 'Please bring some water.', reference: 'Ask for water.' } })
 function context(): OwnerContext {
@@ -61,7 +61,7 @@ beforeEach(() => {
   settleGate = undefined
   writeResult = vi.fn(async (value: Row) => { results.set(String(value.request_id), value.result); return { error: null } })
   paid = vi.fn(async () => json({ model: 'fixture/strong', choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(evaluation) } }], usage: { total_tokens: 30, cost: 0.001 } }))
-  vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+  vi.stubGlobal('fetch', vi.fn((url: string, init: RequestInit = {}) => {
     if (url.includes('/models?')) return Promise.resolve(json({ data: [model('fixture/fast'), model('fixture/strong')] }))
     return paid(url, init)
   }))
@@ -92,7 +92,7 @@ describe('real provider adapter behind authenticated server handler', () => {
     expect(await response.json()).toMatchObject({ value: { ...evaluation, provenance: { provider: 'OpenRouter', model: 'fixture/strong' } } })
     expect(ledger.get(original.requestId)).toMatchObject({ actual_usd: 0, unit_name: 'logical-request', status: 'completed' })
     expect(ledger.get(`${original.requestId}:1`)).toMatchObject({ actual_usd: 0.001, status: 'completed' })
-    const body = JSON.parse(paid.mock.calls[0]![1].body)
+    const body = JSON.parse(String(paid.mock.calls[0]![1].body))
     expect(body.provider).toMatchObject({ data_collection: 'deny', max_price: { prompt: 1, completion: 2, request: 0 } })
     expect((await handler(request(original))).status).toBe(200)
     expect(paid).toHaveBeenCalledOnce()
@@ -117,7 +117,7 @@ describe('real provider adapter behind authenticated server handler', () => {
     const mp3 = new Uint8Array(4 * 417)
     for (let frame = 0; frame < 4; frame++) mp3.set([0xff, 0xfb, 0x90, 0x64], frame * 417)
     const original = { action: 'synthesize', requestId: crypto.randomUUID(), text: 'Hello, friend.' }
-    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+    const fetcher = vi.fn(async (url: string, init: RequestInit = {}) => {
       if (url.includes('/models?')) return json({ data: url.includes('output_modalities=speech') ? [speech] : [model('fixture/fast'), model('fixture/strong')] })
       return paid(url, init)
     })
@@ -199,7 +199,7 @@ describe('real provider adapter behind authenticated server handler', () => {
     expect(aiRequestSchema.safeParse(reading).success).toBe(true)
     expect(aiRequestSchema.safeParse({ ...reading, input: { ...reading.input, kind: 'x'.repeat(81) } }).success).toBe(false)
     expect((await handler(request(reading))).status).toBe(200)
-    const sent = JSON.parse(paid.mock.calls[0]![1].body)
+    const sent = JSON.parse(String(paid.mock.calls[0]![1].body))
     const data = JSON.parse(sent.messages.at(-1).content).untrustedData
     expect(data.kind).toBe(readingRubric.version)
     expect(JSON.parse(data.rubric)).toEqual(readingRubric)
