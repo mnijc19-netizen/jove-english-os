@@ -204,7 +204,11 @@ export class OpenRouterProvider {
           const key = await this.key(scoped)
           try { if (this.options.beforeRequest) await abortable(this.options.beforeRequest(requestPurpose), scoped) }
           catch { checkAbort(scoped); throw new ProviderError('BUDGET') }
-          const dispatchBody = this.options.beforeDispatch ? await abortable(this.options.beforeDispatch({ purpose: requestPurpose, model: model.id, path, body }, scoped), scoped) : body
+          // Apply to every chat attempt, including streaming/schema/model fallback.
+          // This is provider-policy filtering, not a promise of zero retention.
+          const routedBody = path === '/chat/completions'
+            ? { ...body, provider: { ...record(record(body).provider), data_collection: 'deny' } } : body
+          const dispatchBody = this.options.beforeDispatch ? await abortable(this.options.beforeDispatch({ purpose: requestPurpose, model: model.id, path, body: routedBody }, scoped), scoped) : routedBody
           checkAbort(scoped)
           current.dispatched = true
           const response = await fetch(`${API}${path}`, { method: 'POST', signal: scoped, credentials: 'omit', redirect: 'error', cache: 'no-store',

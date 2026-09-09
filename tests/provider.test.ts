@@ -122,7 +122,7 @@ describe('validated learning output, fallback and request accounting', () => {
     expect(result).toMatchObject({ accuracy: 0.7, fluency: null, comprehension: null, successfulChunks: ['check in'] })
     const body = bodyOf()
     expect(body.response_format).toMatchObject({ type: 'json_schema', json_schema: { strict: true, schema: { additionalProperties: false } } })
-    expect(body.provider).toEqual({ require_parameters: true })
+    expect(body.provider).toEqual({ require_parameters: true, data_collection: 'deny' })
     expect(body.tools).toBeUndefined(); expect(body.plugins).toBeUndefined()
     expect(body.messages[0].content).toContain('UNTRUSTED DATA')
     expect(JSON.parse(body.messages[1].content)).toEqual({ untrustedData: { kind: 'speaking text', text: messages[0]!.content, targets: ['check in'] } })
@@ -150,6 +150,7 @@ describe('validated learning output, fallback and request accounting', () => {
     models = models.map(model => ({ ...model, supported_parameters: [] }))
     await provider.evaluate({ kind: 'writing', text: 'Hello.' })
     expect(bodyOf().response_format).toBeUndefined()
+    expect(bodyOf().provider).toEqual({ data_collection: 'deny' })
     handler = () => completion('```json\n{"bad":true}\n```')
     await expect(provider.evaluate({ kind: 'writing', text: 'Hello.' })).rejects.toMatchObject({ code: 'INVALID_RESPONSE' })
   })
@@ -159,6 +160,8 @@ describe('validated learning output, fallback and request accounting', () => {
     await provider.evaluate({ kind: 'writing', text: 'Hello.' })
     expect(posts()).toHaveLength(2)
     expect(bodyOf(0).response_format.type).toBe('json_schema'); expect(bodyOf(1).response_format).toBeUndefined()
+    expect(bodyOf(0).provider).toEqual({ require_parameters: true, data_collection: 'deny' })
+    expect(bodyOf(1).provider).toEqual({ data_collection: 'deny' })
     expect(beforeRequest.mock.calls.map(([purpose]) => purpose)).toEqual(['evaluate', 'evaluate:schema-fallback'])
     expect(onUsage).toHaveBeenCalledTimes(2)
     expect(provider.takeNotices()).toEqual([{ kind: 'schema-fallback', purpose: 'evaluate', from: 'test/strong', to: 'test/strong' }])
@@ -183,6 +186,7 @@ describe('validated learning output, fallback and request accounting', () => {
     handler = () => ++count === 1 ? json({}, 404) : completion('Hello.')
     await expect(provider.chat(messages, context)).resolves.toBe('Hello.')
     expect(bodyOf(0).model).toBe('test/fast'); expect(bodyOf(1).model).toBe('test/strong')
+    expect([bodyOf(0).provider, bodyOf(1).provider]).toEqual([{ data_collection: 'deny' }, { data_collection: 'deny' }])
     expect(provider.takeNotices()[0]?.kind).toBe('model-fallback')
   })
   it('never silently substitutes dedicated audio or incompatible models', async () => {
@@ -190,12 +194,21 @@ describe('validated learning output, fallback and request accounting', () => {
     await expect(provider.transcribe(new Blob(['voice'], { type: 'audio/webm' }))).rejects.toMatchObject({ code: 'MODEL_UNAVAILABLE' })
     expect(posts()).toHaveLength(0)
   })
+  it('never relaxes data policy when both configured text routes are unavailable', async () => {
+    handler = () => json({}, 404)
+    await expect(provider.chat(messages, context)).rejects.toMatchObject({ status: 404 })
+    expect(posts()).toHaveLength(2)
+    expect([bodyOf(0).model, bodyOf(1).model]).toEqual(['test/fast', 'test/strong'])
+    expect([bodyOf(0).provider, bodyOf(1).provider]).toEqual([{ data_collection: 'deny' }, { data_collection: 'deny' }])
+    expect(settings.fastModel).toBe('test/fast')
+  })
   it('retries explicit 429 only once and rechecks budget', async () => {
     vi.useFakeTimers()
     handler = () => json({}, 429)
     const assertion = expect(provider.chat(messages, context)).rejects.toMatchObject({ code: 'RATE_LIMIT' })
     await vi.advanceTimersByTimeAsync(1000); await assertion
     expect(posts()).toHaveLength(2); expect(beforeRequest).toHaveBeenCalledTimes(2)
+    expect([bodyOf(0).provider, bodyOf(1).provider]).toEqual([{ data_collection: 'deny' }, { data_collection: 'deny' }])
   })
   it('a budget rejection stops an otherwise eligible retry', async () => {
     vi.useFakeTimers()
@@ -365,12 +378,25 @@ describe('explicit anchored rubric evaluation', () => {
 })
 
 describe('streaming completion contract', () => {
+  it('passes the same private routing policy through the server budget hook and ordinary chat dispatch', async () => {
+    handler = () => completion('Hello.')
+    const beforeDispatch = vi.fn(async ({ body }: { body: object }) => ({ ...body,
+      provider: { ...(body as { provider: object }).provider, max_price: { prompt: 1, completion: 2 } },
+    }))
+    provider = new OpenRouterProvider({ getKey: async () => 'test-credential', getSettings: () => settings, beforeDispatch })
+    await expect(provider.chat(messages, context)).resolves.toBe('Hello.')
+    expect(beforeDispatch).toHaveBeenCalledWith(expect.objectContaining({ path: '/chat/completions',
+      body: expect.objectContaining({ provider: { data_collection: 'deny' } }),
+    }), expect.any(AbortSignal))
+    expect(bodyOf().provider).toEqual({ data_collection: 'deny', max_price: { prompt: 1, completion: 2 } })
+  })
   it('handles fragmented UTF-8, CRLF, heartbeats, multiline data, repeated terminal usage and DONE', async () => {
     handler = () => sse(': OPENROUTER PROCESSING\r\n\r\n' + event(delta('Hi '))
       + 'data: {"choices":\r\ndata: [{"delta":{"content":"世界"},"finish_reason":null}]}\r\n\r\n'
       + event(delta('', 'stop')) + event({ ...delta('', 'stop'), usage: { total_tokens: 30, cost: 0.02 } }) + 'data: [DONE]\r\n\r\n', 1)
     const onDelta = vi.fn()
     await expect(provider.chat(messages, context, onDelta)).resolves.toBe('Hi 世界')
+    expect(bodyOf().provider).toEqual({ data_collection: 'deny' })
     expect(onDelta.mock.calls).toEqual([['Hi '], ['Hi 世界']])
     expect(onUsage).toHaveBeenCalledTimes(1)
     expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({ tokens: 30, cost: 0.02, purpose: 'chat' }))
@@ -472,6 +498,7 @@ describe('dedicated audio request bodies and safe retrieval', () => {
     ] } }] })
     await expect(provider.discover('Travel')).resolves.toEqual([{ title: 'Article', url: 'https://example.com/article', description: 'Excerpt' }])
     expect(bodyOf().plugins).toEqual([{ id: 'web', engine: 'exa', max_results: 3 }])
+    expect(bodyOf().provider).toEqual({ data_collection: 'deny' })
     expect(bodyOf().tools).toBeUndefined()
   })
   it.each(['javascript:alert(1)', 'file:///etc/passwd', 'https://name:password@example.com', 'http://127.0.0.1', 'http://2130706433', 'http://[::1]', 'http://localhost.', 'http://server.local', 'https://example.com:8080'])('rejects unsafe source %s', source => {
