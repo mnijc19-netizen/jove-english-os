@@ -16,6 +16,8 @@ export interface ContentAudioStore {
 }
 export interface ContentUsage { costUsd: number | null; units: number; unitName: string; provider: string; model: string }
 export interface ContentBudget {
+  /** Advisory read before large media I/O. Dispatch still requires atomic reserve below. */
+  checkAvailable?(input: { ownerId: string; maxCostUsd: number; signal: AbortSignal }): Promise<boolean>
   reserve(input: { ownerId: string; requestId: string; fingerprint: string; purpose: 'content-analysis' | 'content-stt'; maxCostUsd: number }):
     Promise<{ reservationId: string; allowed: boolean; acquired: boolean; replay?: boolean }>
   settle(input: { reservationId: string; status: 'completed' | 'uncertain'; usage: ContentUsage | null }): Promise<void>

@@ -370,8 +370,16 @@ async function providerCall<T extends { usage: ContentUsage }>(context: JobConte
     throw error
   }
 }
-async function getAudio(context: JobContext, item: PendingItem): Promise<ContentAudioInput['audio']> {
+async function getAudio(context: JobContext, item: PendingItem, purpose: 'content-analysis' | 'content-stt'): Promise<ContentAudioInput['audio']> {
   if (!context.audioStore) return fail('content-audio-storage-unconfigured')
+  // Metadata/transcripts can refresh while spending is paused. Do not download
+  // an episode or pull its private cached bytes just to discover a known denial.
+  // This read is advisory: a competing request can still consume the budget,
+  // so providerCall must retain its independent atomic dispatch reservation.
+  const budget = context.options.budget
+  if (budget?.checkAvailable && !await abortable(budget.checkAvailable({ ownerId: context.ownerId!,
+    maxCostUsd: purpose === 'content-analysis' ? context.options.costCeilings!.analysisUsd : context.options.costCeilings!.transcriptionUsd,
+    signal: context.controller.signal }), context.controller.signal)) fail('content-budget-denied-before-audio')
   await context.call('heartbeat')
   if (item.object_path && item.audio_sha256 && item.audio_mime) {
     const bytes = await context.audioStore.get(item.object_path)
@@ -425,7 +433,7 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
     if (!context.source.rights.transcribe) fail('transcription-rights-missing')
     const gate = budgetReady(context, 'content-stt')
     if (gate) fail(gate)
-    audio = await getAudio(context, item)
+    audio = await getAudio(context, item, 'content-stt')
     const requestFingerprint = await digest(JSON.stringify([item.revision, audio.sha256, context.options.transcriberVersion, context.sourcePolicyHash]))
     const requestId = `content-stt-${requestFingerprint}`
     const prepared = audio
@@ -479,7 +487,7 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
     context.summary.segmentsSaved++
     const gate = !context.options.analyzeAudio ? 'audio-analyzer-unconfigured' : budgetReady(context, 'content-analysis')
     if (gate) { itemGates.add(gate); continue }
-    audio ??= await getAudio(context, item)
+    audio ??= await getAudio(context, item, 'content-analysis')
     const requestFingerprint = await digest(JSON.stringify([candidate.id, audio.sha256, context.options.analyzerVersion, context.sourcePolicyHash]))
     const requestId = `content-a-${requestFingerprint}`
     const prepared = audio

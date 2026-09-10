@@ -21,6 +21,8 @@ node node_modules/supabase/dist/supabase.js functions list --project-ref <verifi
 
 Do not proceed past a failed command. Read back every current migration version, RLS policies and private `jove-recordings`/`jove-content-audio` buckets. Record function deployment versions and the source/bundle association. A successful functions build is not a deployment. Do not run destructive reset/seed commands remotely.
 
+The content budget preflight bundle requires `20260910115020_content_budget_preflight.sql` first. Verify the service-role-only, security-invoker `service_budget_available` RPC and its read-only paused/unknown-cost behavior before deploying functions. A missing RPC stops STT/screening media I/O; do not bypass it or raise owner budgets to hide a migration error. Preflight is not a replacement for the existing atomic paid-dispatch reservation.
+
 The entry point rejects conflicting target/routing environment overrides, pins `SUPABASE_PROJECT_ID` for child CLI processes, also passes the explicit project-ref to database commands, and disables implicit Vault updates during migration. It compares both local/remote migration lists with the current source set. This protects against a changed link or inherited target selecting another backend; do not replace it with a bare `--linked` mutation.
 
 ## 2. Configure production Auth and the single owner

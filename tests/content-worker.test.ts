@@ -478,6 +478,27 @@ describe('content worker state transitions and inspection boundary', () => {
       expect(result.nextGates.length).toBeGreaterThan(0)
     }
   })
+  it.each([true, false])('checks available budget before downloading or reading audio (publisher transcript: %s)', async hasTranscript => {
+    const opts = options()
+    opts.fetcher = fetcher(rss(hasTranscript))
+    const network = vi.fn(opts.fetcher)
+    opts.fetcher = network
+    opts.analyzeAudio = vi.fn(analyzer)
+    opts.transcribe = vi.fn(async () => { throw new Error('No STT dispatch expected') })
+    const checkAvailable = vi.fn(async () => false)
+    const reserve = vi.fn(opts.budget!.reserve)
+    opts.budget = Object.assign({ ...opts.budget!, reserve }, { checkAvailable })
+    const result = await runContentRefresh(opts)
+    expect(checkAvailable).toHaveBeenCalled()
+    expect(network.mock.calls.some(([request]) => request.role === 'audio')).toBe(false)
+    expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(0)
+    expect(opts.analyzeAudio).not.toHaveBeenCalled()
+    expect(opts.transcribe).not.toHaveBeenCalled()
+    expect(reserve).not.toHaveBeenCalled()
+    expect(opts.adminClient.items.size).toBeGreaterThan(0)
+    expect(result.eligibleSegments).toBe(0)
+    expect(result.nextGates).toContain('content-budget-denied-before-audio')
+  })
   it('saves work but does not call the provider when the budget is denied or needs reconciliation', async () => {
     for (const replay of [false, true]) {
       const opts = options()
@@ -488,6 +509,44 @@ describe('content worker state transitions and inspection boundary', () => {
       expect(result.eligibleSegments).toBe(0)
       expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
     }
+  })
+  it('fails closed before media I/O when the budget preflight is unavailable', async () => {
+    const opts = options(), network = vi.fn(opts.fetcher!)
+    opts.fetcher = network; opts.analyzeAudio = vi.fn(analyzer)
+    opts.budget!.checkAvailable = async () => { throw new GatewayError(503, 'CONTENT_BUDGET', 'Unavailable') }
+    const result = await runContentRefresh(opts)
+    expect(network.mock.calls.some(([request]) => request.role === 'audio')).toBe(false)
+    expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(0)
+    expect(opts.analyzeAudio).not.toHaveBeenCalled()
+    expect(result.eligibleSegments).toBe(0)
+  })
+  it('still reserves atomically after a successful advisory preflight', async () => {
+    const opts = options(), checkAvailable = vi.fn(async () => true)
+    const reserve = vi.fn(async () => ({ allowed: false, acquired: false, reservationId: 'competing-call' }))
+    opts.budget = { ...budget(), checkAvailable, reserve }; opts.analyzeAudio = vi.fn(analyzer)
+    await runContentRefresh(opts)
+    expect(checkAvailable).toHaveBeenCalledOnce(); expect(reserve).toHaveBeenCalledOnce()
+    expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
+    expect(opts.analyzeAudio).not.toHaveBeenCalled()
+  })
+  it('does not read retained private audio when the next run has a paused budget', async () => {
+    const opts = options(), store = opts.audioStore as ReturnType<typeof makeStore>
+    opts.analyzeAudio = vi.fn(analyzer)
+    const reserve = vi.fn(async () => ({ allowed: false, acquired: false, reservationId: 'no-dispatch' }))
+    opts.budget = { ...budget(), reserve }
+    await runContentRefresh(opts)
+    expect(store.blobs.size).toBe(1)
+    const retained = [...store.blobs.entries()].map(([path, bytes]) => [path, createHash('sha256').update(bytes).digest('hex')])
+    const get = vi.spyOn(store, 'get'), put = vi.spyOn(store, 'put'), network = vi.fn(opts.fetcher!)
+    const checkAvailable = vi.fn(async () => false)
+    opts.fetcher = network; opts.budget.checkAvailable = checkAvailable; reserve.mockClear()
+    const result = await runContentRefresh(opts)
+    expect(checkAvailable).toHaveBeenCalledOnce()
+    expect(get).not.toHaveBeenCalled(); expect(put).not.toHaveBeenCalled()
+    expect(network.mock.calls.some(([request]) => request.role === 'audio')).toBe(false)
+    expect(reserve).not.toHaveBeenCalled(); expect(opts.analyzeAudio).not.toHaveBeenCalled()
+    expect([...store.blobs.entries()].map(([path, bytes]) => [path, createHash('sha256').update(bytes).digest('hex')])).toEqual(retained)
+    expect(result.nextGates).toContain('content-budget-denied-before-audio')
   })
   it.each(['hash', 'interval', 'rights', 'text-only', 'no-lesson', 'unknown-rights'])('does not approve %s evidence', async kind => {
     const opts = options()
@@ -887,6 +946,22 @@ describe('real audio service contract (synthetic transport tests, not acoustic v
 })
 
 describe('authenticated content API and budget adapter', () => {
+  it.each([true, false])('uses an owner-pinned, cancellable read-only budget preflight: %s', async available => {
+    const abortSignal = vi.fn(async () => ({ data: available, error: null }))
+    const rpc = vi.fn(() => ({ abortSignal }))
+    const adapter = createContentBudget({ ownerId, admin: { rpc } } as unknown as OwnerContext)
+    const signal = new AbortController().signal
+    expect(await adapter.checkAvailable!({ ownerId, maxCostUsd: 0.5, signal })).toBe(available)
+    expect(rpc).toHaveBeenCalledExactlyOnceWith('service_budget_available', { owner_id: ownerId, estimated_usd: 0.5 })
+    expect(abortSignal).toHaveBeenCalledWith(signal)
+    await expect(adapter.checkAvailable!({ ownerId: 'different-owner', maxCostUsd: 0.5, signal })).rejects.toMatchObject({ status: 403 })
+    expect(rpc).toHaveBeenCalledOnce()
+  })
+  it.each([{ data: null, error: null }, { data: 'true', error: null }, { data: true, error: { code: 'PGRST202' } }])(
+    'refuses malformed or unavailable budget checks without assuming allowance', async result => {
+      const adapter = createContentBudget({ ownerId, admin: { rpc: () => ({ abortSignal: async () => result }) } } as unknown as OwnerContext)
+      await expect(adapter.checkAvailable!({ ownerId, maxCostUsd: 0.5, signal: new AbortController().signal })).rejects.toMatchObject({ code: 'CONTENT_BUDGET' })
+    })
   it('rebases only the exact private clip signature from internal Kong to the configured browser origin', () => {
     const config:Record<string,string>={SUPABASE_URL:'http://kong:8000',JOVE_PUBLIC_SUPABASE_URL:'http://127.0.0.1:55321'}
     const env=(key:string)=>config[key], path=`clips/${'a'.repeat(64)}/${'b'.repeat(64)}`

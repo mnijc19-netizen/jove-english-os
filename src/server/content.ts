@@ -22,6 +22,14 @@ const payload = z.discriminatedUnion('action', [
 export function createContentBudget(context: OwnerContext): ContentBudget {
   const owned = new Set<string>()
   return {
+    async checkAvailable(request) {
+      if (request.ownerId !== context.ownerId) throw new GatewayError(403, 'CONTENT_OWNER', 'Content belongs to a different owner.')
+      if (!Number.isFinite(request.maxCostUsd) || request.maxCostUsd <= 0 || request.maxCostUsd > 20)
+        throw new GatewayError(503, 'CONTENT_BUDGET', 'The content budget could not be checked.')
+      const result = await context.admin.rpc('service_budget_available', { owner_id: context.ownerId, estimated_usd: request.maxCostUsd }).abortSignal(request.signal)
+      if (result.error || typeof result.data !== 'boolean') throw new GatewayError(503, 'CONTENT_BUDGET', 'The content budget could not be checked.')
+      return result.data
+    },
     async reserve(request) {
       if (request.ownerId !== context.ownerId) throw new GatewayError(403, 'CONTENT_OWNER', 'Content belongs to a different owner.')
       const reservation = await reserve(context, request.requestId, request.fingerprint, 'content', request.maxCostUsd)
