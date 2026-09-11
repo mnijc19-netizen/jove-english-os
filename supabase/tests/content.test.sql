@@ -27,6 +27,30 @@ begin
     jsonb_build_object('expectedHash',repeat('b',64),'observedHash',repeat('b',64),'bodyHash',repeat('c',64))))));
   perform public.content_worker('ingest',base_args||jsonb_build_object('items',jsonb_build_array(jsonb_build_object('id',item_key,'revision',repeat('d',64),
     'episode',jsonb_build_object('guid','SYNTHETIC SQL TEST ONLY','sourceId',source_key)))));
+  -- Waiting for an allowance/provider is resumable even after a year of polling.
+  update public.content_items set attempts=1000 where id=item_key;
+  perform public.content_worker('finish-item',base_args||jsonb_build_object('status','awaiting-analysis','processVersion','long-running-fixture'));
+  if not exists(select 1 from public.content_items where id=item_key and attempts=1001 and status='awaiting-analysis') then
+    raise exception 'Long-lived content could not checkpoint';
+  end if;
+  response:=public.content_worker('pending',base_args||jsonb_build_object('canAnalyze',true,'processVersion','long-running-fixture'));
+  if jsonb_array_length(response) is distinct from 1 or response->0->>'id' is distinct from item_key then
+    raise exception 'Long-lived awaiting content could not resume';
+  end if;
+  perform public.content_worker('finish-item',base_args||jsonb_build_object('status','eligible','processVersion','long-running-fixture'));
+  if not exists(select 1 from public.content_items where id=item_key and attempts=1002 and status='eligible') then
+    raise exception 'Long-lived content could not finish after recovery';
+  end if;
+  begin
+    update public.content_items set attempts=-1 where id=item_key;
+    raise exception 'Negative content attempts accepted';
+  exception when check_violation then null; end;
+  -- The lifetime counter must not remove the ordinary six-attempt retry limit.
+  update public.content_items set status='retry',attempts=6,next_attempt_at=now()-interval '1 second' where id=item_key;
+  if jsonb_array_length(public.content_worker('pending',base_args||jsonb_build_object('canAnalyze',true))) is distinct from 0 then
+    raise exception 'Exhausted ordinary retry became pending';
+  end if;
+  update public.content_items set status='pending',attempts=0,next_attempt_at=now() where id=item_key;
   perform public.content_worker('asset',base_args||jsonb_build_object('sha256',repeat('a',64),'objectPath','episodes/'||item_key||'/'||repeat('a',64),'bytes',1048576,'mimeType','audio/wav'));
   if not exists(select 1 from public.content_audio_assets where item_id=item_key and state='preparing') then raise exception 'Upload reservation missing'; end if;
   perform public.content_worker('asset-ready',base_args||jsonb_build_object('sha256',repeat('a',64)));
