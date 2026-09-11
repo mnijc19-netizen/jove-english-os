@@ -440,6 +440,12 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
     const gate = budgetReady(context, 'content-stt')
     if (gate) fail(gate)
     audio = await getAudio(context, item, 'content-stt')
+    // A locally known decoder failure is not an uncertain paid provider result.
+    // Keep the saved source for recovery, but do not acquire a spending hold.
+    try {
+      contentAudioDuration(audio.bytes, audio.mimeType)
+      context.options.prepareTranscription?.(audio)
+    } catch { return fail('content-transcription-decoder-required') }
     const requestFingerprint = await digest(JSON.stringify([item.revision, audio.sha256, context.options.transcriberVersion, context.sourcePolicyHash]))
     const requestId = `content-stt-${requestFingerprint}`
     const prepared = audio
@@ -494,6 +500,11 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
     const gate = !context.options.analyzeAudio ? 'audio-analyzer-unconfigured' : budgetReady(context, 'content-analysis')
     if (gate) { itemGates.add(gate); continue }
     audio ??= await getAudio(context, item, 'content-analysis')
+    let window: ReturnType<typeof contentAudioWindow>
+    try { window = contentAudioWindow(audio.bytes, audio.mimeType, candidate.startSeconds, candidate.endSeconds) }
+    catch { return fail('content-clip-decoder-required') }
+    if (window.bytes.length > 10 * 1024 * 1024 || window.endSeconds - window.originSeconds > candidate.durationSeconds + 3)
+      fail('content-clip-decoder-required')
     const requestFingerprint = await digest(JSON.stringify([candidate.id, audio.sha256, context.options.analyzerVersion, context.sourcePolicyHash]))
     const requestId = `content-a-${requestFingerprint}`
     const prepared = audio
@@ -515,8 +526,6 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
     record = { ...record, analysis, inspection, artifact, objectPath: audio.objectPath, lesson: result.lesson ?? null, rightsRecord, quality, audioEvidence: result.audioEvidence }
     if (quality.status !== 'quarantined' && result.lesson) {
       const converted = toMaterial(candidate, assessmentContext, result.lesson, context.now())
-      const window = contentAudioWindow(audio.bytes, audio.mimeType, candidate.startSeconds, candidate.endSeconds)
-      if (window.bytes.length > 10 * 1024 * 1024 || window.endSeconds - window.originSeconds > candidate.durationSeconds + 3) fail('content-clip-decoder-required')
       if (Math.abs(window.originalDurationSeconds - result.audioDurationSeconds) > 0.05) fail('audio-container-duration-mismatch')
       const clipSha256 = await digest(window.bytes)
       const evidence = result.audioEvidence

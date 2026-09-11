@@ -77,6 +77,8 @@ export interface ContentRefreshOptions {
   audioStore?: ContentAudioStore
   analyzeAudio?: ContentAudioAnalyzer
   transcribe?: ContentTranscriber
+  /** Trusted, local-only media validation; must not dispatch a provider or mutate audio. */
+  prepareTranscription?: (audio: ContentAudioInput['audio']) => void
   budget?: ContentBudget
   ownerId?: string
   profile?: LearnerContentProfile

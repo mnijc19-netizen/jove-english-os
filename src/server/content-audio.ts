@@ -293,12 +293,17 @@ export function createContentAudioServices(input: { env: ServerEnvironment; fetc
         inspectedStartSeconds: start, inspectedEndSeconds: end, timingBasis: window?.timingBasis ?? 'complete-container', heard: result.heard },
       lesson: { ...result.lesson, evidenceId: response.id }, usage: response.usage }
   }
-  const transcribe: ContentTranscriber = async request => {
-    const duration = contentAudioDuration(request.audio.bytes, request.audio.mimeType)
+  function prepareTranscription(audio: Parameters<ContentTranscriber>[0]['audio']) {
+    const duration = contentAudioDuration(audio.bytes, audio.mimeType)
     // Bounded first-window recovery, not a purported complete long-episode transcript. The reference records this scope.
     const end = Math.min(duration, 600)
+    const window = routed ? contentAudioWindow(audio.bytes, audio.mimeType, 0, end) : null
+    if (window && window.bytes.length > 10 * 1024 * 1024) return error('CONTENT_AUDIO_INPUT_BOUNDARY')
+    return { duration, end, window }
+  }
+  const transcribe: ContentTranscriber = async request => {
+    const { duration, end, window } = prepareTranscription(request.audio)
     if (await contentEvidenceHash(request.audio.bytes) !== request.audio.sha256) return error('CONTENT_AUDIO_HASH')
-    const window = routed ? contentAudioWindow(request.audio.bytes, request.audio.mimeType, 0, end) : null
     const prepared = window ? { ...request.audio, bytes: window.bytes, mimeType: window.mimeType, sha256: await contentEvidenceHash(window.bytes) } : request.audio
     const response = await generate(prepared, JSON.stringify({ task: 'Transcribe actual English speech in this exact interval as complete sentence cues. Numeric absolute seconds, explicit startTime/endTime, no overlapping cues. Do not invent inaudible speech or translate. Preserve speaker changes. No captions or text are supplied as a substitute for audio.', startSeconds: 0, endSeconds: end }), sttSchema, request.signal)
     let prior = 0
@@ -309,7 +314,7 @@ export function createContentAudioServices(input: { env: ServerEnvironment; fetc
     return { audioSha256: request.audio.sha256, requestFingerprint: request.requestFingerprint, audioDurationSeconds: duration,
       transcriptJson: JSON.stringify({ version: '1.0.0', segments: response.value.segments }), provider: `${routed ? 'openrouter-native-audio' : 'google-gemini-audio'}/${model}`, evidenceId: response.id, usage: response.usage }
   }
-  return { analyzeAudio, transcribe, version, available: routed || Boolean(input.env('GEMINI_API_KEY')), async dispose() {
+  return { analyzeAudio, transcribe, prepareTranscription, version, available: routed || Boolean(input.env('GEMINI_API_KEY')), async dispose() {
     // Never list/delete unrelated provider files. Only exact files this invocation created, even after cancellation.
     let failed = 0
     for (const name of filesToDelete) try { const response = await call(`${providerOrigin}/v1beta/${name}`, { method: 'DELETE' }); await response.body?.cancel() } catch { failed++ }

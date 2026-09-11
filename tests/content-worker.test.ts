@@ -626,6 +626,45 @@ describe('content worker state transitions and inspection boundary', () => {
     expect(JSON.stringify(result)).not.toContain('Raw provider')
     expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
   })
+  it.each(['unsupported-analysis', 'out-of-range-analysis', 'unsupported-stt'])('rejects %s before reserving provider spend and retains saved work', async kind => {
+    const opts = options(), base = fetcher(rss(kind !== 'unsupported-stt'))
+    opts.fetcher = async request => request.role === 'audio' ? { ...await base(request),
+      body: kind === 'out-of-range-analysis' ? pcmFixture(10) : fixtureAudio.slice(),
+      contentType: kind === 'out-of-range-analysis' ? 'audio/wav' : 'audio/mp4' } : base(request)
+    opts.analyzeAudio = vi.fn(async () => { throw new Error('Unsupported media must not reach analysis') })
+    opts.transcribe = vi.fn(async () => { throw new Error('Unsupported media must not reach STT') })
+    const result = await runContentRefresh(opts)
+    expect(result.eligibleSegments).toBe(0)
+    expect(opts.analyzeAudio).not.toHaveBeenCalled()
+    expect(opts.transcribe).not.toHaveBeenCalled()
+    expect(events.filter(event => event.startsWith('budget-'))).toEqual([])
+    expect(opts.adminClient.calls.some(call => call.action === 'usage')).toBe(false)
+    expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
+    if (kind !== 'unsupported-stt') expect(opts.adminClient.records.size).toBe(1)
+    expect(result.nextGates).toContain(kind === 'unsupported-stt' ? 'content-transcription-decoder-required' : 'content-clip-decoder-required')
+  })
+  it('preflights the real routed STT media limit without a provider request or spending hold', async () => {
+    const opts = options(), base = fetcher(rss(false)), bytes = pcmFixture(700)
+    // Valid 350-second PCM container whose routed first-window payload exceeds10MiB.
+    const header = new DataView(bytes.buffer)
+    header.setUint32(24, 16000, true); header.setUint32(28, 32000, true)
+    const network = vi.fn(async () => { throw new Error('No network request is permitted in media preflight') })
+    const services = createContentAudioServices({ env: name => name === 'OPENROUTER_API_KEY' ? 'fixture-only' : undefined, fetcher: network })
+    opts.prepareTranscription = services.prepareTranscription
+    opts.transcribe = vi.fn(services.transcribe)
+    opts.fetcher = async request => request.role === 'audio' ? { ...await base(request), body: bytes } : base(request)
+    const result = await runContentRefresh(opts)
+    expect(result.nextGates).toContain('content-transcription-decoder-required')
+    expect(opts.transcribe).not.toHaveBeenCalled()
+    expect(network).not.toHaveBeenCalled()
+    expect(events.filter(event => event.startsWith('budget-'))).toEqual([])
+    expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
+    // A direct upload provider is not incorrectly constrained to routed inline limits.
+    const direct = createContentAudioServices({ env: name => name === 'GEMINI_API_KEY' ? 'fixture-only' : undefined, fetcher: network })
+    const audio = { bytes, mimeType: 'audio/wav', sha256: createHash('sha256').update(bytes).digest('hex'), objectPath: 'fixture' }
+    expect(() => direct.prepareTranscription(audio)).not.toThrow()
+    expect(network).not.toHaveBeenCalled()
+  })
   it('keeps spending at zero when the worker deadline expires before provider dispatch', async () => {
     // Keep real I/O/microtasks running, but advance the deadline only at an observed boundary.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
