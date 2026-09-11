@@ -451,6 +451,37 @@ describe('content worker state transitions and inspection boundary', () => {
     expect([...opts.adminClient.records.values()].every(row => row.status === 'quarantined')).toBe(true)
     expect(opts.adminClient.calls.some(call => call.action === 'clip')).toBe(false)
   })
+  it('normalizes a validated publisher audio/mp3 alias before storage and STT', async () => {
+    const opts = options(), base = fetcher(rss(false))
+    const frame = new Uint8Array(417); frame.set([255,251,144,0])
+    const mp3 = new Uint8Array(frame.length * 4000)
+    for (let i = 0; i < 4000; i++) mp3.set(frame, i * frame.length)
+    opts.fetcher = async request => request.role === 'audio' ? { ...await base(request), body: mp3, contentType: 'audio/mp3' } : base(request)
+    opts.transcribe = vi.fn(async request => ({ audioSha256: request.audio.sha256, requestFingerprint: request.requestFingerprint,
+      audioDurationSeconds: contentAudioDuration(request.audio.bytes, request.audio.mimeType), provider: 'fixture-stt', evidenceId: 'TEST-STT', usage,
+      transcriptJson: JSON.stringify({ version: '1.0.0', segments: phrases.map((body, i) => ({ startTime: i * 10, endTime: (i + 1) * 10, body })) }) }))
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toEqual([])
+    expect(opts.transcribe).toHaveBeenCalledOnce()
+    const audio = vi.mocked(opts.transcribe).mock.calls[0]![0].audio
+    expect(audio.mimeType).toBe('audio/mpeg')
+    expect(Buffer.compare(Buffer.from(audio.bytes), Buffer.from(mp3))).toBe(0)
+    expect(audio.sha256).toBe(createHash('sha256').update(mp3).digest('hex'))
+    expect(Buffer.compare(Buffer.from(await opts.audioStore!.get(audio.objectPath)), Buffer.from(mp3))).toBe(0)
+    expect(opts.adminClient.calls.find(call => call.action === 'asset')?.args.mimeType).toBe('audio/mpeg')
+    expect(result.eligibleSegments).toBe(0) // No actual acoustic approval in this transport fixture.
+  })
+  it.each(['audio/mp3', 'text/html', 'application/octet-stream'])('never accepts HTML as publisher audio (%s)', async contentType => {
+    const opts = options(), base = fetcher(rss(false))
+    opts.fetcher = async request => request.role === 'audio'
+      ? { ...await base(request), body: new TextEncoder().encode('<html>This is not MP3 audio.</html>'), contentType } : base(request)
+    opts.transcribe = vi.fn(async () => { throw new Error('No provider dispatch expected') })
+    const result = await runContentRefresh(opts)
+    expect(result.nextGates).toContain('invalid-audio-response')
+    expect(opts.transcribe).not.toHaveBeenCalled()
+    expect(opts.adminClient.calls.some(call => call.action === 'asset')).toBe(false)
+    expect(events).not.toContain('budget-reserved')
+  })
   it('records bounded clip capacity before upload and ready before eligible publication', async () => {
     const opts=options();opts.analyzeAudio=analyzer
     await runContentRefresh(opts)
@@ -822,6 +853,22 @@ describe('scheduled rights revalidation', () => {
 })
 
 describe.runIf(process.env.JOVE_CONTENT_AUDIO_PROBE==='1')('actual public audio bytes and current policy evidence (no paid analysis)',()=>{
+  it('validates the exact VOA Plan B publisher MP3 alias and measured clip', async () => {
+    const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === 'voa-everyday-grammar')!
+    const candidate = VOA_LESSON_CANDIDATES.find(row => row.id === 'voa-lle-plan-b')!
+    const response = await fetchContentResource({ source, role: 'audio', url: candidate.audioUrl,
+      exactUrls: [candidate.audioUrl], maxBytes: 8 * 1024 * 1024, timeoutMs: 20000 })
+    expect(response.status).toBe(200)
+    expect(['audio/mp3', 'audio/mpeg']).toContain(response.contentType)
+    const duration = contentAudioDuration(response.body, 'audio/mpeg')
+    expect(duration).toBeGreaterThan(90)
+    const clip = contentAudioWindow(response.body, 'audio/mpeg', 30, 90)
+    expect(clip.originSeconds).toBeLessThanOrEqual(30)
+    expect(clip.endSeconds).toBeGreaterThanOrEqual(90)
+    console.info(JSON.stringify({ actualVoaAliasProbe: true, sourceBytes: response.body.length,
+      receivedMime: response.contentType, containerDurationSeconds: duration, clipBytes: clip.bytes.length,
+      sourceSha256: createHash('sha256').update(response.body).digest('hex'), acousticallyReviewed: false }))
+  }, 30000)
   it('binds six exact VOA everyday scene pages to their real audio and frame clips without promoting candidates', async () => {
     const results = await auditVoaLessonCandidates({ probeAudio: true })
     expect(results).toHaveLength(6)

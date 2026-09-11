@@ -6,7 +6,7 @@ import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, VOA_LESSON_CANDIDATES,
 import type { ContentSource, FeedEpisode, LearnerContentProfile, TimedTranscript, TranscriptReference } from '../content/pipeline-types'
 import { ContentNetworkError, fetchContentResource, type ContentFetchResult } from './content-network'
 import { CONTENT_POLICY_EVIDENCE, revalidateContentRights } from './content-rights'
-import { contentAudioWindow } from './content-audio'
+import { contentAudioDuration, contentAudioWindow } from './content-audio'
 import { auditVoaLessonCandidates, type VoaCandidateAudit } from './content-voa'
 import type {
   ContentAdminClient, ContentAudioInput, ContentAudioResult, ContentAudioStore, ContentRefreshOptions, ContentRefreshSummary,
@@ -387,13 +387,19 @@ async function getAudio(context: JobContext, item: PendingItem, purpose: 'conten
     return { bytes, sha256: item.audio_sha256, mimeType: item.audio_mime, objectPath: item.object_path }
   }
   const response = await context.fetch(item.episode.audioUrl, 'audio', context.maxAudio)
-  if (response.status !== 200 || !['audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/aac'].includes(response.contentType) || !response.body.length) fail('invalid-audio-response')
+  // VOA serves genuine MPEG frames as audio/mp3. Canonicalize only this verified
+  // alias; neither an extension nor an MP3 header alone admits arbitrary bytes.
+  const mimeType = response.contentType === 'audio/mp3' ? 'audio/mpeg' : response.contentType
+  if (response.status !== 200 || !['audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/aac'].includes(mimeType) || !response.body.length) fail('invalid-audio-response')
+  if (response.contentType === 'audio/mp3') {
+    try { contentAudioDuration(response.body, mimeType) } catch { fail('invalid-audio-response') }
+  }
   const sha256 = await digest(response.body)
   const objectPath = `episodes/${item.id}/${sha256}`
-  await context.call('asset', { itemId: item.id, revision: item.revision, sha256, objectPath, bytes: response.body.length, mimeType: response.contentType })
-  await context.audioStore.put(objectPath, response.body, response.contentType)
+  await context.call('asset', { itemId: item.id, revision: item.revision, sha256, objectPath, bytes: response.body.length, mimeType })
+  await context.audioStore.put(objectPath, response.body, mimeType)
   await context.call('asset-ready', { itemId: item.id, revision: item.revision, sha256 })
-  return { bytes: response.body, sha256, objectPath, mimeType: response.contentType }
+  return { bytes: response.body, sha256, objectPath, mimeType }
 }
 function validateRightsRecord(result: ContentAudioResult, context: JobContext): ContentRightsRecord {
   const rights = result.rightsRecord
