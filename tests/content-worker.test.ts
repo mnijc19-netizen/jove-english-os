@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, OPEN_YAP_SAMPLE_SOURCE, VOA_LESSON_CANDIDATES } from '../src/content/sources'
 import type { ContentSource, FeedEpisode, Inspection, ObservationEvidence, TimedTranscript } from '../src/content/pipeline-types'
 import { createContentFetcher, fetchContentResource, isPublicContentAddress, type ContentFetcher } from '../src/server/content-network'
-import { parseRssFeed, parseOpenYapPreviewManifest, validateSourceUrl } from '../src/content/pipeline'
+import { parseRssFeed, parseOpenYapPreviewManifest, resolveEpisodeAudioUrl, validateSourceUrl } from '../src/content/pipeline'
 import { CONTENT_POLICY_EVIDENCE, extractContentPolicy, revalidateContentRights } from '../src/server/content-rights'
 import { contentAudioDuration, contentAudioWindow, createContentAudioServices } from '../src/server/content-audio'
 import { auditVoaLessonCandidates, type VoaCandidateAudit } from '../src/server/content-voa'
@@ -471,6 +471,28 @@ describe('content worker state transitions and inspection boundary', () => {
     expect(opts.adminClient.calls.find(call => call.action === 'asset')?.args.mimeType).toBe('audio/mpeg')
     expect(result.eligibleSegments).toBe(0) // No actual acoustic approval in this transport fixture.
   })
+  it('fetches the same HPR episode through its registered CDN while retaining the original enclosure', async () => {
+    const opts = options(), source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === 'hacker-public-radio')!
+    const original = 'https://hub.hackerpublicradio.org/ccdn.php?filename=/eps/hpr4721/hpr4721.mp3'
+    const cdn = 'https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4721/hpr4721.mp3'
+    const feed = rss().replace(`${origin}/episode/one`, 'https://hackerpublicradio.org/eps/hpr4721/index.html')
+      .replace(`${origin}/audio/one.mp3`, original).replace(`${origin}/transcript/one.vtt`, 'https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4721/hpr4721.srt')
+    opts.sources = [source]
+    opts.rightsPolicies = source.rights.evidenceUrls.map(url => ({ ...rightsPolicies[0]!, url }))
+    opts.analyzeAudio = analyzer
+    const base = fetcher(feed), audioRequests: string[] = []
+    opts.fetcher = async request => {
+      if (request.role === 'audio') {
+        audioRequests.push(request.url)
+        if (request.url !== cdn) throw new Error('Rotating mirror route must not be used')
+      }
+      return base(request)
+    }
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toEqual([])
+    expect(audioRequests).toEqual([cdn])
+    expect([...opts.adminClient.items.values()][0]?.episode).toMatchObject({ audioUrl: original })
+  })
   it.each(['audio/mp3', 'text/html', 'application/octet-stream'])('never accepts HTML as publisher audio (%s)', async contentType => {
     const opts = options(), base = fetcher(rss(false))
     opts.fetcher = async request => request.role === 'audio'
@@ -853,6 +875,21 @@ describe('scheduled rights revalidation', () => {
 })
 
 describe.runIf(process.env.JOVE_CONTENT_AUDIO_PROBE==='1')('actual public audio bytes and current policy evidence (no paid analysis)',()=>{
+  it('fetches an exact HPR enclosure from the registered stable CDN with measured Ogg timing', async () => {
+    const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === 'hacker-public-radio')!
+    const feed = await fetchContentResource({ source, role: 'feed', url: source.feedUrl, maxBytes: 12 * 1024 * 1024, timeoutMs: 20000 })
+    expect(feed.status).toBe(200)
+    const episode = parseRssFeed(new TextDecoder().decode(feed.body), source, { now: Date.now() }).episodes.find(row => row.pageUrl === 'https://hackerpublicradio.org/eps/hpr4725/index.html')!
+    expect(episode).toBeDefined()
+    const url = resolveEpisodeAudioUrl(episode, source)
+    expect(url).toBe('https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4725/hpr4725.ogg')
+    const audio = await fetchContentResource({ source, role: 'audio', url, exactUrls: [url], maxBytes: 32 * 1024 * 1024, timeoutMs: 20000 })
+    expect(audio.status).toBe(200)
+    expect(audio.contentType).toBe('audio/ogg')
+    expect(audio.dnsPinning).toBe('pinned-node-lookup')
+    expect(contentAudioDuration(audio.body, audio.contentType)).toBeGreaterThan(30)
+    expect(episode.audioUrl).toContain('https://hub.hackerpublicradio.org/ccdn.php?filename=')
+  }, 45000)
   it('validates the exact VOA Plan B publisher MP3 alias and measured clip', async () => {
     const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === 'voa-everyday-grammar')!
     const candidate = VOA_LESSON_CANDIDATES.find(row => row.id === 'voa-lle-plan-b')!

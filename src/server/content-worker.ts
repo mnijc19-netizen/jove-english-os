@@ -1,6 +1,6 @@
 import {
   assessSegment, bindAnalysis, createAnalysisRequest, contentTranscriptUrn, ContentPipelineError, parseRssFeed, parseOpenYapPreviewManifest,
-  parseTimedTranscript, PIPELINE_LIMITS, rightsReasons, sliceTranscript, textMetrics, toMaterial, validateSourceUrl,
+  parseTimedTranscript, PIPELINE_LIMITS, resolveEpisodeAudioUrl, rightsReasons, sliceTranscript, textMetrics, toMaterial, validateSourceUrl,
 } from '../content/pipeline'
 import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, VOA_LESSON_CANDIDATES, type ContentLifeTask } from '../content/sources'
 import type { ContentSource, FeedEpisode, LearnerContentProfile, TimedTranscript, TranscriptReference } from '../content/pipeline-types'
@@ -386,7 +386,7 @@ async function getAudio(context: JobContext, item: PendingItem, purpose: 'conten
     if (bytes.byteLength > context.maxAudio || await digest(bytes) !== item.audio_sha256) fail('saved-audio-hash-mismatch')
     return { bytes, sha256: item.audio_sha256, mimeType: item.audio_mime, objectPath: item.object_path }
   }
-  const response = await context.fetch(item.episode.audioUrl, 'audio', context.maxAudio)
+  const response = await context.fetch(resolveEpisodeAudioUrl(item.episode, context.source), 'audio', context.maxAudio)
   // VOA serves genuine MPEG frames as audio/mp3. Canonicalize only this verified
   // alias; neither an extension nor an MP3 header alone admits arbitrary bytes.
   const mimeType = response.contentType === 'audio/mp3' ? 'audio/mpeg' : response.contentType

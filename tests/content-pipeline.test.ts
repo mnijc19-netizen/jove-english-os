@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   assessSegment, bindAnalysis, contentFingerprint, contentTranscriptUrn, createAnalysisRequest, INSPECTION_FACTS,
   nextSourcePoll, parseRssFeed, parseOpenYapPreviewManifest, parseVoaLessonPage, parseTimedTranscript, PIPELINE_LIMITS, rightsReasons,
-  sliceTranscript, textMetrics, toMaterial, transcriptFormat, unknownInspection, validateSourceUrl,
+  resolveEpisodeAudioUrl, sliceTranscript, textMetrics, toMaterial, transcriptFormat, unknownInspection, validateSourceUrl,
 } from '../src/content/pipeline'
 import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, CONTENT_SOURCES, OPEN_YAP_SAMPLE_SOURCE, VOA_LESSON_CANDIDATES } from '../src/content/sources'
 import type {
@@ -194,6 +194,32 @@ describe('bounded RSS and publisher transcript discovery', () => {
     expect(parseRssFeed(xml, hpr, { now }).episodes[0]?.transcripts[0]).toMatchObject({
       url: 'https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4721/hpr4721.srt', origin: 'publisher-template',
     })
+  })
+  it.each(['mp3', 'ogg', 'opus'])('uses the registered HPR CDN for the same episode %s without rewriting provenance', extension => {
+    const hpr = CONTENT_SOURCES.find(s => s.id === 'hacker-public-radio')!
+    const xml = rss(itemXml().replace(`${origin}/episodes/one`, 'https://hackerpublicradio.org/eps/hpr4721/index.html')
+      .replace(`${origin}/audio/one.mp3`, `https://hub.hackerpublicradio.org/ccdn.php?filename=/eps/hpr4721/hpr4721.${extension}`))
+    const episode = parseRssFeed(xml, hpr, { now }).episodes[0]!
+    const before = structuredClone(episode)
+    expect(resolveEpisodeAudioUrl(episode, hpr)).toBe(`https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4721/hpr4721.${extension}`)
+    expect(episode).toEqual(before)
+  })
+  it('fails closed on mismatched HPR episodes and unregistered replacement hosts', () => {
+    const hpr = CONTENT_SOURCES.find(s => s.id === 'hacker-public-radio')!
+    const episode = parseRssFeed(rss(itemXml().replace(`${origin}/episodes/one`, 'https://hackerpublicradio.org/eps/hpr4721/index.html')
+      .replace(`${origin}/audio/one.mp3`, 'https://hub.hackerpublicradio.org/ccdn.php?filename=/eps/hpr4721/hpr4721.mp3')), hpr, { now }).episodes[0]!
+    expect(() => resolveEpisodeAudioUrl({ ...episode, pageUrl: 'https://hackerpublicradio.org/eps/hpr9999/index.html' }, hpr)).toThrow('audio-episode-mismatch')
+    expect(() => resolveEpisodeAudioUrl({ ...episode, sourceId: 'other-source' }, hpr)).toThrow('audio-source-mismatch')
+    expect(() => resolveEpisodeAudioUrl({ ...episode, audioUrl: `${episode.audioUrl}&redirect=https://untrusted.org` }, hpr)).toThrow('url-not-allowlisted')
+    expect(() => resolveEpisodeAudioUrl(episode, { ...hpr, urls: { ...hpr.urls, audio: hpr.urls.audio.slice(0, 1) } })).toThrow('url-not-allowlisted')
+    expect(() => resolveEpisodeAudioUrl({ ...episode, audioUrl: 'https://archive.org/download/hpr4721/hpr4721.mp3' }, hpr)).toThrow('url-not-allowlisted')
+  })
+  it('does not rewrite other publishers or already registered direct URLs', () => {
+    const original = source(), episode = parseRssFeed(rss(), original, { now }).episodes[0]!
+    expect(resolveEpisodeAudioUrl(episode, original)).toBe(episode.audioUrl)
+    const hpr = CONTENT_SOURCES.find(s => s.id === 'hacker-public-radio')!
+    const direct = 'https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4721/hpr4721.ogg'
+    expect(resolveEpisodeAudioUrl({ ...episode, sourceId: hpr.id, audioUrl: direct }, hpr)).toBe(direct)
   })
 })
 

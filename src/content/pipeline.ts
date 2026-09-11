@@ -82,6 +82,20 @@ export function validateSourceUrl(raw: string, rules?: readonly UrlRule[]): stri
   return url.href
 }
 
+/** Keep the feed enclosure as provenance; choose only the registered same-file
+ * HPR CDN for transport instead of its rotating, sometimes unregistered mirrors. */
+export function resolveEpisodeAudioUrl(episode: FeedEpisode, source: ContentSource): string {
+  if (episode.sourceId !== source.id) fail('audio-source-mismatch')
+  const original = validateSourceUrl(episode.audioUrl, source.urls.audio)
+  const url = new URL(original)
+  if (source.id !== 'hacker-public-radio' || url.origin !== 'https://hub.hackerpublicradio.org' || url.pathname !== '/ccdn.php') return original
+  const file = url.searchParams.get('filename') ?? ''
+  const match = /^\/eps\/(hpr\d{4,6})\/\1\.(?:ogg|mp3|opus)$/u.exec(file)
+  if (!match || validateSourceUrl(episode.pageUrl, source.urls.page) !== `https://hackerpublicradio.org/eps/${match[1]}/index.html`)
+    fail('audio-episode-mismatch')
+  return validateSourceUrl(`https://hpr.nyc3.cdn.digitaloceanspaces.com${file}`, source.urls.audio)
+}
+
 function decodeXml(value: string): string {
   // Only the five predefined XML entities and bounded numeric references. No DTD or custom expansion.
   const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
