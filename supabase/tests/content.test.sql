@@ -1,7 +1,7 @@
 -- Run inside caller-owned BEGIN/ROLLBACK against dedicated Jove only. No persistent fixture approval.
 do $$
 declare source_key text := 'test-content-sql-'||replace(gen_random_uuid()::text,'-','');
-  owner_key uuid := gen_random_uuid(); run_key uuid := gen_random_uuid(); response jsonb; config jsonb;
+  owner_key uuid := gen_random_uuid(); run_key uuid := gen_random_uuid(); response jsonb; pending_response jsonb; config jsonb;
   item_key text:=repeat('d',64); segment_key text:='authentic-'||repeat('e',64); clip jsonb; record jsonb; base_args jsonb;
 begin
   insert into auth.users(id) values(owner_key);
@@ -33,8 +33,8 @@ begin
   if not exists(select 1 from public.content_items where id=item_key and attempts=1001 and status='awaiting-analysis') then
     raise exception 'Long-lived content could not checkpoint';
   end if;
-  response:=public.content_worker('pending',base_args||jsonb_build_object('canAnalyze',true,'processVersion','long-running-fixture'));
-  if jsonb_array_length(response) is distinct from 1 or response->0->>'id' is distinct from item_key then
+  pending_response:=public.content_worker('pending',base_args||jsonb_build_object('canAnalyze',true,'processVersion','long-running-fixture'));
+  if jsonb_array_length(pending_response) is distinct from 1 or pending_response->0->>'id' is distinct from item_key then
     raise exception 'Long-lived awaiting content could not resume';
   end if;
   perform public.content_worker('finish-item',base_args||jsonb_build_object('status','eligible','processVersion','long-running-fixture'));

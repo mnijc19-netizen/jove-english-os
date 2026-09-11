@@ -1335,6 +1335,8 @@ describe.runIf(localEnabled)('content SQL acceptance assertions fail closed on a
     ["response->>'rightsDue' is distinct from 'true'", "Initial rights check not required"],
     ["response->>'acquired' is distinct from 'false'", "Lease allowed concurrent worker"],
     ["(public.content_worker('profile',jsonb_build_object('ownerId',owner_key))->>'targetDifficulty')::numeric", "Profile did not persist"],
+    ['jsonb_array_length(pending_response)', 'Long-lived awaiting content could not resume'],
+    ["pending_response->0->>'id'", 'Long-lived awaiting content could not resume'],
     ['jsonb_array_length(response)', 'Finished episode not scheduled for deletion'],
     ["(public.content_worker('playback',jsonb_build_object('ownerId',owner_key,'segmentId',segment_key))->'clip'->>'audioSha256')", 'Clip depended on deleted episode'],
   ])('rejects missing and JSON-null output at %s', (expression, expected) => {
