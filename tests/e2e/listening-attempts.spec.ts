@@ -452,7 +452,10 @@ async function lookupSettings(page: Page, ai: boolean, chineseHelp: boolean) {
         ...get.result.value, chineseHelp: chinese,
         ...(enabled ? { fastModel: "test/lookup", strongModel: "test/lookup" } : {}),
       } });
-      if (enabled) tx.objectStore("secrets").put({ id: "openrouter", value: "test-lookup-placeholder-not-a-real-key" });
+      if (enabled) {
+        tx.objectStore("secrets").put({ id: "openrouter", value: "test-lookup-placeholder-not-a-real-key" });
+        tx.objectStore("secrets").put({ id: "provider-mode", value: "byok" });
+      }
       tx.oncomplete = () => { database.close(); resolve(); };
       tx.onerror = () => { database.close(); reject(tx.error); };
     };

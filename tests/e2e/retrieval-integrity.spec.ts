@@ -79,7 +79,7 @@ async function delayedEvaluation(page: Page) {
   await put(page, "settings", [{ id: "main", value: {
     ...defaultSettings, fastModel: "test/retrieval", strongModel: "test/retrieval", sttModel: "test/transcription",
   } }]);
-  await put(page, "secrets", [{ id: "openrouter", value: "test-key-not-real" }]);
+  await put(page, "secrets", [{ id: "openrouter", value: "test-key-not-real" }, { id: "provider-mode", value: "byok" }]);
   await page.reload();
   await expect(page.locator("#rephrase")).toBeEnabled();
   return { requests, release, transcriptions, transcript, releaseSTT };

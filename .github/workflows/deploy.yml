@@ -56,7 +56,7 @@ jobs:
         env:
           JOVE_LOCAL_BROWSER_TEST: '1'
           JOVE_SYNC_BROWSERS: chromium,webkit
-      - run: npm run test:e2e
+      - run: npm run test:e2e -- --max-failures=1
         id: browser-regression
       - name: Preserve isolated browser failure evidence
         if: failure() && steps.browser-regression.outcome == 'failure'
