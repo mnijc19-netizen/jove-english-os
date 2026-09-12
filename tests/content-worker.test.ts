@@ -914,19 +914,25 @@ describe('scheduled rights revalidation', () => {
 })
 
 describe.runIf(process.env.JOVE_CONTENT_AUDIO_PROBE==='1')('actual public audio bytes and current policy evidence (no paid analysis)',()=>{
-  it('fetches an exact HPR enclosure from the registered stable CDN with measured Ogg timing', async () => {
+  it('fetches an exact HPR MP3 enclosure from the registered stable CDN and extracts measured frames', async () => {
     const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === 'hacker-public-radio')!
     const feed = await fetchContentResource({ source, role: 'feed', url: source.feedUrl, maxBytes: 12 * 1024 * 1024, timeoutMs: 20000 })
     expect(feed.status).toBe(200)
     const episode = parseRssFeed(new TextDecoder().decode(feed.body), source, { now: Date.now() }).episodes.find(row => row.pageUrl === 'https://hackerpublicradio.org/eps/hpr4725/index.html')!
     expect(episode).toBeDefined()
     const url = resolveEpisodeAudioUrl(episode, source)
-    expect(url).toBe('https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4725/hpr4725.ogg')
+    expect(url).toBe('https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4725/hpr4725.mp3')
     const audio = await fetchContentResource({ source, role: 'audio', url, exactUrls: [url], maxBytes: 32 * 1024 * 1024, timeoutMs: 20000 })
     expect(audio.status).toBe(200)
-    expect(audio.contentType).toBe('audio/ogg')
+    expect(audio.contentType).toBe('audio/mpeg')
     expect(audio.dnsPinning).toBe('pinned-node-lookup')
     expect(contentAudioDuration(audio.body, audio.contentType)).toBeGreaterThan(30)
+    const clip = contentAudioWindow(audio.body, audio.contentType, 30, 90)
+    expect(clip.mimeType).toBe('audio/mpeg')
+    expect(clip.originSeconds).toBeLessThanOrEqual(30)
+    expect(clip.endSeconds).toBeGreaterThanOrEqual(90)
+    expect(clip.bytes.length).toBeLessThan(10 * 1024 * 1024)
+    expect(clip.endSeconds - clip.originSeconds).toBeLessThan(63)
     expect(episode.audioUrl).toContain('https://hub.hackerpublicradio.org/ccdn.php?filename=')
   }, 45000)
   it('validates the exact VOA Plan B publisher MP3 alias and measured clip', async () => {

@@ -195,6 +195,13 @@ describe('bounded RSS and publisher transcript discovery', () => {
       url: 'https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4721/hpr4721.srt', origin: 'publisher-template',
     })
   })
+  it('uses the publisher-listed MP3 feed for playable timed excerpts without losing the Ogg URL policy', () => {
+    const hpr = CONTENT_SOURCES.find(s => s.id === 'hacker-public-radio')!
+    expect(hpr.feedUrl).toBe('https://hackerpublicradio.org/hpr_rss.php')
+    expect(validateSourceUrl(hpr.feedUrl, hpr.urls.feed)).toBe(hpr.feedUrl)
+    expect(validateSourceUrl('https://hackerpublicradio.org/hpr_ogg_rss.php', hpr.urls.feed)).toBe('https://hackerpublicradio.org/hpr_ogg_rss.php')
+    expect(validateSourceUrl('https://hub.hackerpublicradio.org/ccdn.php?filename=/eps/hpr4721/hpr4721.ogg', hpr.urls.audio)).toContain('hpr4721.ogg')
+  })
   it.each(['mp3', 'ogg', 'opus'])('uses the registered HPR CDN for the same episode %s without rewriting provenance', extension => {
     const hpr = CONTENT_SOURCES.find(s => s.id === 'hacker-public-radio')!
     const xml = rss(itemXml().replace(`${origin}/episodes/one`, 'https://hackerpublicradio.org/eps/hpr4721/index.html')

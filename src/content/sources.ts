@@ -81,13 +81,13 @@ const RSS_CONTENT_SOURCES: readonly ContentSource[] = [
   },
   {
     id: 'hacker-public-radio', name: 'Hacker Public Radio', enabled: true,
-    feedUrl: 'https://hackerpublicradio.org/hpr_ogg_rss.php', homepage: 'https://hackerpublicradio.org',
+    feedUrl: 'https://hackerpublicradio.org/hpr_rss.php', homepage: 'https://hackerpublicradio.org',
     publisher: 'Hacker Public Radio and the credited episode host',
     topics: ['Technology', 'Everyday life', 'Culture'], declaredLanguage: 'en-US',
     cadenceHours: 24, verifiedAt,
     rights: rights('Hacker Public Radio and episode host', 'https://hackerpublicradio.org/contribute.html'),
     urls: {
-      feed: [rule('https://hackerpublicradio.org', '/hpr_ogg_rss.php')],
+      feed: [rule('https://hackerpublicradio.org', '/hpr_rss.php'), rule('https://hackerpublicradio.org', '/hpr_ogg_rss.php')],
       page: [rule('https://hackerpublicradio.org', '/eps/')],
       audio: [{ ...rule('https://hub.hackerpublicradio.org', '/ccdn.php'), query: 'hpr-file' }, rule('https://hpr.nyc3.cdn.digitaloceanspaces.com', '/eps/'), rule('https://alpha.nl.eu.mirror.hackerpublicradio.org', '/eps/')],
       transcript: [{ ...rule('https://hub.hackerpublicradio.org', '/ccdn.php'), query: 'hpr-file' }, rule('https://hpr.nyc3.cdn.digitaloceanspaces.com', '/eps/'), rule('https://alpha.nl.eu.mirror.hackerpublicradio.org', '/eps/')],
@@ -103,7 +103,8 @@ const RSS_CONTENT_SOURCES: readonly ContentSource[] = [
       'The publisher CDN also returned HTTP 200 for hpr4721 SRT and Ogg. The narrow SRT fallback uses that stable CDN path; other mirror redirects still require allowlist checks.',
       'Hosts discuss hobbies and personal experiences as well as technology. Accent and English ability vary. Publisher explicitly does not review the complete audio; all candidates require our screening.',
       'The example is a wedding recording with quotations and imperfect captions, useful as a discovery example only, NOT an approved lesson. Prefer Podcasting 2.0 references if later introduced.',
-      'Rotating mirrors outside the explicit rules are blocked. Ogg playback on target WebKit and any authorized transcode need backend/browser verification.',
+      '2026-09-12: the publisher syndication page lists hpr_rss.php as its two-week MP3 feed. Prefer publisher MP3 enclosures for actual MPEG-frame clipping; preserve older Ogg URL rules and original enclosure provenance. This changes delivery format, not speaker quality or rights approval.',
+      'Use only the registered same-episode CDN for transport; rotating unregistered mirrors remain blocked. Long Ogg packet clipping still needs a decoder and is not claimed by the MP3 path.',
     ],
   },
   {
