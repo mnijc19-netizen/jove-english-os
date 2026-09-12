@@ -243,7 +243,11 @@ export function contentMp3PrefixWindow(prefix: ContentMp3Prefix, start: number, 
   })
   if (frames !== coverage.frameCount || format.rate !== coverage.sampleRate || format.samples !== coverage.samplesPerFrame ||
       Math.abs(duration - coverage.endSeconds) > 0.00000001) return error('CONTENT_AUDIO_PREFIX_COVERAGE')
-  const window = contentAudioWindow(bytes, prefix.mimeType, start, end)
+  if (!Number.isFinite(end) || end > coverage.endSeconds) return error('CONTENT_AUDIO_INTERVAL')
+  // Coverage uses total samples/rate; the legacy window sums frame durations.
+  // Those can differ by sub-nanoseconds. Validate the declared bound first,
+  // then normalize only the already verified endpoint, never add audio frames.
+  const window = contentAudioWindow(bytes, prefix.mimeType, start, Math.min(end, duration))
   // Use a sufficiently large legal metadata frame even for very low-bitrate
   // source frames. CRC and padding are absent in this NEW zero-audio frame.
   const header = window.bytes.slice(0, 4)
@@ -265,7 +269,7 @@ export function contentMp3PrefixWindow(prefix: ContentMp3Prefix, start: number, 
     output[marker + 16 + percent] = Math.min(255, Math.floor(256 * (metadata.size + boundaries[index]!.offset) / output.length))
   }
   output.set(window.bytes, metadata.size)
-  return { ...window, bytes: output, timingBasis: 'mpeg-frame-count-with-xing-v1' }
+  return { ...window, bytes: output, originalDurationSeconds: coverage.endSeconds, timingBasis: 'mpeg-frame-count-with-xing-v1' }
 }
 
 /** Explicit discriminator preserves existing analyzed clips and their hashes.
@@ -456,7 +460,10 @@ export function createContentAudioServices(input: { env: ServerEnvironment; fetc
     })
   }
   const analyzeAudio: ContentAudioAnalyzer = async request => {
-    const duration = contentAudioDuration(request.audio.bytes, request.audio.mimeType), start = request.interval.startSeconds, end = request.interval.endSeconds
+    // The versioned window below validates coverage against actual frames before
+    // provider I/O. Preserve legacy full-container timing for old acquisitions.
+    const duration = request.audio.coverage?.endSeconds ?? contentAudioDuration(request.audio.bytes, request.audio.mimeType)
+    const start = request.interval.startSeconds, end = request.interval.endSeconds
     if (start < 0 || end > duration || end - start < 30 || end - start > 120) return error('CONTENT_AUDIO_INTERVAL')
     if (await contentEvidenceHash(request.audio.bytes) !== request.audio.sha256) return error('CONTENT_AUDIO_HASH')
     // Both providers inspect exactly the immutable bytes later persisted for phone playback.
@@ -499,7 +506,7 @@ export function createContentAudioServices(input: { env: ServerEnvironment; fetc
     })
   }
   function prepareTranscription(audio: Parameters<ContentTranscriber>[0]['audio']) {
-    const duration = contentAudioDuration(audio.bytes, audio.mimeType)
+    const duration = audio.coverage?.endSeconds ?? contentAudioDuration(audio.bytes, audio.mimeType)
     // Bounded first-window recovery, not a purported complete long-episode transcript. The reference records this scope.
     const end = Math.min(duration, 600)
     const window = routed || audio.coverage !== undefined ? contentStoredAudioWindow(audio, 0, end) : null

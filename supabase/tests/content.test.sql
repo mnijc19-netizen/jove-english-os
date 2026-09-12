@@ -116,6 +116,20 @@ begin
   base:=jsonb_build_object('sourceId',sk,'runId',rk,'itemId',ik,'revision',rev);
   perform public.content_worker('ingest',base||jsonb_build_object('items',jsonb_build_array(jsonb_build_object('id',ik,'revision',rev,
     'episode',jsonb_build_object('guid','SYNTHETIC PREFIX TEST ONLY','sourceId',sk)))));
+  r:=public.content_audio_work('order',jsonb_build_object('sourceIds',jsonb_build_array(sk,'unseen-work-fixture')));
+  if r is distinct from jsonb_build_array(sk,'unseen-work-fixture') then raise exception 'First work order discarded input priority'; end if;
+  perform public.content_audio_work('begin',base);
+  r:=public.content_audio_work('order',jsonb_build_object('sourceIds',jsonb_build_array(sk,'unseen-work-fixture')));
+  if r is distinct from jsonb_build_array('unseen-work-fixture',sk) then raise exception 'Audio work did not advance source rotation'; end if;
+  if (select last_audio_work_at from public.content_sources where id=sk) is null then raise exception 'Audio work was not checkpointed'; end if;
+  begin
+    perform public.content_audio_work('begin',base||jsonb_build_object('runId',gen_random_uuid()));
+    raise exception 'Expired worker changed source rotation';
+  exception when serialization_failure then null; end;
+  begin
+    perform public.content_audio_work('order',jsonb_build_object('sourceIds',jsonb_build_array(sk,sk)));
+    raise exception 'Duplicate sources bypassed work order validation';
+  exception when invalid_parameter_value then null; end;
   c:=jsonb_build_object('version','mpeg-prefix-v1','networkKind','prefix','receivedBytes',417000,'sourceBytes',10000000,
     'sourceByteStart',0,'sourceByteEndExclusive',417000,'startSeconds',0,'endSeconds',1000.0*1152/44100,
     'frameCount',1000,'sampleRate',44100,'samplesPerFrame',1152,'removedMetadataFrame',null,'discardedTrailingBytes',0,
@@ -203,6 +217,8 @@ do $$ begin
   begin perform 1 from public.content_request_intents; raise exception 'Browser read private request bindings';
   exception when insufficient_privilege then null; end;
   begin perform public.content_request_intent('{}'); raise exception 'Browser created provider request intent';
+  exception when insufficient_privilege then null; end;
+  begin perform public.content_audio_work('order','{"sourceIds":[]}'); raise exception 'Browser reordered provider work';
   exception when insufficient_privilege then null; end;
   begin perform public.install_content_schedule('https://abcdefghijklmnopqrst.supabase.co/functions/v1/content','jove-content-job-test'); raise exception 'Browser installed schedule';
   exception when insufficient_privilege then null; end;

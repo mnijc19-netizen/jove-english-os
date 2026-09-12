@@ -102,6 +102,7 @@ class MemoryRpc implements ContentAdminClient {
   recommendations: { id: string; request_id: string; segment_id: string; lesson: EligibleContentLesson }[] = []
   calls: { action: string; args: Record<string, unknown> }[] = []
   intents = new Map<string, string>()
+  audioWork = new Map<string, number>()
   etag: string | null = null
   config = testSource()
   locked = false
@@ -125,6 +126,12 @@ class MemoryRpc implements ContentAdminClient {
   }
   async rpc(_name: string, input?: Record<string, unknown>): Promise<Awaited<ReturnType<ContentAdminClient['rpc']>>> {
     const action = input!.action as string, args = input!.args as Record<string, unknown>
+    if (_name === 'content_audio_work') {
+      this.calls.push({ action: `audio-work-${action}`, args: structuredClone(args) })
+      if (action === 'order') return { data: [...args.sourceIds as string[]].sort((a, b) => (this.audioWork.get(a) ?? 0) - (this.audioWork.get(b) ?? 0)), error: null }
+      this.audioWork.set(args.sourceId as string, this.calls.length)
+      return { data: {}, error: null }
+    }
     if (_name === 'content_request_intent') {
       const scope = JSON.stringify([args.itemId, args.revision, args.purpose, args.scope])
       const binding = JSON.stringify([args.requestId, args.fingerprint, args.audioSha256])
@@ -162,8 +169,9 @@ class MemoryRpc implements ContentAdminClient {
       }
       data = { changed }
     } else if (action === 'poll') this.etag = args.etag as string | null
-    else if (action === 'pending') data = [...this.items.values()].filter(item => ['pending', 'retry'].includes(item.status) || args.canAnalyze && item.status === 'awaiting-analysis')
-      .map(item => ({ ...item, saved_segments: [...this.records.values()] }))
+    else if (action === 'pending') data = [...this.items.values()].filter(item => (item.episode as FeedEpisode).sourceId === args.sourceId &&
+      (['pending', 'retry'].includes(item.status) || args.canAnalyze && item.status === 'awaiting-analysis'))
+      .map(item => ({ ...item, saved_segments: [...this.records.values()].filter(record => record.segment.sourceId === args.sourceId) }))
     else if (action === 'checkpoint') item!.transcript = args.transcript as TimedTranscript
     else if (action === 'asset') { item!.object_path = args.objectPath as string; item!.audio_sha256 = args.sha256 as string; item!.audio_mime = args.mimeType as string
       item!.audio_acquisition_version = args.acquisitionVersion as 'complete-v1' | 'mpeg-prefix-v1' | undefined
@@ -1271,6 +1279,41 @@ describe('versioned prefix acquisition and recovery (synthetic media, not human 
       expect(events).not.toContain('budget-reserved')
     } finally { release(); await running; vi.useRealTimers() }
   })
+  it('bounds each prefix job to one audio item and resumes different sources at the same clock time', async () => {
+    const { opts } = setup()
+    opts.sources = [testSource('batch-a'), testSource('batch-b'), testSource('batch-c')]
+    opts.analyzeAudio = analyzer
+    const original = opts.fetcher!
+    opts.fetcher = request => original({ ...request, etag: null })
+    for (let count = 1; count <= 3; count++) {
+      const result = await runContentRefresh(opts)
+      expect(result.errors).toEqual([])
+      expect(result.itemsProcessed).toBe(1)
+      expect(result.sourcesClaimed).toBe(1)
+      expect(opts.adminClient.audioWork.size).toBe(count)
+    }
+    expect([...opts.adminClient.audioWork.keys()]).toEqual(planContentSourceRefresh({ sources: opts.sources, limit: 3, now }).sourceIds)
+    expect(opts.adminClient.calls.filter(call => call.action === 'finish-item')).toHaveLength(3)
+    expect([...opts.adminClient.items.values()].every(item => item.attempts === 1)).toBe(true)
+  })
+  it('moves past a failed source without counting unstarted sources as failed attempts', async () => {
+    const { opts } = setup()
+    opts.sources = [testSource('batch-failure-a'), testSource('batch-failure-b')]
+    opts.analyzeAudio = analyzer
+    const original = opts.fetcher!
+    let failedSource = ''
+    opts.fetcher = async request => {
+      if (request.role === 'audio' && !failedSource) { failedSource = request.source.id; throw Error('Synthetic source unavailable') }
+      return original({ ...request, etag: null })
+    }
+    expect((await runContentRefresh(opts)).errors).toHaveLength(1)
+    expect(opts.adminClient.items.size).toBe(1)
+    const next = await runContentRefresh(opts)
+    expect(next.errors).toEqual([])
+    expect(next.sourcesClaimed).toBe(1)
+    expect(next.refreshSelection.sourceIds[0]).not.toBe(failedSource)
+    expect([...opts.adminClient.items.values()].every(item => item.attempts === 1)).toBe(true)
+  })
 })
 
 describe('bounded MP3 prefix frame preparation (not acoustic or decoder certification)', () => {
@@ -1306,6 +1349,22 @@ describe('bounded MP3 prefix frame preparation (not acoustic or decoder certific
     expect(result.bytes).not.toBe(bytes)
     expect(result.coverage.endSeconds).toBe(3456 / 44100)
     expect(result.coverage.networkKind).toBe('complete')
+  })
+  it.each([[3, 14], [3, 9], [0, 1]])('preserves exact full-prefix coverage at the 8MiB boundary for MPEG %i bitrate %i', (version, bitrate) => {
+    const single = frame(version, bitrate), bytes = new Uint8Array(8 * 1024 * 1024)
+    for (let offset = 0; offset < bytes.length; offset += single.length)
+      bytes.set(single.subarray(0, Math.min(single.length, bytes.length - offset)), offset)
+    const prefix = prepare(bytes), end = prefix.coverage.endSeconds
+    const clip = contentMp3PrefixWindow(prefix, 0, end)
+    expect(clip.originalDurationSeconds).toBe(end)
+    expect(clip.endSeconds).toBeCloseTo(end, 8)
+    expect(Buffer.compare(Buffer.from(clip.bytes.subarray(clip.bytes.length - prefix.bytes.length)), Buffer.from(prefix.bytes))).toBe(0)
+    const audio = { ...prefix, sha256: createHash('sha256').update(prefix.bytes).digest('hex'), objectPath: 'synthetic-only' }
+    const services = createContentAudioServices({ env: name => name === 'OPENROUTER_API_KEY' ? 'fixture-only' : undefined })
+    const stt = services.prepareTranscription(audio)
+    expect(stt.duration).toBe(end); expect(stt.end).toBe(end)
+    expect(stt.window!.originalDurationSeconds).toBe(end)
+    expect(() => contentMp3PrefixWindow(prefix, 0, end + 0.000000001)).toThrow()
   })
   it.each([3, 2, 0])('creates a clip-specific Xing header and seek table without rewriting MPEG %i speech frames', version => {
     const first = frame(version), bytes = join(...Array.from({ length: 3000 }, (_, i) => frame(version, i % 2 ? 9 : 5)))
@@ -1718,11 +1777,12 @@ function sql(statement: string): string {
 function sqlLiteral(value: string): string { return `'${value.replace(/'/gu, "''")}'` }
 function postgresAdmin(): ContentAdminClient {
   return { async rpc(name, input) {
-    if (!['content_worker', 'content_request_intent'].includes(name)) throw new Error('Unexpected RPC')
+    if (!['content_worker', 'content_request_intent', 'content_audio_work'].includes(name)) throw new Error('Unexpected RPC')
     try {
       const args = sqlLiteral(JSON.stringify(input!.args))
       const output = sql(name === 'content_request_intent' ? `select public.content_request_intent(${args}::jsonb);` :
-        `select public.content_worker(${sqlLiteral(input!.action as string)},${args}::jsonb);`)
+        name === 'content_audio_work' ? `select public.content_audio_work(${sqlLiteral(input!.action as string)},${args}::jsonb);` :
+          `select public.content_worker(${sqlLiteral(input!.action as string)},${args}::jsonb);`)
       return { data: JSON.parse(output), error: null }
     } catch { return { data: null, error: { code: 'SQL_TEST_ERROR' } } }
   } }

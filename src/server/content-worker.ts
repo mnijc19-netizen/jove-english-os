@@ -52,7 +52,7 @@ export interface OwnerContentTaskInventory {
   nextExpectedSupplyAt: null; estimatedDaysRemaining: null
 }
 export interface ContentRefreshSelection {
-  sourceIds: string[]; basis: 'life-task-deficit-and-source-rotation-v1'; notices: string[]
+  sourceIds: string[]; basis: 'life-task-deficit-and-source-rotation-v1' | 'least-recent-audio-work-with-inventory-ties-v1'; notices: string[]
 }
 export interface ContentTaskRefreshSummary extends ContentRefreshSummary {
   inventory: OwnerContentTaskInventory | null
@@ -93,8 +93,8 @@ const codeOf = (error: unknown): string => error instanceof ContentWorkerError |
   ? error.code : 'content-operation-failed'
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 
-async function rpc<T>(client: ContentAdminClient, action: string, args: Record<string, unknown>): Promise<T> {
-  const response = await client.rpc('content_worker', { action, args })
+async function rpc<T>(client: ContentAdminClient, action: string, args: Record<string, unknown>, name = 'content_worker'): Promise<T> {
+  const response = await client.rpc(name, { action, args })
   if (response.error) fail(response.error.code === '40001' ? 'content-lease-or-revision-lost' : response.error.code === '53000' ? 'content-storage-capacity-required' : 'content-persistence-failed')
   return response.data as T
 }
@@ -332,6 +332,7 @@ interface JobContext {
   options: ContentTaskRefreshOptions; source: ContentSource; sourcePolicyHash: string; ownerId: string | null
   summary: ContentRefreshSummary; now: () => number; controller: AbortController
   audioStore: ContentAudioStore | null; maxAudio: number; maxSegments: number; processVersion: string
+  beginAudioWork: (item: PendingItem) => Promise<void>
   call: <T>(action: string, args?: Record<string, unknown>) => Promise<T>
   fetch: (url: string, role: 'feed' | 'audio' | 'transcript', maxBytes: number, etag?: string | null, modified?: string | null, audioPrefixBytes?: number) => Promise<ContentFetchResult>
 }
@@ -415,6 +416,7 @@ async function getAudio(context: JobContext, item: PendingItem, purpose: 'conten
   if (budget?.checkAvailable && !await abortable(budget.checkAvailable({ ownerId: context.ownerId!,
     maxCostUsd: purpose === 'content-analysis' ? context.options.costCeilings!.analysisUsd : context.options.costCeilings!.transcriptionUsd,
     signal: context.controller.signal }), context.controller.signal)) fail('content-budget-denied-before-audio')
+  await context.beginAudioWork(item)
   await context.call('heartbeat')
   if (item.object_path && item.audio_sha256 && item.audio_mime) {
     const bytes = await context.audioStore.get(item.object_path)
@@ -645,6 +647,9 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
   const maxItems = bound(options.limits?.feedItems, 25, 100)
   const maxAudio = bound(options.limits?.audioBytes, 64 * 1024 * 1024, 64 * 1024 * 1024)
   if (options.audioAcquisition !== undefined && !['complete-v1', 'mpeg-prefix-v1'].includes(options.audioAcquisition)) fail('invalid-audio-acquisition')
+  const maxAudioItems = options.audioAcquisition === 'mpeg-prefix-v1' || options.limits?.audioItemsPerRun !== undefined
+    ? bound(options.limits?.audioItemsPerRun, 1, 10) : Infinity
+  const audioWorkItems = new Set<string>()
   const runMs = bound(options.limits?.runMs, 90_000, 120_000)
   if (options.voaPilot && !['metadata', 'probe-audio', 'disabled'].includes(options.voaPilot)) fail('invalid-voa-pilot-mode')
   const summary: ContentTaskRefreshSummary = { runId: crypto.randomUUID(), sourcesClaimed: 0, sourcesSkipped: 0, feedsFetched: 0,
@@ -671,8 +676,16 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
   try {
     await updateInventory()
     summary.refreshSelection = planContentSourceRefresh({ sources: suppliedSources, inventory: summary.inventory, limit: maxSources, now: now() })
+    if (Number.isFinite(maxAudioItems)) {
+      const requested = summary.refreshSelection.sourceIds
+      const ordered = await abortable(rpc<string[]>(options.adminClient, 'order', { sourceIds: requested }, 'content_audio_work'), controller.signal)
+      if (!Array.isArray(ordered) || ordered.length !== requested.length || new Set(ordered).size !== ordered.length ||
+        ordered.some(id => !requested.includes(id))) fail('invalid-content-work-order')
+      summary.refreshSelection = { ...summary.refreshSelection, sourceIds: ordered, basis: 'least-recent-audio-work-with-inventory-ties-v1' }
+    }
     const sources = summary.refreshSelection.sourceIds.map(id => suppliedSources.find(source => source.id === id)!)
     for (const configuredSource of sources) {
+      if (audioWorkItems.size >= maxAudioItems) { summary.nextGates.push('content-audio-batch-deferred'); break }
       const source = structuredClone(configuredSource)
       if (controller.signal.aborted) { summary.nextGates.push('content-run-timeout-or-cancelled'); break }
       const policyHash = await digest(JSON.stringify(source.rights))
@@ -682,6 +695,15 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
       const call = <T>(action: string, args: Record<string, unknown> = {}) => rpc<T>(options.adminClient, action, { ...args, sourceId: source.id, runId: summary.runId })
       const context: JobContext = { options, source, sourcePolicyHash: policyHash, ownerId: owner.ownerId, summary, now, controller, audioStore,
         maxAudio, maxSegments, processVersion, call,
+        async beginAudioWork(item) {
+          if (!Number.isFinite(maxAudioItems) || audioWorkItems.has(item.id)) return
+          if (audioWorkItems.size >= maxAudioItems) fail('content-audio-batch-deferred')
+          await abortable(rpc(options.adminClient, 'begin', { sourceId: source.id, runId: summary.runId,
+            itemId: item.id, revision: item.revision }, 'content_audio_work'), controller.signal)
+          // Count attempted work even if parsing/storage/provider later fails.
+          // DB time orders the next run; a failed source cannot monopolize it.
+          audioWorkItems.add(item.id)
+        },
         async fetch(url, role, maxBytes, etag, modified, audioPrefixBytes) {
           const response = await (options.fetcher ?? fetchContentResource)({ url, source, role, maxBytes, etag, lastModified: modified, audioPrefixBytes, signal: controller.signal })
           // Injection is a trusted transport seam, but cannot bypass the caller's URL/size boundary accidentally.
@@ -763,6 +785,7 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
         const pending = pendingWindow.sort((a, b) => Number(b.episode.guid.startsWith('voa-pilot:')) - Number(a.episode.guid.startsWith('voa-pilot:')))
           .slice(0, maxEpisodes)
         for (const item of pending) {
+          if (audioWorkItems.size >= maxAudioItems) { summary.nextGates.push('content-audio-batch-deferred'); break }
           try { await processItem(context, item) }
           catch (error) {
             const code = codeOf(error)

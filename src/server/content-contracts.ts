@@ -96,7 +96,9 @@ export interface ContentRefreshOptions {
   costCeilings?: { analysisUsd: number; transcriptionUsd: number }
   /** Legacy HTTPS transcript reference origin only. New STT persists a non-fetchable database URN and needs no origin. */
   transcriptOrigin?: string
-  limits?: { sources?: number; episodesPerSource?: number; segmentsPerEpisode?: number; feedItems?: number; audioBytes?: number; runMs?: number }
+  limits?: { sources?: number; episodesPerSource?: number; segmentsPerEpisode?: number; feedItems?: number; audioBytes?: number; runMs?: number
+    /** Whole media items across all sources, not provider calls. Prefix mode defaults to one. */
+    audioItemsPerRun?: number }
   forcePoll?: boolean
   signal?: AbortSignal
 }
