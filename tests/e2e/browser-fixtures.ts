@@ -7,6 +7,7 @@ type CaptureMode = "native" | "synthetic" | "denied" | "missing";
 declare global {
   interface Window {
     __joveMediaTrace: Record<string, string | number | boolean | null>[];
+    __joveInputTrace: Record<string, string | number | boolean | null>[];
     __joveCaptureProbe: {
       nativeRecorder: typeof MediaRecorder;
       nativeWorklet: typeof AudioWorkletNode;
@@ -79,7 +80,23 @@ export const test = base.extend<{
   browserChecks: [async ({ page, captureMode }, use, testInfo) => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
-    await page.addInitScript(({ mode, forcePcm }) => {
+    await page.addInitScript(({ mode, forcePcm, observeInputs }) => {
+      window.__joveInputTrace = [];
+      if (observeInputs) {
+        // Observe only metadata in isolated synthetic learning journeys. Do not
+        // synthesize input/focus, keep element references or retain typed text.
+        for (const type of ['focusin', 'focusout', 'beforeinput', 'input', 'change', 'compositionstart', 'compositionend']) {
+          document.addEventListener(type, event => {
+            const target = event.target;
+            if (!(target instanceof HTMLTextAreaElement)) return;
+            window.__joveInputTrace.push({ type, id: target.id, length: target.value.length,
+              composing: !!(target as HTMLTextAreaElement & { composing?: boolean }).composing,
+              trusted: event.isTrusted, disabled: target.disabled, at: performance.now(),
+              activeTag: document.activeElement?.tagName ?? null, activeId: document.activeElement?.id ?? null });
+            if (window.__joveInputTrace.length > 150) window.__joveInputTrace.shift();
+          }, true);
+        }
+      }
       // Observe native events/calls without advancing the clock or replacing playback.
       // Exclude URL query strings so a future signed source cannot enter reports.
       window.__joveMediaTrace = [];
@@ -135,13 +152,19 @@ export const test = base.extend<{
           return destination.stream;
         },
       });
-    }, { mode: captureMode, forcePcm: testInfo.project.name === "chromium-pcm" });
+    }, { mode: captureMode, forcePcm: testInfo.project.name === "chromium-pcm",
+      observeInputs: testInfo.project.name.startsWith('webkit-') && testInfo.file.endsWith('longitudinal.spec.ts') });
     await use();
     if (!page.isClosed()) {
       if (testInfo.status !== testInfo.expectedStatus)
         await testInfo.attach("native-media-events", {
           body: JSON.stringify(await page.evaluate(() => ({
             events: window.__joveMediaTrace,
+            inputEvents: window.__joveInputTrace,
+            inputState: Array.from(document.querySelectorAll('textarea')).map(input => ({
+              id: input.id, length: input.value.length, disabled: input.disabled,
+              composing: !!(input as HTMLTextAreaElement & { composing?: boolean }).composing,
+            })),
             generatedSourceContexts: window.__joveCaptureProbe?.contexts.map(context => ({
               state: context.state, currentTime: context.currentTime, sampleRate: context.sampleRate,
             })),

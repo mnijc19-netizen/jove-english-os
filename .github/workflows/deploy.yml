@@ -57,6 +57,19 @@ jobs:
           JOVE_LOCAL_BROWSER_TEST: '1'
           JOVE_SYNC_BROWSERS: chromium,webkit
       - run: npm run test:e2e
+        id: browser-regression
+      - name: Preserve isolated browser failure evidence
+        if: failure() && steps.browser-regression.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-failure-${{ github.sha }}-${{ github.run_attempt }}
+          # Only synthetic, fresh-context E2E output. Never upload .work, local
+          # Auth integration state, environment files or an owner's browser.
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 3
+          if-no-files-found: error
       - run: npm audit --audit-level=high
       - name: Verify commit-bound production backend readiness
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
