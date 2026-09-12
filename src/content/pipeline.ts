@@ -481,7 +481,7 @@ async function digest(text: string): Promise<string> {
   return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
 }
 const endsSentence = (text: string) => /[.!?]["'”’)]*$/u.test(text) && !/\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|etc)\.$/iu.test(text)
-function sentenceUnits(cues: TranscriptCue[], maxGap: number): { units: TimedSentence[]; quarantined: SliceBatch['quarantined'] } {
+function sentenceUnits(cues: TranscriptCue[], maxGap: number, coverage?: SliceOptions['audioCoverage']): { units: TimedSentence[]; quarantined: SliceBatch['quarantined'] } {
   const units: TimedSentence[] = []
   const quarantined: SliceBatch['quarantined'] = []
   let pending: TimedSentence | null = null
@@ -490,6 +490,14 @@ function sentenceUnits(cues: TranscriptCue[], maxGap: number): { units: TimedSen
     pending = null
   }
   cues.forEach((cue, index) => {
+    // A cue straddling the retained audio end is wholly unavailable: no word
+    // interpolation or punctuation from unheard speech may finish a sentence.
+    // Iterate the original array so retained cue indices/reference stay intact.
+    if (coverage && cue.endSeconds > coverage.endSeconds) {
+      discard()
+      quarantined.push({ startSeconds: cue.startSeconds, endSeconds: cue.endSeconds, code: 'outside-audio-coverage' })
+      return
+    }
     if (pending && cue.startSeconds - pending.endSeconds > maxGap) discard()
     if (!pending) pending = { ...cue, cueIndices: [index], timing: 'cue-boundaries', internalSentenceTiming: 'not-needed' }
     else {
@@ -529,6 +537,9 @@ export async function sliceTranscript(episode: FeedEpisode, transcript: TimedTra
   } else validateSourceUrl(transcript.reference.url, source.urls.transcript)
   if (!episode.transcripts.some(ref => ref.url === transcript.reference.url && ref.format === transcript.format)) fail('transcript-provenance-mismatch')
   validateCues(transcript.cues, episode.durationSeconds ?? undefined)
+  const coverage = options.audioCoverage
+  if (coverage !== undefined && (!coverage || coverage.startSeconds !== 0 || !finite(coverage.endSeconds) ||
+      coverage.endSeconds <= 0 || coverage.endSeconds > 600)) fail('invalid-audio-coverage')
   const min = options.minSeconds ?? 30
   const max = options.maxSeconds ?? 120
   const target = options.targetSeconds ?? 60
@@ -536,7 +547,7 @@ export async function sliceTranscript(episode: FeedEpisode, transcript: TimedTra
   const limit = options.maxSegments ?? PIPELINE_LIMITS.segments
   if (![min, max, target, gap, options.retrievedAt].every(finite) || min < 30 || max > 120 || min > target || target > max ||
       gap < 0 || gap > 10 || !Number.isInteger(limit) || limit < 1 || limit > PIPELINE_LIMITS.segments || options.retrievedAt <= 0) fail('invalid-slice-options')
-  const { units, quarantined } = sentenceUnits(transcript.cues, gap)
+  const { units, quarantined } = sentenceUnits(transcript.cues, gap, coverage)
   const segments: ContentSegment[] = []
   const episodeFingerprint = await digest(JSON.stringify([source.id, episode.guid]))
   for (let first = 0; first < units.length;) {

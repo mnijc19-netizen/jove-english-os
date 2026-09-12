@@ -1154,7 +1154,7 @@ describe('bounded MP3 prefix frame preparation (not acoustic or decoder certific
     const prefix = prepare(bytes), before = prefix.bytes.slice(), raw = contentAudioWindow(prefix.bytes, prefix.mimeType, 5, 25)
     const clip = contentMp3PrefixWindow(prefix, 5, 25), head = frame(version)
     const marker = 4 + (version === 3 ? 32 : 17), view = new DataView(clip.bytes.buffer)
-    expect(prefix.bytes).toEqual(before)
+    expect(Buffer.compare(Buffer.from(prefix.bytes), Buffer.from(before))).toBe(0)
     expect(Buffer.compare(Buffer.from(clip.bytes.subarray(head.length)), Buffer.from(raw.bytes))).toBe(0)
     expect(new TextDecoder().decode(clip.bytes.subarray(marker, marker + 4))).toBe('Xing')
     expect(view.getUint32(marker + 4)).toBe(7)

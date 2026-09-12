@@ -108,6 +108,9 @@ export interface ContentSegment {
 export interface SliceOptions {
   targetSeconds?: number; minSeconds?: number; maxSeconds?: number; maxGapSeconds?: number
   maxSegments?: number; retrievedAt: number
+  /** Trusted measured byte-zero artifact coverage, not publisher/model duration.
+   * Filters whole cues before grouping; does not approve their audio or rights. */
+  audioCoverage?: { startSeconds: 0; endSeconds: number }
   /** Trusted backend configuration for its OWN transcript store; not supplied by a feed/model. */
   derivedTranscriptRules?: readonly UrlRule[]
   /** Exact trusted database item digest for a non-network STT transcript URN. */

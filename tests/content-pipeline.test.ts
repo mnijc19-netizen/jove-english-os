@@ -320,6 +320,40 @@ describe('timed transcript subset', () => {
 })
 
 describe('coherent intervals, timing provenance and duplicate identity', () => {
+  it.each([40, 45])('selects only whole covered cues before grouping or limiting at %i seconds', async endSeconds => {
+    const transcript = parseTimedTranscript(vtt(), reference()), before = structuredClone(transcript)
+    const result = await sliceTranscript(episode(), transcript, source(), { retrievedAt: now, maxSegments: 1,
+      audioCoverage: { startSeconds: 0, endSeconds } })
+    expect(result.segments).toHaveLength(1)
+    expect(result.segments[0]).toMatchObject({ startSeconds: 0, endSeconds: 40, durationSeconds: 40,
+      transcript: sentences.slice(0, 4).join(' ') })
+    expect(result.segments[0]!.sentences.flatMap(sentence => sentence.cueIndices)).toEqual([0, 1, 2, 3])
+    expect(result.quarantined).toContainEqual({ startSeconds: 40, endSeconds: 50, code: 'outside-audio-coverage' })
+    expect(transcript).toEqual(before)
+  })
+  it('does not use punctuation beyond the audio boundary to complete a partial sentence', async () => {
+    const input = 'WEBVTT\n\n00:00:00.000 --> 00:00:30.000\nWe had a complete conversation.\n\n00:00:30.000 --> 00:00:40.000\nThen we started to\n\n00:00:40.000 --> 00:00:50.000\nleave the kitchen.\n'
+    const result = await sliceTranscript(episode(), parseTimedTranscript(input, reference()), source(), {
+      retrievedAt: now, audioCoverage: { startSeconds: 0, endSeconds: 45 } })
+    expect(result.segments).toHaveLength(1)
+    expect(result.segments[0]!.endSeconds).toBe(30)
+    expect(result.segments[0]!.transcript).toBe('We had a complete conversation.')
+    expect(result.quarantined).toContainEqual({ startSeconds: 30, endSeconds: 40, code: 'incomplete-sentence-or-gap' })
+  })
+  it('keeps the same original timing identity for a fully covered prefix lesson', async () => {
+    const transcript = parseTimedTranscript(vtt() + '\n' + vtt(60).replace('WEBVTT\n\n', ''), reference())
+    const legacy = await sliceTranscript(episode(), transcript, source(), { retrievedAt: now, maxSegments: 1 })
+    const bounded = await sliceTranscript(episode(), transcript, source(), { retrievedAt: now, maxSegments: 1,
+      audioCoverage: { startSeconds: 0, endSeconds: 60 } })
+    expect(bounded.segments).toEqual(legacy.segments)
+    expect(bounded.quarantined.every(row => row.code === 'outside-audio-coverage')).toBe(true)
+  })
+  it.each([null, {}, { startSeconds: 1, endSeconds: 60 }, { startSeconds: -1, endSeconds: 60 },
+    { startSeconds: 0, endSeconds: 0 }, { startSeconds: 0, endSeconds: 601 }, { startSeconds: 0, endSeconds: Infinity },
+    { startSeconds: 0, endSeconds: '60' }])('rejects invalid trusted audio coverage %j', async audioCoverage => {
+    await expect(sliceTranscript(episode(), parseTimedTranscript(vtt(), reference()), source(), { retrievedAt: now,
+      audioCoverage: audioCoverage as NonNullable<Parameters<typeof sliceTranscript>[3]['audioCoverage']> })).rejects.toThrow('invalid-audio-coverage')
+  })
   it('makes a 60-second complete sentence slice without altering media offsets', async () => {
     const candidate = await segment(40)
     expect(candidate).toMatchObject({ startSeconds: 40, endSeconds: 100, durationSeconds: 60, transcript: sentences.join(' ') })
