@@ -2,6 +2,7 @@
 do $$
 declare source_key text := 'test-content-sql-'||replace(gen_random_uuid()::text,'-','');
   owner_key uuid := gen_random_uuid(); run_key uuid := gen_random_uuid(); response jsonb; pending_response jsonb; config jsonb;
+  reconciliation_item jsonb; reconciliation_history bigint;
   item_key text:=repeat('d',64); segment_key text:='authentic-'||repeat('e',64); clip jsonb; record jsonb; base_args jsonb;
 begin
   insert into auth.users(id) values(owner_key);
@@ -40,6 +41,39 @@ begin
   perform public.content_worker('finish-item',base_args||jsonb_build_object('status','eligible','processVersion','long-running-fixture'));
   if not exists(select 1 from public.content_items where id=item_key and attempts=1002 and status='eligible') then
     raise exception 'Long-lived content could not finish after recovery';
+  end if;
+  -- A legacy reconciliation checkpoint must expose enough metadata for the worker
+  -- to normalize it without media work, and same-version quarantine must leave the queue.
+  perform public.content_worker('finish-item',base_args||jsonb_build_object('status','awaiting-analysis','processVersion','long-running-fixture',
+    'reasons',jsonb_build_array('content-provider-reconciliation-required')));
+  select to_jsonb(i) into reconciliation_item from public.content_items i where id=item_key;
+  select count(*) into reconciliation_history from public.content_history where item_id=item_key;
+  pending_response:=public.content_worker('pending',base_args||jsonb_build_object('canAnalyze',true,'processVersion','long-running-fixture'));
+  if pending_response->0->>'status' is distinct from 'awaiting-analysis' or
+    pending_response->0->>'process_version' is distinct from 'long-running-fixture' or
+    pending_response->0->'reasons' is distinct from '["content-provider-reconciliation-required"]'::jsonb then
+    raise exception 'Reconciliation queue metadata missing';
+  end if;
+  begin
+    perform public.content_worker('finish-item',base_args||jsonb_build_object('status','quarantined','revision',repeat('0',64)));
+    raise exception 'Stale revision normalized reconciliation';
+  exception when serialization_failure then null; end;
+  begin
+    perform public.content_worker('finish-item',base_args||jsonb_build_object('status','quarantined','runId',gen_random_uuid()));
+    raise exception 'Stale lease normalized reconciliation';
+  exception when serialization_failure then null; end;
+  perform public.content_worker('finish-item',base_args||jsonb_build_object('status','quarantined','processVersion','long-running-fixture',
+    'reasons',reconciliation_item->'reasons'));
+  if (select to_jsonb(i)-array['status','attempts','next_attempt_at','updated_at'] from public.content_items i where id=item_key)
+    is distinct from reconciliation_item-array['status','attempts','next_attempt_at','updated_at'] or
+    (select count(*) from public.content_history where item_id=item_key) is distinct from reconciliation_history+1 then
+    raise exception 'Reconciliation normalization changed protected metadata or lost its history';
+  end if;
+  if jsonb_array_length(public.content_worker('pending',base_args||jsonb_build_object('canAnalyze',true,'processVersion','long-running-fixture'))) is distinct from 0 then
+    raise exception 'Quarantined reconciliation still monopolizes pending';
+  end if;
+  if jsonb_array_length(public.content_worker('pending',base_args||jsonb_build_object('canAnalyze',true,'processVersion','changed-fixture'))) is distinct from 1 then
+    raise exception 'Changed processing version could not run reconciliation gates';
   end if;
   begin
     update public.content_items set attempts=-1 where id=item_key;

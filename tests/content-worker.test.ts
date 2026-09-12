@@ -95,6 +95,7 @@ function fetcher(feed = rss()): ContentFetcher {
 
 type DbItem = { id: string; revision: string; episode: unknown; status: string; attempts: number; transcript: TimedTranscript | null;
   saved_segments: PersistedContentSegment[]; object_path: string | null; audio_sha256: string | null; audio_mime: string | null;
+  reasons?: string[]; process_version?: string | null;
   audio_acquisition_version?: 'complete-v1' | 'mpeg-prefix-v1'; audio_coverage?: ContentAudioInput['audio']['coverage'] }
 class MemoryRpc implements ContentAdminClient {
   items = new Map<string, DbItem>()
@@ -170,14 +171,17 @@ class MemoryRpc implements ContentAdminClient {
       data = { changed }
     } else if (action === 'poll') this.etag = args.etag as string | null
     else if (action === 'pending') data = [...this.items.values()].filter(item => (item.episode as FeedEpisode).sourceId === args.sourceId &&
-      (['pending', 'retry'].includes(item.status) || args.canAnalyze && item.status === 'awaiting-analysis'))
+      (['pending', 'retry'].includes(item.status) || args.canAnalyze && (item.status === 'awaiting-analysis' ||
+        item.status === 'quarantined' && item.process_version !== args.processVersion)))
+      .slice(0, args.limit as number)
       .map(item => ({ ...item, saved_segments: [...this.records.values()].filter(record => record.segment.sourceId === args.sourceId) }))
     else if (action === 'checkpoint') item!.transcript = args.transcript as TimedTranscript
     else if (action === 'asset') { item!.object_path = args.objectPath as string; item!.audio_sha256 = args.sha256 as string; item!.audio_mime = args.mimeType as string
       item!.audio_acquisition_version = args.acquisitionVersion as 'complete-v1' | 'mpeg-prefix-v1' | undefined
       item!.audio_coverage = args.coverage as ContentAudioInput['audio']['coverage'] }
     else if (action === 'save-segment') { const record = args.record as PersistedContentSegment; this.records.set(record.segment.id, structuredClone(record)) }
-    else if (action === 'finish-item') { item!.status = args.status as string; item!.attempts++ }
+    else if (action === 'finish-item') { item!.status = args.status as string; item!.attempts++;
+      item!.reasons = structuredClone(args.reasons as string[]); item!.process_version = args.processVersion as string }
     else if (action === 'candidates') data = { candidates: [...this.records.values()].filter(record => record.status === 'eligible').map(record => ({ id: record.segment.id, record, config: this.config })), recent: this.recommendations }
     else if (action === 'recommend') {
       for (const lesson of args.lessons as EligibleContentLesson[]) if (!this.recommendations.some(row => row.request_id === args.requestId && row.segment_id === lesson.segmentId))
@@ -581,7 +585,108 @@ describe('content worker state transitions and inspection boundary', () => {
       expect(opts.analyzeAudio).not.toHaveBeenCalled()
       expect(result.eligibleSegments).toBe(0)
       expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
+      expect([...opts.adminClient.items.values()][0]!.status).toBe(replay ? 'quarantined' : 'awaiting-analysis')
     }
+  })
+  async function legacyReconciliationQueue() {
+    const opts = options(), db = opts.adminClient
+    opts.analyzeAudio = vi.fn(analyzer)
+    opts.limits = { ...opts.limits, audioItemsPerRun: 1 }
+    opts.budget = { ...budget(), reserve: async () => ({ allowed: true, acquired: false, reservationId: 'old', replay: true }) }
+    await runContentRefresh(opts)
+    const blocked = [...db.items.values()][0]!
+    blocked.status = 'awaiting-analysis' // Legacy state written before exact reconciliation classification.
+    const fresh: DbItem = { ...structuredClone(blocked), id: createHash('sha256').update('fresh-item').digest('hex'),
+      revision: createHash('sha256').update('fresh-revision').digest('hex'), status: 'pending', attempts: 0,
+      reasons: [], process_version: null, object_path: null, audio_sha256: null, audio_mime: null, saved_segments: [],
+      episode: { ...structuredClone(blocked.episode as FeedEpisode), guid: 'fresh', audioUrl: `${origin}/audio/fresh.mp3` } }
+    db.items.set(fresh.id, fresh)
+    opts.budget = budget()
+    vi.mocked(opts.analyzeAudio).mockClear()
+    return { opts, db, blocked, fresh }
+  }
+  it('normalizes legacy reconciliation before slicing without consuming fresh media capacity or rewriting protected work', async () => {
+    const { opts, db, blocked, fresh } = await legacyReconciliationQueue()
+    const before = structuredClone(blocked), history = structuredClone(db.calls), intents = [...db.intents]
+    const records = structuredClone([...db.records]), store = opts.audioStore as ReturnType<typeof makeStore>
+    const blobs = [...store.blobs].map(([path, bytes]) => [path, bytes.slice()] as const)
+    const read = vi.spyOn(store, 'get'), network = vi.fn(opts.fetcher!), reserve = vi.spyOn(opts.budget!, 'reserve')
+    opts.fetcher = network
+    const result = await runContentRefresh(opts)
+    expect(result).toMatchObject({ itemsProcessed: 1, eligibleSegments: 1 })
+    expect(result.nextGates).toContain('content-provider-reconciliation-required')
+    expect(blocked).toEqual({ ...before, status: 'quarantined', attempts: before.attempts + 1 })
+    expect(db.calls.slice(0, history.length)).toEqual(history)
+    expect(db.calls.slice(history.length).filter(call => call.args.itemId === blocked.id).map(call => call.action)).toEqual(['finish-item'])
+    for (const [key, value] of intents) expect(db.intents.get(key)).toBe(value)
+    for (const [key, value] of records) expect(db.records.get(key)).toEqual(value)
+    for (const [path, bytes] of blobs) expect(store.blobs.get(path)).toEqual(bytes)
+    expect(read).not.toHaveBeenCalledWith(before.object_path)
+    expect(network.mock.calls.filter(([request]) => request.role === 'audio').map(([request]) => request.url)).toEqual([`${origin}/audio/fresh.mp3`])
+    expect(reserve).toHaveBeenCalledOnce()
+    expect(opts.analyzeAudio).toHaveBeenCalledOnce()
+    expect(vi.mocked(opts.analyzeAudio!).mock.calls[0]![0].segment.episode.guid).toBe('fresh')
+    expect(fresh.status).toBe('eligible')
+    await runContentRefresh(opts)
+    expect(blocked.attempts).toBe(before.attempts + 1)
+    expect(opts.analyzeAudio).toHaveBeenCalledOnce()
+  })
+  it.each(['new-revision', 'changed-version', 'missing-version', 'other-required', 'missing-status', 'invalid-reasons'] as const)(
+    'does not normalize %s solely from stale or incomplete reconciliation metadata', async variant => {
+      const { opts, db, blocked } = await legacyReconciliationQueue()
+      if (variant === 'new-revision') { blocked.status = 'pending'; blocked.revision = 'e'.repeat(64) }
+      if (variant === 'changed-version') blocked.process_version = 'older-analyzer/fixture-v1'
+      if (variant === 'missing-version') delete blocked.process_version
+      if (variant === 'other-required') blocked.reasons = ['content-budget-required']
+      const original = db.rpc.bind(db)
+      db.rpc = async (name, input) => {
+        const result = await original(name, input)
+        if (input?.action === 'pending') for (const row of result.data as Record<string, unknown>[]) if (row.id === blocked.id) {
+          if (variant === 'missing-status') delete row.status
+          if (variant === 'invalid-reasons') row.reasons = 'content-provider-reconciliation-required'
+        }
+        return result
+      }
+      const before = db.calls.length
+      await runContentRefresh(opts)
+      expect(opts.analyzeAudio).toHaveBeenCalledOnce()
+      expect(vi.mocked(opts.analyzeAudio!).mock.calls[0]![0].segment.episode.guid).toBe('one')
+      expect(db.calls.slice(before).find(call => call.args.itemId === blocked.id)?.action).not.toBe('finish-item')
+    })
+  it('stops normalization on lease or revision loss without starting fresh media or provider work', async () => {
+    const { opts, db, blocked, fresh } = await legacyReconciliationQueue()
+    const original = db.rpc.bind(db), before = structuredClone(blocked), reserve = vi.spyOn(opts.budget!, 'reserve')
+    const network = vi.fn(opts.fetcher!), read = vi.spyOn(opts.audioStore!, 'get')
+    opts.fetcher = network
+    db.rpc = async (name, input) => input?.action === 'finish-item' && (input.args as { itemId: string }).itemId === blocked.id
+      ? { data: null, error: { code: '40001', message: 'Synthetic stale lease' } } : original(name, input)
+    const result = await runContentRefresh(opts)
+    expect(result.nextGates).toContain('content-lease-or-revision-lost')
+    expect(blocked).toEqual(before)
+    expect(fresh.status).toBe('pending')
+    expect(network.mock.calls.some(([request]) => request.role === 'audio')).toBe(false)
+    expect(read).not.toHaveBeenCalled()
+    expect(reserve).not.toHaveBeenCalled()
+    expect(opts.analyzeAudio).not.toHaveBeenCalled()
+  })
+  it('does not dispatch normalization if cancellation arrives with the pending query', async () => {
+    const { opts, db, blocked, fresh } = await legacyReconciliationQueue()
+    const controller = new AbortController(), original = db.rpc.bind(db), before = structuredClone(blocked)
+    const start = db.calls.length, reserve = vi.spyOn(opts.budget!, 'reserve'), read = vi.spyOn(opts.audioStore!, 'get')
+    opts.signal = controller.signal
+    db.rpc = async (name, input) => {
+      const result = await original(name, input)
+      if (input?.action === 'pending') controller.abort()
+      return result
+    }
+    const result = await runContentRefresh(opts)
+    expect(result.nextGates).toContain('content-run-timeout-or-cancelled')
+    expect(blocked).toEqual(before)
+    expect(fresh.status).toBe('pending')
+    expect(db.calls.slice(start).some(call => call.action === 'finish-item' || call.action === 'audio-work-begin')).toBe(false)
+    expect(read).not.toHaveBeenCalled()
+    expect(reserve).not.toHaveBeenCalled()
+    expect(opts.analyzeAudio).not.toHaveBeenCalled()
   })
   it('fails closed before media I/O when the budget preflight is unavailable', async () => {
     const opts = options(), network = vi.fn(opts.fetcher!)

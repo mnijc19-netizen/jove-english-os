@@ -319,6 +319,7 @@ export function createSupabaseContentAudioStore(adminClient: ContentAdminClient)
 }
 interface PendingItem {
   id: string; revision: string; episode: FeedEpisode; attempts: number
+  status?: string; reasons?: string[]; process_version?: string | null
   transcript: TimedTranscript | null; saved_segments: PersistedContentSegment[]
   object_path: string | null; audio_sha256: string | null; audio_mime: string | null
   audio_acquisition_version?: 'complete-v1' | 'mpeg-prefix-v1' | null
@@ -784,9 +785,21 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
           }
         }
         const pendingWindow = await call<PendingItem[]>('pending', { canAnalyze, processVersion, limit: 10, acquisitionVersion: options.audioAcquisition ?? 'complete-v1' })
-        const pending = pendingWindow.sort((a, b) => Number(b.episode.guid.startsWith('voa-pilot:')) - Number(a.episode.guid.startsWith('voa-pilot:')))
-          .slice(0, maxEpisodes)
-        for (const item of pending) {
+        const pending: PendingItem[] = []
+        for (const item of pendingWindow) {
+          if (controller.signal.aborted) fail('content-run-timeout-or-cancelled')
+          // Older workers treated reconciliation as missing configuration. Move only that
+          // exact current-version state behind the existing lease/revision fence, before
+          // it consumes episode/media capacity. New revisions and versions still run gates.
+          if (item.status === 'awaiting-analysis' && item.process_version === processVersion &&
+            Array.isArray(item.reasons) && item.reasons.includes('content-provider-reconciliation-required')) {
+            await abortable(call('finish-item', { itemId: item.id, revision: item.revision, status: 'quarantined',
+              reasons: item.reasons, processVersion }), controller.signal)
+            summary.nextGates.push('content-provider-reconciliation-required')
+          } else pending.push(item)
+        }
+        pending.sort((a, b) => Number(b.episode.guid.startsWith('voa-pilot:')) - Number(a.episode.guid.startsWith('voa-pilot:')))
+        for (const item of pending.slice(0, maxEpisodes)) {
           if (audioWorkItems.size >= maxAudioItems) { summary.nextGates.push('content-audio-batch-deferred'); break }
           try { await processItem(context, item) }
           catch (error) {
@@ -794,7 +807,8 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
             if (code === 'content-lease-or-revision-lost') throw error
             summary.errors.push({ sourceId: source.id, code }); summary.nextGates.push(code)
             const awaiting = /unconfigured|required|budget-denied|cost-ceiling/u.test(code)
-            await call('finish-item', { itemId: item.id, revision: item.revision, status: awaiting ? 'awaiting-analysis' : item.attempts >= 5 ? 'quarantined' : 'retry',
+            const status = code === 'content-provider-reconciliation-required' ? 'quarantined' : awaiting ? 'awaiting-analysis' : item.attempts >= 5 ? 'quarantined' : 'retry'
+            await call('finish-item', { itemId: item.id, revision: item.revision, status,
               reasons: [code], retrySeconds: Math.min(604_800, 60 * 2 ** Math.min(10, item.attempts)), processVersion })
           }
         }
