@@ -918,6 +918,20 @@ describe('scheduled rights revalidation', () => {
     expect(validateSourceUrl(path,rules)).toBe(path)
     for(const url of [path+'?redirect=https://private.invalid',path.replace('/validation=','/other='),path.replace('.mp3','.html'),path.replace('/episodes/','/account/')]) expect(()=>validateSourceUrl(url,rules)).toThrow()
   })
+  it('preserves encoded spaces in the exact signed ART19 filename without decoding the URL', () => {
+    const rules = ALLOWLISTED_CONTENT_SOURCES.find(s => s.id === 'jb-linux-unplugged')!.urls.audio
+    const base = `https://content.production.cdn.art19.com/validation=1788941300,d5179406-df6b-56e1-98ee-b124b1df8de2,abcdefghijklmnopqrstuvw/episodes/d12d00dc-a590-4ec0-8446-7c2136304bae/${'a'.repeat(128)}/`
+    const url = `${base}Linux%20Unplugged%20666%20Ads.mp3`
+    expect(validateSourceUrl(url, rules)).toBe(url)
+    expect(validateSourceUrl(`${base}${'%20'.repeat(512)}.mp3`, rules)).toBe(`${base}${'%20'.repeat(512)}.mp3`)
+    for (const name of ['Linux Unplugged', 'Linux%09Unplugged', 'Linux%0aUnplugged', 'Linux%0dUnplugged', 'Linux%00Unplugged',
+      'Linux%2520Unplugged', 'Linux%2fUnplugged', 'Linux%5cUnplugged', '%2e%2e', '../audio', 'Linux%20../audio',
+      'Linux%20%252fsecret', 'Linux%20%41udio', '%20'.repeat(513), 'Linux%20Unplugged.html']) {
+      expect(() => validateSourceUrl(`${base}${name}.mp3`, rules), name).toThrow()
+    }
+    expect(() => validateSourceUrl(url.replace('content.production.cdn.art19.com', 'other.art19.com'), rules)).toThrow()
+    expect(() => validateSourceUrl(url + '?token=fixture', rules)).toThrow()
+  })
   it('permits only the two reviewed VOA feed query values, never arbitrary search/count URLs', () => {
     const source=ALLOWLISTED_CONTENT_SOURCES.find(source=>source.id==='voa-everyday-grammar')!
     expect(validateSourceUrl(source.feedUrl,source.urls.feed)).toBe(source.feedUrl)

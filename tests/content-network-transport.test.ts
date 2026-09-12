@@ -26,6 +26,27 @@ function connection(response: string | Uint8Array, address = '1.1.1.1', fragment
 
 afterEach(() => vi.unstubAllGlobals())
 
+it('keeps encoded spaces and the byte bound through a pinned signed ART19 redirect', async () => {
+  const publisher = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === 'jb-linux-unplugged')!
+  const signed = `https://content.production.cdn.art19.com/validation=1788941300,d5179406-df6b-56e1-98ee-b124b1df8de2,abcdefghijklmnopqrstuvw/episodes/d12d00dc-a590-4ec0-8446-7c2136304bae/${'a'.repeat(128)}/Linux%20Unplugged%20666%20Ads.mp3`
+  const redirect = connection(`HTTP/1.1 302 Found\r\nLocation: ${signed}\r\n\r\n`)
+  const audio = connection('HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mpeg\r\nContent-Length: 5\r\nContent-Range: bytes 0-4/50\r\n\r\n12345')
+  const connect = vi.fn(async () => connection(''))
+  const startTls = vi.fn().mockResolvedValueOnce(redirect).mockResolvedValueOnce(audio)
+  vi.stubGlobal('Deno', { connect, startTls })
+  const result = await createContentFetcher({ resolve: async () => ['1.1.1.1'] })({ source: publisher, role: 'audio',
+    url: 'https://rss.art19.com/external/episodes/d12d00dc-a590-4ec0-8446-7c2136304bae.mp3', maxBytes: 5, audioPrefixBytes: 5 })
+  expect(result).toMatchObject({ status: 206, finalUrl: signed, dnsPinning: 'pinned-deno-tls',
+    byteCoverage: { kind: 'prefix', start: 0, endExclusive: 5, totalBytes: 50 } })
+  expect(startTls.mock.calls.map(([, options]) => options.hostname)).toEqual(['rss.art19.com', 'content.production.cdn.art19.com'])
+  expect(connect.mock.calls).toHaveLength(2)
+  const wire = new TextDecoder().decode(audio.write.mock.calls[0]![0])
+  expect(wire).toContain('Linux%20Unplugged%20666%20Ads.mp3 HTTP/1.1\r\n')
+  expect(wire.toLowerCase()).toContain('range: bytes=0-4\r\n')
+  expect(audio.close).toHaveBeenCalledOnce()
+  expect(redirect.close).toHaveBeenCalledOnce()
+})
+
 describe('bounded byte-zero audio acquisition', () => {
   const prefixRequest = { source, url: 'https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4725.mp3',
     role: 'audio' as const, maxBytes: 5, audioPrefixBytes: 5 }

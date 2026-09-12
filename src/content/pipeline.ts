@@ -62,7 +62,9 @@ export function validateSourceUrl(raw: string, rules?: readonly UrlRule[]): stri
   if (rules && !rules.some(rule => {
     if (rule.origin !== url.origin || !(rule.pathPrefix.endsWith('/') ? url.pathname.startsWith(rule.pathPrefix) : url.pathname === rule.pathPrefix)) return false
     if (rule.pathShape === 'art19-signed-audio') return !url.search && url.origin === 'https://content.production.cdn.art19.com' &&
-      /^\/validation=\d{10},[a-f0-9-]{36},[A-Za-z0-9_-]{16,128}\/episodes\/[a-f0-9-]{36}\/[a-f0-9]{128}\/[A-Za-z0-9_-]{1,512}\.mp3$/u.test(url.pathname)
+      // Publisher filenames may contain encoded spaces. Keep the URL encoded;
+      // no other escapes, separators, suffixes, hosts or queries are admitted.
+      /^\/validation=\d{10},[a-f0-9-]{36},[A-Za-z0-9_-]{16,128}\/episodes\/[a-f0-9-]{36}\/[a-f0-9]{128}\/(?:[A-Za-z0-9_-]|%20){1,512}\.mp3$/u.test(url.pathname)
     if (rule.pathShape === 'open-yap-preview') return !url.search && url.origin === 'https://huggingface.co' &&
       /^\/datasets\/TheAgenticDataCompany\/open-yap-1k\/(?:resolve|blob)\/main\/preview\/conv_[a-f0-9]{12}\.mp3$/u.test(url.pathname)
     if (rule.pathShape === 'open-yap-cdn') {
