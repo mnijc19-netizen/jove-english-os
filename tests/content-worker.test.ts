@@ -7,7 +7,7 @@ import type { ContentSource, FeedEpisode, Inspection, ObservationEvidence, Timed
 import { createContentFetcher, fetchContentResource, isPublicContentAddress, type ContentFetcher } from '../src/server/content-network'
 import { parseRssFeed, parseOpenYapPreviewManifest, resolveEpisodeAudioUrl, validateSourceUrl } from '../src/content/pipeline'
 import { CONTENT_POLICY_EVIDENCE, extractContentPolicy, revalidateContentRights } from '../src/server/content-rights'
-import { contentAudioDuration, contentAudioWindow, createContentAudioServices } from '../src/server/content-audio'
+import { contentAudioDuration, contentAudioWindow, createContentAudioServices, prepareContentMp3Prefix } from '../src/server/content-audio'
 import { auditVoaLessonCandidates, type VoaCandidateAudit } from '../src/server/content-voa'
 import { contentPublicOrigin, contentSignedPlaybackUrl, createContentBudget, createContentHandler } from '../src/server/content'
 import { GatewayError, type OwnerContext } from '../src/server/gateway'
@@ -626,7 +626,8 @@ describe('content worker state transitions and inspection boundary', () => {
     expect(JSON.stringify(result)).not.toContain('Raw provider')
     expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
   })
-  it.each(['CONTENT_AUDIO_SCHEMA', 'CONTENT_AUDIO_CATALOG', 'CONTENT_STT_TIMING', 'CONTENT_AUDIO_PROVIDER_FAILURE'])(
+  it.each(['CONTENT_AUDIO_SCHEMA', 'CONTENT_AUDIO_CATALOG', 'CONTENT_STT_TIMING', 'CONTENT_AUDIO_PROVIDER_FAILURE',
+    'CONTENT_AUDIO_PREFIX_COVERAGE', 'CONTENT_AUDIO_PREFIX_RESERVOIR'])(
     'retains the trusted %s code without persisting raw provider details or clearing its hold', async code => {
       const opts = options()
       opts.fetcher = fetcher(rss(false))
@@ -1039,6 +1040,187 @@ function pcmFixture(seconds = 60): Uint8Array {
   view.setUint32(28,16000,true); view.setUint16(32,2,true); view.setUint16(34,16,true); setText(36,'data'); view.setUint32(40,bytes.length-44,true)
   return bytes // Explicit silence fixture, never a human audio sample.
 }
+describe.runIf(process.env.JOVE_CONTENT_PREFIX_DECODE_PROBE === '1')('actual bounded prefix browser decoding (no paid service or lesson approval)', () => {
+  it.each(['jb-the-launch', 'jb-linux-unplugged', 'open-yap-sample'])('%s decodes and reaches ended in Chromium and WebKit', async id => {
+    const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === id)!
+    expect((await revalidateContentRights({ source })).status).toBe('verified')
+    const feed = await fetchContentResource({ source, role: 'feed', url: source.feedUrl, maxBytes: 12 * 1024 * 1024 })
+    expect(feed.status).toBe(200)
+    const batch = (source.feedFormat === 'open-yap-preview-jsonl' ? parseOpenYapPreviewManifest : parseRssFeed)(
+      new TextDecoder().decode(feed.body), source, { now: Date.now(), maxItems: 3 })
+    const episode = (id === 'open-yap-sample' ? batch.episodes.find(item => item.guid === 'conv_d4005da6db98.mp3') : batch.episodes[0])!
+    expect(episode).toBeDefined()
+    const cap = 2 * 1024 * 1024
+    const response = await fetchContentResource({ source, role: 'audio', url: episode.audioUrl, maxBytes: cap, audioPrefixBytes: cap })
+    expect(response.status).toBe(206)
+    const prefix = prepareContentMp3Prefix(response.body, response.contentType, response.byteCoverage, 90)
+    expect(prefix.coverage.endSeconds).toBeGreaterThan(30)
+    expect(prefix.coverage.sourceBytes).toBeGreaterThan(prefix.coverage.receivedBytes)
+    const clip = contentAudioWindow(prefix.bytes, prefix.mimeType, 5, 25)
+    const { chromium, webkit } = await import('@playwright/test')
+    for (const engine of [chromium, webkit]) {
+      const browser = await engine.launch({ headless: true })
+      try {
+        const page = await browser.newPage()
+        // Use an isolated trustworthy loopback document, never the owner's
+        // app/session. Windows WebKit's missing Web Audio remains a failed gate.
+        await page.route('http://127.0.0.1/jove-prefix-probe/', route => route.fulfill({
+          contentType: 'text/html', body: '<!doctype html><title>Isolated audio decoder probe</title>',
+        }))
+        await page.goto('http://127.0.0.1/jove-prefix-probe/')
+        const observed = await page.evaluate(async encoded => {
+          const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0))
+          const context = new AudioContext(), player = new Audio(), url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }))
+          let timer: ReturnType<typeof setTimeout> | undefined
+          try {
+            return await Promise.race([(async () => {
+              const audio = await context.decodeAudioData(bytes.buffer.slice(0)), samples = audio.getChannelData(0)
+              let peak = 0
+              for (const sample of samples) { if (!Number.isFinite(sample)) throw new Error('nonfinite-decoded-sample'); peak = Math.max(peak, Math.abs(sample)) }
+              const metadata = new Promise<void>((resolve, reject) => {
+                player.onloadedmetadata = () => resolve(); player.onerror = () => reject(new Error('native-mp3-playback-failed'))
+              })
+              player.muted = true; player.src = url; player.load(); await metadata
+              const declaredDuration = player.duration
+              const ended = new Promise<void>((resolve, reject) => {
+                player.onended = () => resolve(); player.onerror = () => reject(new Error('native-mp3-playback-failed'))
+              })
+              await player.play()
+              player.currentTime = Math.max(0, Math.min(audio.duration, declaredDuration) - 0.2)
+              await ended
+              return { decodedDuration: audio.duration, channels: audio.numberOfChannels, sampleRate: audio.sampleRate,
+                peak, declaredDuration, ended: player.ended }
+            })(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('native-mp3-decode-timeout')), 15000) })])
+          } finally {
+            clearTimeout(timer); player.pause(); player.removeAttribute('src'); player.load(); URL.revokeObjectURL(url); await context.close()
+          }
+        }, Buffer.from(clip.bytes).toString('base64'))
+        expect(observed.ended).toBe(true)
+        expect(observed.channels).toBeGreaterThan(0)
+        expect(observed.peak).toBeGreaterThan(0.00001)
+        expect(Math.abs(observed.decodedDuration - (clip.endSeconds - clip.originSeconds))).toBeLessThan(0.1)
+        expect(Math.abs(observed.declaredDuration - observed.decodedDuration)).toBeLessThan(0.2)
+        console.info(JSON.stringify({ actualPrefixDecode: id, engine: engine.name(), coverage: prefix.coverage,
+          artifactSha256: createHash('sha256').update(prefix.bytes).digest('hex'), clipSha256: createHash('sha256').update(clip.bytes).digest('hex'),
+          ...observed, acousticallyReviewed: false }))
+      } finally { await browser.close() }
+    }
+  }, 90000)
+})
+
+describe('bounded MP3 prefix frame preparation (not acoustic or decoder certification)', () => {
+  function frame(version = 3, br = 9, mono = false, crc = false) {
+    const rate = 44100 / (version === 3 ? 1 : version === 2 ? 2 : 4)
+    const bitrate = (version === 3 ? [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320] : [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160])[br]! * 1000
+    const bytes = new Uint8Array(Math.floor((version === 3 ? 144 : 72) * bitrate / rate))
+    bytes.set([255, 224 | version << 3 | 2 | Number(!crc), br << 4, mono ? 192 : 0])
+    return bytes
+  }
+  function join(...parts: Uint8Array[]) {
+    const bytes = new Uint8Array(parts.reduce((n, part) => n + part.length, 0)); let offset = 0
+    for (const part of parts) { bytes.set(part, offset); offset += part.length }
+    return bytes
+  }
+  function prepare(bytes: Uint8Array, complete = false, seconds = 600) {
+    return prepareContentMp3Prefix(bytes, 'audio/mpeg', { kind: complete ? 'complete' : 'prefix', start: 0,
+      endExclusive: bytes.length, totalBytes: bytes.length + Number(!complete) * 100000 }, seconds)
+  }
+  it.each([3, 2, 0])('counts MPEG version %i samples and trims only the final incomplete frame', version => {
+    const first = frame(version), bytes = join(first, first, first.subarray(0, 33)), result = prepare(bytes)
+    const expected = 2 * (version === 3 ? 1152 : 576) / (44100 / (version === 3 ? 1 : version === 2 ? 2 : 4))
+    expect(result.bytes).toEqual(join(first, first))
+    expect(result.coverage).toMatchObject({ version: 'mpeg-prefix-v1', startSeconds: 0, endSeconds: expected,
+      sourceByteStart: 0, sourceByteEndExclusive: first.length * 2, receivedBytes: bytes.length, frameCount: 2,
+      discardedTrailingBytes: 33, removedMetadataFrame: null, gaplessAdjustment: 'not-applied' })
+    expect(contentAudioDuration(result.bytes, 'audio/mpeg')).toBeCloseTo(expected, 9)
+    expect(() => prepare(bytes, true)).toThrow()
+  })
+  it('preserves all retained frame bytes and accepts VBR without bitrate-derived timing', () => {
+    const bytes = join(frame(3, 5), frame(3, 14), frame(3, 9)), result = prepare(bytes, true)
+    expect(result.bytes).toEqual(bytes)
+    expect(result.bytes).not.toBe(bytes)
+    expect(result.coverage.endSeconds).toBe(3456 / 44100)
+    expect(result.coverage.networkKind).toBe('complete')
+  })
+  it('enforces the 600 second cap at a complete frame boundary, not a proportional byte position', () => {
+    const one = frame(2, 1), bytes = join(...Array.from({ length: 23000 }, () => one)), result = prepare(bytes)
+    expect(result.coverage.frameCount).toBe(Math.floor(600 * 22050 / 576))
+    expect(result.coverage.endSeconds).toBeLessThanOrEqual(600)
+    expect(result.coverage.endSeconds).toBeGreaterThan(599.97)
+    expect(result.bytes.length).toBe(result.coverage.frameCount * one.length)
+    expect(result.coverage.stopReason).toBe('duration-limit')
+  })
+  it.each(['Xing', 'Info', 'VBRI'])('excludes the original %s duration tag frame, records the transformation and never rewrites it', tag => {
+    const metadata = frame(), original = frame(), position = 36
+    metadata.set(new TextEncoder().encode(tag), position)
+    metadata.fill(255, position + 8, position + 16) // Untrusted full-episode totals must not determine prefix timing.
+    const bytes = join(metadata, original, original), snapshot = bytes.slice(), result = prepare(bytes)
+    expect(bytes).toEqual(snapshot)
+    expect(result.bytes).toEqual(join(original, original))
+    expect(result.coverage).toMatchObject({ sourceByteStart: metadata.length, removedMetadataFrame: tag, frameCount: 2 })
+    expect(result.coverage.endSeconds).toBe(2304 / 44100)
+  })
+  it.each([[3, true, false], [2, false, true], [0, true, true]] as const)(
+    'recognizes the standard info offset for version %i mono %s CRC %s', (version, mono, crc) => {
+      const metadata = frame(version, 9, mono, crc), first = frame(version, 9, mono, crc)
+      metadata.set(new TextEncoder().encode('Info'), 4 + (version === 3 ? mono ? 17 : 32 : mono ? 9 : 17))
+      expect(prepare(join(metadata, first, first)).coverage.removedMetadataFrame).toBe('Info')
+    })
+  it('rejects a first retained frame requiring a missing reservoir and a second metadata frame', () => {
+    const first = frame(), dependent = frame(); dependent[4] = 1
+    const info = frame(); info.set(new TextEncoder().encode('Info'), 36)
+    expect(() => prepare(join(dependent, first))).toThrow()
+    expect(() => prepare(join(info, dependent, first))).toThrow()
+    expect(() => prepare(join(first, info, first))).toThrow()
+  })
+  it.each([1, 2, 3])('accepts only a matching %i-byte partial header at the range boundary', tailLength => {
+    const first = frame(), good = join(first, first, first.subarray(0, tailLength))
+    expect(prepare(good).coverage.discardedTrailingBytes).toBe(tailLength)
+    const bad = good.slice(); bad[bad.length - 1] = 0
+    expect(() => prepare(bad)).toThrow()
+    expect(() => prepare(good, true)).toThrow()
+  })
+  it('refuses corrupt/interior junk, concatenated formats and even corruption after the retained duration cap', () => {
+    const first = frame(), bad = first.slice(); bad[0] = 0
+    for (const bytes of [join(first, bad, first), join(first, frame(2), first), join(first, frame(3, 9, true), first),
+      join(first, first, new Uint8Array([0])), join(first, first, bad)]) expect(() => prepare(bytes, false, 0.06)).toThrow()
+  })
+  it('strips a complete bounded ID3v2 tag and validates a present v2.4 footer', () => {
+    const first = frame(), tag = new Uint8Array(32)
+    tag.set([73,68,51,4,0,16,0,0,0,12]); tag.set([51,68,73,4,0,16,0,0,0,12], 22)
+    const result = prepare(join(tag, first, first))
+    expect(result.coverage.sourceByteStart).toBe(32)
+    expect(result.bytes).toEqual(join(first, first))
+    tag[24] = 0; expect(() => prepare(join(tag, first, first))).toThrow()
+  })
+  it.each([
+    [73,68,51,4,0,0,0,127,127,127], // Incomplete tag, not evidence of a complete frame.
+    [73,68,51,4,0,0,1,0,0,0], // Over the 1MiB metadata bound.
+    [73,68,51,3,0,16,0,0,0,0], // Footer flag does not exist in ID3v2.3.
+    [73,68,51,4,0,1,0,0,0,0], // Unknown flag.
+    [73,68,51,4,255,0,0,0,0,0],
+    [73,68,51,4,0,0,0,0,0,128],
+  ])('rejects malformed or oversized ID3 metadata %j', header => {
+    expect(() => prepare(join(new Uint8Array(header), frame(), frame()))).toThrow()
+  })
+  it('accepts a complete trailing ID3v1 tag only when the source representation is complete', () => {
+    const first = frame(), tag = new Uint8Array(128); tag.set([84,65,71])
+    const bytes = join(first, first, tag)
+    expect(prepare(bytes, true).bytes).toEqual(join(first, first))
+    expect(() => prepare(bytes)).toThrow()
+  })
+  it('requires consistent explicit byte coverage, an MP3 MIME and a bounded duration before parsing', () => {
+    const bytes = join(frame(), frame()), valid = { kind: 'prefix' as const, start: 0 as const, endExclusive: bytes.length, totalBytes: 9000 }
+    for (const coverage of [undefined, { ...valid, start: 1 }, { ...valid, endExclusive: 800 },
+      { ...valid, totalBytes: bytes.length }, { ...valid, totalBytes: Infinity }, { ...valid, kind: 'complete' }, { ...valid, kind: 'unknown' }])
+      expect(() => prepareContentMp3Prefix(bytes, 'audio/mpeg', coverage as typeof valid)).toThrow()
+    for (const seconds of [0, -1, NaN, Infinity, 601]) expect(() => prepare(bytes, false, seconds)).toThrow()
+    expect(() => prepareContentMp3Prefix(bytes, 'audio/aac', valid)).toThrow()
+    expect(() => prepare(new Uint8Array(8 * 1024 * 1024 + 1))).toThrow()
+    expect(() => prepare(frame())).toThrow()
+  })
+})
+
 describe('real audio service contract (synthetic transport tests, not acoustic validation)', () => {
   it.each(['schema', 'timing', 'incomplete', 'unknown-cost', 'zero-cost'])(
     'keeps the provider receipt for rejected %s without approving a lesson or replaying', async kind => {

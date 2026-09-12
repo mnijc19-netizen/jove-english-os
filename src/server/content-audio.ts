@@ -3,6 +3,7 @@ import type { ContentAudioAnalyzer, ContentTranscriber, ContentUsage } from './c
 import type { Inspection, InspectionValues } from '../content/pipeline-types'
 import { contentEvidenceHash } from './content-rights'
 import { boundedBody, GatewayError, type ServerEnvironment } from './gateway'
+import type { ContentFetchResult } from './content-network'
 
 const providerOrigin = 'https://generativelanguage.googleapis.com'
 const error = (code: string): never => { throw new GatewayError(503, code, 'Content audio inspection could not finish. Saved source audio is retained.') }
@@ -34,6 +35,110 @@ function withAudioReceipt<T>(receipt: AudioReceipt, inspect: () => T): T {
       throw new ContentAudioResponseError(cause, receipt)
     throw cause
   }
+}
+
+/** Frame header only; no resynchronization, guessed seeking or decoding. Shared
+ * by complete-container timing and explicitly bounded prefix preparation. */
+function mp3Frame(bytes: Uint8Array, offset: number) {
+  if (offset + 4 > bytes.length || bytes[offset] !== 255 || (bytes[offset + 1]! & 224) !== 224) return error('CONTENT_AUDIO_CONTAINER')
+  const version = (bytes[offset + 1]! >> 3) & 3, layer = (bytes[offset + 1]! >> 1) & 3
+  const br = bytes[offset + 2]! >> 4, sr = (bytes[offset + 2]! >> 2) & 3, padding = (bytes[offset + 2]! >> 1) & 1
+  if (version === 1 || layer !== 1 || !br || br === 15 || sr === 3) return error('CONTENT_AUDIO_CONTAINER')
+  const rate = [44100, 48000, 32000][sr]! / (version === 3 ? 1 : version === 2 ? 2 : 4)
+  const bitrate = (version === 3 ? [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320] : [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160])[br]! * 1000
+  const size = Math.floor((version === 3 ? 144 : 72) * bitrate / rate) + padding
+  const channels = bytes[offset + 3]! >> 6 === 3 ? 1 : 2, crcBytes = bytes[offset + 1]! & 1 ? 0 : 2
+  return { version, rate, size, channels, crcBytes, samples: version === 3 ? 1152 : 576,
+    sideBytes: version === 3 ? channels === 1 ? 17 : 32 : channels === 1 ? 9 : 17 }
+}
+
+export interface ContentMp3Prefix {
+  bytes: Uint8Array
+  mimeType: 'audio/mpeg'
+  coverage: {
+    version: 'mpeg-prefix-v1'; networkKind: 'complete' | 'prefix'
+    receivedBytes: number; sourceBytes: number; sourceByteStart: number; sourceByteEndExclusive: number
+    startSeconds: 0; endSeconds: number; frameCount: number; sampleRate: number; samplesPerFrame: number
+    removedMetadataFrame: 'Xing' | 'Info' | 'VBRI' | null; discardedTrailingBytes: number
+    stopReason: 'duration-limit' | 'range-boundary' | 'complete'; gaplessAdjustment: 'not-applied'
+  }
+}
+/** Produce a NEW bounded artifact from one verified byte-zero representation.
+ * Only complete consecutive frames are retained; even discarded received bytes
+ * are checked for interior corruption. Never assert whole-episode SHA/duration.
+ * Remove (and record) the first Xing/Info/VBRI metadata frame so a decoder cannot
+ * mistake its original full-file totals for this artifact. ID3 is also excluded.
+ * This preserves encoded frames, not gapless playback: independent decoder and
+ * heard-caption alignment evidence remain required before lesson eligibility. */
+export function prepareContentMp3Prefix(bytes: Uint8Array, mimeType: string,
+  network: ContentFetchResult['byteCoverage'], maxSeconds = 600): ContentMp3Prefix {
+  if (!['audio/mpeg', 'audio/mp3'].includes(mimeType) || bytes.length < 44 || bytes.length > 8 * 1024 * 1024 ||
+      !Number.isFinite(maxSeconds) || maxSeconds <= 0 || maxSeconds > 600 || !network || network.start !== 0 ||
+      network.endExclusive !== bytes.length || !Number.isSafeInteger(network.totalBytes) ||
+      (network.kind === 'complete' ? network.totalBytes !== bytes.length : network.kind !== 'prefix' || network.totalBytes <= bytes.length))
+    return error('CONTENT_AUDIO_PREFIX_COVERAGE')
+  let offset = 0
+  if (ascii(bytes, 0, 3) === 'ID3') {
+    const major = bytes[3]!, flags = bytes[5]!
+    if (![2, 3, 4].includes(major) || bytes[4] === 255 || flags & (major === 4 ? 15 : major === 3 ? 31 : 63) ||
+        bytes.subarray(6, 10).some(n => n > 127)) return error('CONTENT_AUDIO_CONTAINER')
+    const tagSize = bytes.subarray(6, 10).reduce((a, b) => a * 128 + b, 0), footer = major === 4 && !!(flags & 16)
+    offset = 10 + tagSize + (footer ? 10 : 0)
+    if (offset > 1024 * 1024 || offset + 4 > bytes.length) return error('CONTENT_AUDIO_CONTAINER')
+    if (footer && (ascii(bytes, offset - 10, offset - 7) !== '3DI' ||
+        bytes.subarray(offset - 7, offset).some((n, i) => n !== bytes[i + 3]))) return error('CONTENT_AUDIO_CONTAINER')
+  }
+  const header = mp3Frame(bytes, offset), initialOffset = offset
+  let first = -1, last = -1, count = 0, scanned = 0, durationLimit = false
+  let removedMetadataFrame: ContentMp3Prefix['coverage']['removedMetadataFrame'] = null
+  while (offset < bytes.length) {
+    if (network.kind === 'complete' && bytes.length - offset === 128 && ascii(bytes, offset, offset + 3) === 'TAG') break
+    if (bytes.length - offset < 4) {
+      // 1–3 bytes are only an acceptable range tail when every available header
+      // bit is consistent. Do not turn arbitrary trailing junk into audio.
+      if (network.kind !== 'prefix' || bytes[offset] !== 255 ||
+          bytes.length - offset > 1 && (bytes[offset + 1]! & 254) !== (bytes[initialOffset + 1]! & 254) ||
+          bytes.length - offset > 2 && (!(bytes[offset + 2]! >> 4) || bytes[offset + 2]! >> 4 === 15 ||
+            (bytes[offset + 2]! & 12) !== (bytes[initialOffset + 2]! & 12))) return error('CONTENT_AUDIO_CONTAINER')
+      break
+    }
+    const frame = mp3Frame(bytes, offset)
+    if (++scanned > 400000 || frame.version !== header.version || frame.rate !== header.rate || frame.channels !== header.channels ||
+        (bytes[offset + 3]! & 3) === 2 || frame.size <= 4 + frame.crcBytes + frame.sideBytes) return error('CONTENT_AUDIO_CONTAINER')
+    if (offset + frame.size > bytes.length) {
+      if (network.kind !== 'prefix') return error('CONTENT_AUDIO_CONTAINER')
+      break
+    }
+    // The standardized Xing offset excludes CRC, including CRC-protected files.
+    const marker = ascii(bytes, offset + 4 + frame.sideBytes, offset + 8 + frame.sideBytes)
+    const metadata = marker === 'Xing' || marker === 'Info' ? marker :
+      frame.size >= 40 && ascii(bytes, offset + 36, offset + 40) === 'VBRI' ? 'VBRI' : null
+    if (metadata) {
+      if (offset !== initialOffset) return error('CONTENT_AUDIO_CONTAINER')
+      removedMetadataFrame = metadata
+    } else if (!durationLimit) {
+      const nextSeconds = (count + 1) * frame.samples / frame.rate
+      if (nextSeconds > maxSeconds) durationLimit = true
+      else {
+        if (first < 0) {
+          const side = offset + 4 + frame.crcBytes
+          const reservoir = frame.version === 3 ? bytes[side]! * 2 + (bytes[side + 1]! >> 7) : bytes[side]!
+          if (reservoir !== 0) return error('CONTENT_AUDIO_PREFIX_RESERVOIR')
+          first = offset
+        }
+        last = offset + frame.size; count++
+      }
+    }
+    offset += frame.size
+  }
+  if (count < 2 || first < 0 || last <= first) return error('CONTENT_AUDIO_CONTAINER')
+  return { bytes: bytes.slice(first, last), mimeType: 'audio/mpeg', coverage: {
+    version: 'mpeg-prefix-v1', networkKind: network.kind, receivedBytes: bytes.length, sourceBytes: network.totalBytes,
+    sourceByteStart: first, sourceByteEndExclusive: last, startSeconds: 0, endSeconds: count * header.samples / header.rate,
+    frameCount: count, sampleRate: header.rate, samplesPerFrame: header.samples, removedMetadataFrame,
+    discardedTrailingBytes: bytes.length - last, stopReason: durationLimit ? 'duration-limit' : network.kind === 'prefix' ? 'range-boundary' : 'complete',
+    gaplessAdjustment: 'not-applied',
+  } }
 }
 
 /** Container/sample-count duration, never an LLM estimate or a publisher enclosure duration.
@@ -89,17 +194,11 @@ export function contentAudioDuration(bytes: Uint8Array, mimeType: string,
     }
     while (p < bytes.length) {
       if (bytes.length - p === 128 && ascii(bytes, p, p + 3) === 'TAG') break
-      if (p + 4 > bytes.length || bytes[p] !== 255 || (bytes[p + 1]! & 224) !== 224) return error('CONTENT_AUDIO_CONTAINER')
-      const version = (bytes[p + 1]! >> 3) & 3, layer = (bytes[p + 1]! >> 1) & 3
-      const br = bytes[p + 2]! >> 4, sr = (bytes[p + 2]! >> 2) & 3, padding = (bytes[p + 2]! >> 1) & 1
-      if (version === 1 || layer !== 1 || !br || br === 15 || sr === 3) return error('CONTENT_AUDIO_CONTAINER')
-      const rate = [44100, 48000, 32000][sr]! / (version === 3 ? 1 : version === 2 ? 2 : 4)
+      const { rate, size, samples } = mp3Frame(bytes, p)
       if (sampleRate && sampleRate !== rate) return error('CONTENT_AUDIO_CONTAINER')
       sampleRate = rate
-      const bitrate = (version === 3 ? [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320] : [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160])[br]! * 1000
-      const size = Math.floor((version === 3 ? 144 : 72) * bitrate / rate) + padding
       if (p + size > bytes.length || ++frames > 4_000_000) return error('CONTENT_AUDIO_CONTAINER')
-      const end = duration + (version === 3 ? 1152 : 576) / rate
+      const end = duration + samples / rate
       visitFrame?.(p, size, duration, end)
       duration = end
       p += size
