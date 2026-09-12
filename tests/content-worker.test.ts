@@ -626,6 +626,31 @@ describe('content worker state transitions and inspection boundary', () => {
     expect(JSON.stringify(result)).not.toContain('Raw provider')
     expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
   })
+  it.each(['CONTENT_AUDIO_SCHEMA', 'CONTENT_AUDIO_CATALOG', 'CONTENT_STT_TIMING', 'CONTENT_AUDIO_PROVIDER_FAILURE'])(
+    'retains the trusted %s code without persisting raw provider details or clearing its hold', async code => {
+      const opts = options()
+      opts.fetcher = fetcher(rss(false))
+      opts.transcribe = async () => { throw new GatewayError(503, code, 'PRIVATE provider response and credential') }
+      const result = await runContentRefresh(opts)
+      expect(result.errors).toContainEqual({ sourceId: testSource().id, code })
+      expect(opts.adminClient.calls.find(call => call.action === 'finish-item')?.args.reasons).toEqual([code])
+      expect(events.filter(event => event.startsWith('budget-'))).toEqual(['budget-reserved', 'budget-uncertain'])
+      expect(result.eligibleSegments).toBe(0)
+      expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
+      expect(JSON.stringify([result, opts.adminClient.calls])).not.toContain('PRIVATE')
+    })
+  it.each(['unknown-code', 'lookalike'])(
+    'redacts %s even when it resembles a typed content service failure', async kind => {
+      const opts = options()
+      opts.analyzeAudio = async () => {
+        if (kind === 'unknown-code') throw new GatewayError(503, 'CONTENT_AUDIO_PRIVATE_VALUE', 'PRIVATE message')
+        throw Object.assign(new Error('PRIVATE message'), { code: 'CONTENT_AUDIO_SCHEMA' })
+      }
+      const result = await runContentRefresh(opts)
+      expect(result.errors).toContainEqual({ sourceId: testSource().id, code: 'content-operation-failed' })
+      expect(events).toContain('budget-uncertain')
+      expect(JSON.stringify([result, opts.adminClient.calls])).not.toContain('PRIVATE')
+    })
   it.each(['unsupported-analysis', 'out-of-range-analysis', 'unsupported-stt'])('rejects %s before reserving provider spend and retains saved work', async kind => {
     const opts = options(), base = fetcher(rss(kind !== 'unsupported-stt'))
     opts.fetcher = async request => request.role === 'audio' ? { ...await base(request),
@@ -996,6 +1021,72 @@ function pcmFixture(seconds = 60): Uint8Array {
   return bytes // Explicit silence fixture, never a human audio sample.
 }
 describe('real audio service contract (synthetic transport tests, not acoustic validation)', () => {
+  it.each(['schema', 'timing', 'incomplete', 'unknown-cost', 'zero-cost'])(
+    'keeps the provider receipt for rejected %s without approving a lesson or replaying', async kind => {
+      const opts = options()
+      opts.fetcher = fetcher(rss(false))
+      const costUsd = kind === 'unknown-cost' ? null : kind === 'zero-cost' ? 0 : 0.008
+      const network = vi.fn(async (url: string | URL | Request) => {
+        if (String(url).endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'google/gemini-2.5-flash',
+          architecture: { input_modalities: ['audio'] }, supported_parameters: ['structured_outputs'] }] }))
+        return new Response(JSON.stringify({ id: 'gen-synthetic-rejected-content', model: 'google/gemini-2.5-flash',
+          choices: [{ finish_reason: kind === 'incomplete' ? 'length' : 'stop', message: { content: JSON.stringify(
+            kind === 'timing' ? { segments: [{ startTime: 10, endTime: 5, body: 'PRIVATE invalid cue' }] } : { segments: 'PRIVATE invalid response' }) } }],
+          usage: { total_tokens: 123, cost: costUsd } }))
+      }) as typeof fetch
+      const services = createContentAudioServices({ env: name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined, fetcher: network })
+      opts.transcribe = services.transcribe
+      const settle = vi.fn(opts.budget!.settle)
+      opts.budget = { ...opts.budget!, settle }
+      const result = await runContentRefresh(opts)
+      expect(network).toHaveBeenCalledTimes(2)
+      expect(result.eligibleSegments).toBe(0)
+      expect(settle).toHaveBeenCalledExactlyOnceWith({ reservationId: 'test-budget', status: 'uncertain',
+        usage: { provider: 'openrouter-native-audio', model: 'google/gemini-2.5-flash', units: 123, unitName: 'tokens', costUsd } })
+      const recorded = opts.adminClient.calls.find(call => call.action === 'usage')?.args
+      expect(recorded).toMatchObject({ status: 'uncertain', usage: { costUsd, units: 123, providerRequestId: 'gen-synthetic-rejected-content' } })
+      expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
+      expect(JSON.stringify([result, opts.adminClient.calls])).not.toContain('PRIVATE')
+    })
+  it.each(['id', 'model', 'units', 'lookalike-error'])(
+    'keeps an unknown charge when %s cannot establish a valid receipt', async kind => {
+      const opts = options()
+      opts.fetcher = fetcher(rss(false))
+      const network = vi.fn(async (url: string | URL | Request) => {
+        if (String(url).endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'google/gemini-2.5-flash',
+          architecture: { input_modalities: ['audio'] }, supported_parameters: ['structured_outputs'] }] }))
+        if (kind === 'lookalike-error') throw Object.assign(new Error('PRIVATE provider transport detail'), {
+          receipt: { id: 'gen-false', usage: { costUsd: 0, units: 0, unitName: 'tokens', provider: 'openrouter-native-audio', model: 'google/gemini-2.5-flash' } },
+        })
+        return new Response(JSON.stringify({ id: kind === 'id' ? 'PRIVATE invalid id' : 'gen-synthetic-invalid-receipt',
+          model: kind === 'model' ? 'PRIVATE invalid model' : 'google/gemini-2.5-flash',
+          choices: [{ finish_reason: 'stop', message: { content: '{"segments":"PRIVATE"}' } }],
+          usage: { total_tokens: kind === 'units' ? -1 : 123, cost: 0.008 } }))
+      }) as typeof fetch
+      opts.transcribe = createContentAudioServices({ env: name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined, fetcher: network }).transcribe
+      const settle = vi.fn(opts.budget!.settle)
+      opts.budget = { ...opts.budget!, settle }
+      const result = await runContentRefresh(opts)
+      expect(settle).toHaveBeenCalledExactlyOnceWith({ reservationId: 'test-budget', status: 'uncertain', usage: null })
+      expect(result.eligibleSegments).toBe(0)
+      expect(JSON.stringify([result, opts.adminClient.calls])).not.toContain('PRIVATE')
+    })
+  it('retains a validated charge when persistence fails after the provider response', async () => {
+    const opts = options(), rpc = opts.adminClient.rpc.bind(opts.adminClient)
+    opts.analyzeAudio = analyzer
+    let firstUsage = true
+    opts.adminClient.rpc = async (name, input) => {
+      if (input?.action === 'usage' && firstUsage) { firstUsage = false; return { data: null, error: { code: 'fixture-failure' } } }
+      return rpc(name, input)
+    }
+    const settle = vi.fn(opts.budget!.settle)
+    opts.budget = { ...opts.budget!, settle }
+    const result = await runContentRefresh(opts)
+    expect(settle).toHaveBeenNthCalledWith(1, { reservationId: 'test-budget', status: 'completed', usage })
+    expect(settle).toHaveBeenNthCalledWith(2, { reservationId: 'test-budget', status: 'uncertain', usage })
+    expect(opts.adminClient.calls.find(call => call.action === 'usage')?.args).toMatchObject({ status: 'uncertain', usage })
+    expect(result.eligibleSegments).toBe(0)
+  })
   it('extracts actual PCM samples and MPEG frames with a measured origin instead of proportional byte offsets', () => {
     const whole=pcmFixture(90), wav=contentAudioWindow(whole,'audio/wav',20,65)
     expect(contentAudioDuration(wav.bytes,'audio/wav')).toBe(45)

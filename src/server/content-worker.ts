@@ -6,8 +6,9 @@ import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, VOA_LESSON_CANDIDATES,
 import type { ContentSource, FeedEpisode, LearnerContentProfile, TimedTranscript, TranscriptReference } from '../content/pipeline-types'
 import { ContentNetworkError, fetchContentResource, type ContentFetchResult } from './content-network'
 import { CONTENT_POLICY_EVIDENCE, revalidateContentRights } from './content-rights'
-import { contentAudioDuration, contentAudioWindow } from './content-audio'
+import { contentAudioDuration, contentAudioWindow, ContentAudioResponseError } from './content-audio'
 import { auditVoaLessonCandidates, type VoaCandidateAudit } from './content-voa'
+import { GatewayError } from './gateway'
 import type {
   ContentAdminClient, ContentAudioInput, ContentAudioResult, ContentAudioStore, ContentRefreshOptions, ContentRefreshSummary,
   ContentRightsRecord, ContentUsage, EligibleContentLesson, PersistedContentSegment, SelectContentOptions,
@@ -73,7 +74,22 @@ const use = { mode: 'private-excerpt', attributionProvided: true, changesIndicat
 const screeningProfile: LearnerContentProfile = { targetDifficulty: 0.45, fatigue: 0, interests: ['Everyday life', 'Living abroad'], requireGeneralAmerican: false }
 const defaultOwnerProfile: LearnerContentProfile = { ...screeningProfile, requireGeneralAmerican: true }
 const contentBucket = 'jove-content-audio'
-const codeOf = (error: unknown): string => error instanceof ContentWorkerError || error instanceof ContentNetworkError || error instanceof ContentPipelineError ? error.code : 'content-operation-failed'
+// Only our enumerated service codes may enter persisted diagnostics. Never copy
+// an exception message, arbitrary provider code, response body or request data.
+const serviceErrorCodes = new Set([
+  'CONTENT_AUDIO_CONTAINER', 'CONTENT_AUDIO_FORMAT_REQUIRES_DECODER', 'CONTENT_AUDIO_INTERVAL',
+  'CONTENT_OGG_CLIP_DECODER_REQUIRED', 'CONTENT_CLIP_DECODER_REQUIRED', 'CONTENT_AUDIO_MODEL',
+  'CONTENT_PROVIDER_URL', 'CONTENT_AUDIO_CREDENTIAL_REQUIRED', 'CONTENT_AUDIO_RATE_LIMIT',
+  'CONTENT_AUDIO_PROVIDER_FAILURE', 'CONTENT_AUDIO_RESPONSE', 'CONTENT_AUDIO_HASH',
+  'CONTENT_AUDIO_UPLOAD', 'CONTENT_AUDIO_UPLOAD_HASH', 'CONTENT_AUDIO_INPUT_BOUNDARY',
+  'CONTENT_AUDIO_CATALOG', 'CONTENT_AUDIO_MODEL_CAPABILITY', 'CONTENT_AUDIO_INCOMPLETE',
+  'CONTENT_AUDIO_SCHEMA', 'CONTENT_AUDIO_USAGE_UNKNOWN', 'CONTENT_AUDIO_COVERAGE',
+  'CONTENT_AUDIO_TRANSCRIPT_TIMING', 'CONTENT_STT_TIMING', 'CONTENT_OWNER', 'CONTENT_BUDGET',
+  'CONTENT_DISPATCH', 'BUDGET', 'RESERVATION', 'USAGE_PENDING', 'UPLOAD_INTERRUPTED', 'UPLOAD_TIMEOUT', 'TOO_LARGE',
+])
+const codeOf = (error: unknown): string => error instanceof ContentWorkerError || error instanceof ContentNetworkError ||
+  error instanceof ContentPipelineError || error instanceof GatewayError && serviceErrorCodes.has(error.code)
+  ? error.code : 'content-operation-failed'
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)
 
 async function rpc<T>(client: ContentAdminClient, action: string, args: Record<string, unknown>): Promise<T> {
@@ -357,16 +373,24 @@ async function providerCall<T extends { usage: ContentUsage }>(context: JobConte
     maxCostUsd: purpose === 'content-analysis' ? context.options.costCeilings!.analysisUsd : context.options.costCeilings!.transcriptionUsd })
   if (!reserved.allowed) return fail('content-budget-denied')
   if (!reserved.reservationId || !reserved.acquired || reserved.replay) return fail('content-provider-reconciliation-required')
+  let observedUsage: ContentUsage | null = null
   try {
     const result = await abortable(invoke(), context.controller.signal)
-    validateUsage(result.usage)
+    observedUsage = validateUsage(result.usage)
     await context.options.budget!.settle({ reservationId: reserved.reservationId, status: 'completed', usage: result.usage })
     await context.call('usage', { itemId: item.id, revision: item.revision, ownerId: context.ownerId, requestId, purpose, status: 'completed', usage: result.usage })
     return result
   } catch (error) {
     // Unknown outcome keeps its reservation chargeable. No automatic replay after a possible paid dispatch.
-    try { await context.options.budget!.settle({ reservationId: reserved.reservationId, status: 'uncertain', usage: null }) } catch { /* Primary outcome stays uncertain. */ }
-    try { await context.call('usage', { itemId: item.id, revision: item.revision, ownerId: context.ownerId, requestId, purpose, status: 'uncertain', usage: { costUsd: null } }) } catch { /* Lease loss must not permit stale writes. */ }
+    // A provider-attested invoice is independent of lesson validity. Retain it
+    // even if schema/timing/coverage validation fails; null still keeps the hold.
+    let usage: ContentUsage | null = observedUsage, providerRequestId: string | null = null
+    if (error instanceof ContentAudioResponseError) {
+      try { usage = validateUsage(error.receipt.usage); providerRequestId = error.receipt.id } catch { /* Invalid receipt is not billing evidence. */ }
+    }
+    try { await context.options.budget!.settle({ reservationId: reserved.reservationId, status: 'uncertain', usage }) } catch { /* Primary outcome stays uncertain. */ }
+    try { await context.call('usage', { itemId: item.id, revision: item.revision, ownerId: context.ownerId, requestId, purpose, status: 'uncertain',
+      usage: { ...(usage ?? { costUsd: null }), ...(providerRequestId ? { providerRequestId } : {}), errorCode: codeOf(error) } }) } catch { /* Lease loss must not permit stale writes. */ }
     throw error
   }
 }
