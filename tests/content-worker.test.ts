@@ -7,7 +7,7 @@ import type { ContentSource, FeedEpisode, Inspection, ObservationEvidence, Timed
 import { createContentFetcher, fetchContentResource, isPublicContentAddress, type ContentFetcher } from '../src/server/content-network'
 import { parseRssFeed, parseOpenYapPreviewManifest, resolveEpisodeAudioUrl, validateSourceUrl } from '../src/content/pipeline'
 import { CONTENT_POLICY_EVIDENCE, extractContentPolicy, revalidateContentRights } from '../src/server/content-rights'
-import { contentAudioDuration, contentAudioWindow, contentMp3PrefixWindow, contentStoredAudioWindow, createContentAudioServices, prepareContentMp3Prefix } from '../src/server/content-audio'
+import { contentAudioDuration, contentAudioHttpDiagnostic, contentAudioWindow, contentMp3PrefixWindow, contentStoredAudioWindow, createContentAudioServices, prepareContentMp3Prefix } from '../src/server/content-audio'
 import { auditVoaLessonCandidates, type VoaCandidateAudit } from '../src/server/content-voa'
 import { contentPublicOrigin, contentSignedPlaybackUrl, createContentBudget, createContentHandler } from '../src/server/content'
 import { GatewayError, type OwnerContext } from '../src/server/gateway'
@@ -1572,6 +1572,115 @@ describe('bounded MP3 prefix frame preparation (not acoustic or decoder certific
 })
 
 describe('real audio service contract (synthetic transport tests, not acoustic validation)', () => {
+  async function inspectFailure(body: BodyInit | null, headers: HeadersInit = { 'Content-Type': 'application/json' }, provider: 'openrouter' | 'gemini' = 'openrouter', abortWorker = false) {
+    const opts = options()
+    opts.fetcher = fetcher(rss(false))
+    const controller = new AbortController(); opts.signal = controller.signal
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const network = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith('/models')) return Response.json({ data: [{ id: 'google/gemini-2.5-flash', architecture: { input_modalities: ['audio'] }, supported_parameters: ['structured_outputs'] }] })
+      if (abortWorker) timer = setTimeout(() => controller.abort(), 20)
+      return new Response(body, { status: 400, headers })
+    })
+    opts.transcribe = createContentAudioServices({ env: name => name === (provider === 'openrouter' ? 'OPENROUTER_API_KEY' : 'GEMINI_API_KEY') ? 'synthetic-only' : undefined, fetcher: network }).transcribe
+    const settle = vi.fn(opts.budget!.settle)
+    opts.budget = { ...opts.budget!, settle }
+    const result = await runContentRefresh(opts).finally(() => clearTimeout(timer))
+    expect(network).toHaveBeenCalledTimes(provider === 'openrouter' ? 2 : 1)
+    expect(settle).toHaveBeenCalledExactlyOnceWith({ reservationId: 'test-budget', status: 'uncertain', usage: null })
+    expect(result.eligibleSegments).toBe(0)
+    expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
+    expect(JSON.stringify([result, opts.adminClient.calls])).not.toContain('PRIVATE')
+    return opts.adminClient.calls.find(call => call.action === 'usage')?.args.usage
+  }
+  it('projects known structured provider error fields without copying messages or private field paths', async () => {
+    const usage = await inspectFailure(JSON.stringify({ error: { code: 400, message: 'PRIVATE full prompt', param: 'max_tokens', metadata: {
+      error_type: 'invalid_request', provider_code: 'INVALID_ARGUMENT', raw: JSON.stringify({ error: {
+        status: 'INVALID_ARGUMENT', message: 'PRIVATE audio and credentials', details: [{
+          '@type': 'type.googleapis.com/google.rpc.BadRequest', fieldViolations: [
+            { field: 'generation_config.response_schema.properties[0].value', description: 'PRIVATE schema property' },
+            { field: 'contents[0].parts[0].inline_data.data', description: 'PRIVATE audio' },
+            { field: 'PRIVATE other field' },
+          ],
+        }],
+      } }),
+    } } }))
+    expect(usage).toEqual({ costUsd: null, errorCode: 'CONTENT_AUDIO_PROVIDER_FAILURE', httpDiagnostic: {
+      provider: 'openrouter', stage: 'generate', status: 400, errorType: 'invalid_request', upstreamCode: 'INVALID_ARGUMENT',
+      parameters: ['max_tokens', 'response_schema', 'contents'],
+    } })
+  })
+  it.each(['unknown-values', 'malformed', 'oversized', 'wrong-type', 'wrong-details-type', 'bad-raw-json'])(
+    'retains the HTTP status while excluding unsafe %s error detail', async kind => {
+      const body = kind === 'malformed' ? 'PRIVATE invalid JSON' : JSON.stringify({
+        padding: kind === 'oversized' ? 'PRIVATE'.repeat(3000) : undefined,
+        error: { param: kind === 'wrong-type' || kind === 'oversized' ? 'max_tokens' : 'PRIVATE', message: 'PRIVATE', metadata: {
+          error_type: 'PRIVATE', provider_code: 'PRIVATE', raw: kind === 'bad-raw-json' ? 'PRIVATE invalid JSON' : JSON.stringify({ error: { details: [{
+            '@type': kind === 'wrong-details-type' ? 'PRIVATE' : 'type.googleapis.com/google.rpc.BadRequest',
+            fieldViolations: [{ field: kind === 'wrong-details-type' ? 'max_tokens' : 'PRIVATE', description: 'PRIVATE' }],
+          }] } }),
+        } },
+      })
+      const usage = await inspectFailure(body, { 'Content-Type': kind === 'wrong-type' ? 'text/html' : 'application/json' })
+      expect(usage).toEqual({ costUsd: null, errorCode: 'CONTENT_AUDIO_PROVIDER_FAILURE', httpDiagnostic: { provider: 'openrouter', stage: 'generate', status: 400 } })
+    })
+  it('normalizes direct Gemini JSON/proto field paths, deduplicates and caps parameters', async () => {
+    const usage = await inspectFailure(JSON.stringify({ error: { status: 'INVALID_ARGUMENT', message: 'PRIVATE', details: [{
+      '@type': 'type.googleapis.com/google.rpc.BadRequest', fieldViolations: [
+        'generationConfig.responseJsonSchema.properties[0].value', 'generation_config.response_json_schema',
+        'generationConfig.maxOutputTokens', 'systemInstruction.parts[0].text', 'contents[0].parts[0].inlineData', 'model',
+      ].map(field => ({ field, description: 'PRIVATE' })),
+    }] } }), undefined, 'gemini')
+    expect(usage).toEqual({ costUsd: null, errorCode: 'CONTENT_AUDIO_PROVIDER_FAILURE', httpDiagnostic: {
+      provider: 'gemini', stage: 'generate', status: 400, upstreamCode: 'INVALID_ARGUMENT',
+      parameters: ['response_json_schema', 'max_output_tokens', 'system_instruction', 'contents'],
+    } })
+  })
+  it.each(['fragmented', 'invalid-utf8', 'too-many-empty', 'oversized-header'])(
+    'handles %s JSON error transport within the diagnostic boundary', async kind => {
+      const cancel = vi.fn(), bytes = new TextEncoder().encode('{"error":{"metadata":{"error_type":"invalid_request"}}}')
+      let index = 0
+      const stream = new ReadableStream<Uint8Array>({ pull(controller) {
+        if (kind === 'too-many-empty') { controller.enqueue(new Uint8Array()); return }
+        if (kind === 'invalid-utf8') { controller.enqueue(new Uint8Array([255])); controller.close(); return }
+        if (index < bytes.length) controller.enqueue(bytes.slice(index, ++index)); else controller.close()
+      }, cancel })
+      const usage = await inspectFailure(stream, { 'Content-Type': 'application/json; charset=utf-8', ...(kind === 'oversized-header' ? { 'Content-Length': '17000' } : {}) })
+      expect(usage).toEqual({ costUsd: null, errorCode: 'CONTENT_AUDIO_PROVIDER_FAILURE', httpDiagnostic: {
+        provider: 'openrouter', stage: 'generate', status: 400, ...(kind === 'fragmented' ? { errorType: 'invalid_request' } : {}),
+      } })
+      if (kind === 'too-many-empty' || kind === 'oversized-header') expect(cancel).toHaveBeenCalledOnce()
+    })
+  it.each(['before-read', 'while-read'])('cancels diagnostic parsing %s without losing the observed HTTP error', async kind => {
+    const opts = options(); await runContentRefresh(opts)
+    const controller = new AbortController(), cancel = vi.fn(), bytes = pcmFixture(), hash = createHash('sha256').update(bytes).digest('hex')
+    const episode = [...opts.adminClient.items.values()][0]!.episode as Parameters<ReturnType<typeof createContentAudioServices>['transcribe']>[0]['episode']
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const services = createContentAudioServices({ env: name => name === 'GEMINI_API_KEY' ? 'synthetic-only' : undefined, fetcher: vi.fn(async () => {
+      if (kind === 'before-read') controller.abort(); else timer = setTimeout(() => controller.abort(), 10)
+      return new Response(new ReadableStream({ cancel }), { status: 400, headers: { 'Content-Type': 'application/json' } })
+    }) })
+    try {
+      const failure = await services.transcribe({ requestId: 'test', requestFingerprint: hash, episode,
+        audio: { bytes, sha256: hash, mimeType: 'audio/wav', objectPath: 'fixture' }, sourcePolicy: testSource().rights, sourcePolicyHash: hash, signal: controller.signal }).catch(error => error)
+      expect(await contentAudioHttpDiagnostic(failure)).toEqual({ provider: 'gemini', stage: 'generate', status: 400 })
+      expect(cancel).toHaveBeenCalledOnce()
+    } finally { clearTimeout(timer); await services.dispose() }
+  })
+  it('bounds a stalled JSON error body and cancellation without losing the uncertain checkpoint', async () => {
+    const cancel = vi.fn(() => new Promise<void>(() => {}))
+    const started = Date.now()
+    const usage = await inspectFailure(new ReadableStream({ cancel }))
+    expect(usage).toEqual({ costUsd: null, errorCode: 'CONTENT_AUDIO_PROVIDER_FAILURE', httpDiagnostic: { provider: 'openrouter', stage: 'generate', status: 400 } })
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+  it.each(['openrouter', 'gemini'] as const)('preserves observed HTTP evidence through %s worker cancellation', async provider => {
+    const cancel = vi.fn()
+    const usage = await inspectFailure(new ReadableStream({ cancel }), undefined, provider, true)
+    expect(usage).toEqual({ costUsd: null, errorCode: 'CONTENT_AUDIO_PROVIDER_FAILURE', httpDiagnostic: { provider, stage: 'generate', status: 400 } })
+    expect(cancel).toHaveBeenCalledOnce()
+  })
   it.each(['openrouter', 'gemini'].flatMap(provider => [400, 401, 402, 403, 408, 413, 429, 500, 502, 503]
     .map(status => ({ provider, status }))))(
     'retains bounded $provider HTTP $status diagnostics without body data, retries or a settled charge', async ({ provider, status }) => {
@@ -2484,7 +2593,8 @@ describe.runIf(localEnabled)('dedicated local PostgreSQL persistence and RLS (no
     const feed = fetcher(rss(false).replace('<guid>one</guid>', '<guid>stored-http-failure</guid>'))
     const network = vi.fn(async (url: string | URL | Request) => String(url).endsWith('/models')
       ? new Response(JSON.stringify({ data: [{ id: 'google/gemini-2.5-flash', architecture: { input_modalities: ['audio'] },
-        supported_parameters: ['structured_outputs'] }] })) : new Response('PRIVATE response', { status: 402 })) as typeof fetch
+        supported_parameters: ['structured_outputs'] }] })) : Response.json({ error: { code: 402, message: 'PRIVATE response',
+          metadata: { error_type: 'payment_required', provider_code: 'RESOURCE_EXHAUSTED' } } }, { status: 402 })) as typeof fetch
     const services = createContentAudioServices({ env: name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined, fetcher: network })
     const store = makeStore(), settle = vi.fn(budget().settle)
     const opts: ContentRefreshOptions = { ...options(), adminClient: admin, sources: [source], ownerId: localOwner, now: Date.now,
@@ -2495,7 +2605,7 @@ describe.runIf(localEnabled)('dedicated local PostgreSQL persistence and RLS (no
     const row = JSON.parse(sql(`select jsonb_build_object('status',status,'cost',cost_usd,'usage',usage)
       from public.content_usage where item_id='${itemId}';`))
     expect(row).toEqual({ status: 'uncertain', cost: null, usage: { costUsd: null, errorCode: 'CONTENT_AUDIO_PROVIDER_FAILURE',
-      httpDiagnostic: { provider: 'openrouter', stage: 'generate', status: 402 } } })
+      httpDiagnostic: { provider: 'openrouter', stage: 'generate', status: 402, errorType: 'payment_required', upstreamCode: 'RESOURCE_EXHAUSTED' } } })
     expect(settle).toHaveBeenCalledExactlyOnceWith({ reservationId: 'test-budget', status: 'uncertain', usage: null })
     expect(network).toHaveBeenCalledTimes(2)
     expect(result.eligibleSegments).toBe(0); expect(store.blobs.size).toBe(1)

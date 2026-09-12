@@ -400,7 +400,7 @@ async function providerCall<T extends { usage: ContentUsage }>(context: JobConte
     if (error instanceof ContentAudioResponseError) {
       try { usage = validateUsage(error.receipt.usage); providerRequestId = error.receipt.id } catch { /* Invalid receipt is not billing evidence. */ }
     }
-    const httpDiagnostic = contentAudioHttpDiagnostic(error)
+    const httpDiagnostic = await contentAudioHttpDiagnostic(error)
     try { await context.options.budget!.settle({ reservationId: reserved.reservationId, status: 'uncertain', usage }) } catch { /* Primary outcome stays uncertain. */ }
     try { await context.call('usage', { itemId: item.id, revision: item.revision, ownerId: context.ownerId, requestId, purpose, status: 'uncertain',
       usage: { ...(usage ?? { costUsd: null }), ...(providerRequestId ? { providerRequestId } : {}),
