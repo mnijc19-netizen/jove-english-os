@@ -238,6 +238,9 @@ test("recording is saved before transcription and survives an API error", async 
     page.getByText("YOUR CONVERSATION REFLECTION", { exact: true }),
   ).toBeVisible();
   await open(page, "settings");
+  await expect(page.getByRole("heading", { name: "AI connection", exact: true })).toBeVisible();
+  const advanced = page.getByRole("button", { name: "Advanced: optional browser key", exact: true });
+  if (await advanced.count()) await advanced.click();
   await page.locator("#api-key").fill("test-key-not-real");
   await page.getByRole("button", { name: "Save key", exact: true }).click();
   await expect(page.getByText("Key saved locally", { exact: true })).toBeVisible();
@@ -261,6 +264,8 @@ test("recording is saved before transcription and survives an API error", async 
   await expect(page.getByRole("button", { name: "Test connection", exact: true })).toBeDisabled();
   expect((await rows(page, "secrets")).filter(row => ["openrouter", "provider-mode"].includes(String(row.id)))).toHaveLength(0);
   await page.reload();
+  await expect(page.getByRole("heading", { name: "AI connection", exact: true })).toBeVisible();
+  if (await advanced.count()) await advanced.click();
   await expect(page.getByText("No browser key", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Test connection", exact: true })).toBeDisabled();
   expect((await rows(page, "audio")).length).toBe(1);

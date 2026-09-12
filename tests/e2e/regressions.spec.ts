@@ -121,6 +121,9 @@ async function connectMock(page: Page) {
     });
   });
   await open(page, "settings");
+  await expect(page.getByRole("heading", { name: "AI connection", exact: true })).toBeVisible();
+  const advanced = page.getByRole("button", { name: "Advanced: optional browser key", exact: true });
+  if (await advanced.count()) await advanced.click();
   await page.locator("#api-key").fill("test-key-not-real");
   await page.getByRole("button", { name: "Save key", exact: true }).click();
   await expect(page.locator("#api-key")).toHaveValue("");
