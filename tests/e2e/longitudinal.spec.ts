@@ -25,6 +25,28 @@ async function put(page: Page, table: string, values: unknown[]) {
   }), { table, values })
 }
 
+test('route focus cannot interrupt an editor after navigation has rendered', async ({ page }) => {
+  await page.goto('#/'); await page.getByRole('heading', { level: 1 }).waitFor()
+  const now = await page.evaluate(() => Date.now())
+  await page.clock.install({ time: new Date(now) })
+  await page.clock.pauseAt(new Date(now + 1000))
+  await page.goto(`#/learn?material=${demoMaterials[0]!.id}`)
+  const editor = page.locator('.chunk-card textarea').first()
+  await expect(editor).toBeEditable()
+  await editor.focus()
+  await expect(editor).toBeFocused()
+  // A user can begin typing before a deferred route-focus callback runs.
+  // Advance only the clock, never dispatch or replace a focus/input event.
+  await page.clock.runFor(100)
+  await expect(editor).toBeFocused()
+  const response = 'I can use this expression to help a friend.'
+  await page.keyboard.type(response)
+  await expect(editor).toHaveValue(response)
+  await expect(page.getByRole('button', { name: 'Save my example & practice later' }).first()).toBeEnabled()
+  await expect.poll(async () => (await rows<StudySession>(page, 'sessions'))
+    .find(row => row.id === `learn-draft-${demoMaterials[0]!.id}`)?.draft.recalled).toMatchObject({ [demoMaterials[0]!.chunks[0]!.text]: response })
+})
+
 test('synced unsent reading has an optional independent recovery that survives reload without repeating the assignment', async ({ page }) => {
   await page.goto('#/'); await page.getByRole('heading', { level: 1 }).waitFor()
   const now = await page.evaluate(() => Date.now()), date = await page.evaluate(() => new Date().toLocaleDateString('en-CA'))

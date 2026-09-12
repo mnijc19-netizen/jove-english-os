@@ -1,4 +1,4 @@
-import { createApp } from "vue";
+import { createApp, nextTick } from "vue";
 import { createPinia } from "pinia";
 import { createRouter, createWebHashHistory } from "vue-router";
 import App from "./App.vue";
@@ -21,13 +21,18 @@ const router = createRouter({
   ],
   scrollBehavior: () => ({ top: 0 }),
 });
-router.afterEach(() => {
-  window.setTimeout(
-    () =>
-      document
-        .querySelector<HTMLElement>("main h1")
-        ?.focus({ preventScroll: true }),
-    80,
-  );
+router.afterEach((to, _from, failure) => {
+  if (failure) return;
+  const destination = to.fullPath;
+  const previousFocus = document.activeElement;
+  // Wait for the actual route render, not an elapsed-time guess that can steal
+  // focus between a user's focus/selection and their next input event.
+  void nextTick(() => {
+    if (router.currentRoute.value.fullPath !== destination) return;
+    const active = document.activeElement;
+    if (active !== document.body && active !== previousFocus) return;
+    if (active instanceof HTMLElement && active.matches('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
+    document.querySelector<HTMLElement>("main h1")?.focus({ preventScroll: true });
+  });
 });
 createApp(App).use(createPinia()).use(router).mount("#app");
