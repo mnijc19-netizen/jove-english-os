@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useCloud } from '../stores/cloud'
+import Icon from './Icon.vue'
 const cloud = useCloud(), address = ref(''), code = ref(''), sent = ref(false)
 async function send() { sent.value = await cloud.requestCode(address.value) }
 async function verify() {
@@ -11,6 +12,7 @@ async function verify() {
 <template>
   <section class="settings-section">
     <div class="settings-description">
+      <span class="small-icon"><Icon name="shield" /></span>
       <h2>Your learning account</h2>
       <p>One learning history across your devices. Offline practice stays available.</p>
     </div>

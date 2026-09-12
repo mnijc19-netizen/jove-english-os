@@ -31,6 +31,13 @@ test('external lesson saves a guided draft without media downloads or invented a
   expect(events.some(e=>['AUDIO_PLAYED','COMPREHENSION_RESPONSE','PRONUNCIATION_ASSESSED'].includes(e.type))).toBe(false)
   expect(externalRequests).toEqual([]); expect(assessments).toEqual([])
   expect(await page.evaluate(()=>document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.goto('#/settings')
+  const heading=page.getByRole('heading',{name:'Your learning account',exact:true})
+  await expect(heading).toBeVisible()
+  const title=await heading.boundingBox(), description=await heading.locator('..').locator('p').boundingBox()
+  expect(title).not.toBeNull(); expect(description).not.toBeNull()
+  expect(title!.y+title!.height).toBeLessThanOrEqual(description!.y)
+  expect(Math.abs(title!.x-description!.x)).toBeLessThan(1)
 })
 
 test.describe('external spoken retell',()=>{
