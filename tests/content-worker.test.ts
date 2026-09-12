@@ -1822,13 +1822,143 @@ describe('authenticated content API and budget adapter', () => {
   })
   const api = 'http://127.0.0.1:55321/functions/v1/content'
   const request = (body: unknown, headers: Record<string,string> = {}) => new Request(api,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(body)})
+  it.each([false, true])('checks provider access read-only after owner/job auth without starting the worker: job=%s', async scheduled => {
+    const db = new MemoryRpc(), context = { ownerId, admin: db, user: db } as unknown as OwnerContext
+    const authenticate = vi.fn(async () => context), authenticateJob = vi.fn(async () => context)
+    const workerOptions = vi.fn(() => { throw new Error('The worker must not start') })
+    const providerFetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe('https://openrouter.ai/api/v1/key')
+      expect(init).toMatchObject({ method: 'GET', redirect: 'error', credentials: 'omit', cache: 'no-store' })
+      expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer synthetic-only')
+      expect(init?.body).toBeUndefined()
+      return new Response(JSON.stringify({ data: { limit: 3, limit_remaining: 2.9, usage: 0.1, is_free_tier: false,
+        label: 'PRIVATE label', creator_user_id: 'PRIVATE user', error: 'PRIVATE raw data' } }))
+    }) as typeof fetch
+    const handler = createContentHandler(name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined,
+      { authenticate, authenticateJob, workerOptions, providerFetch, now: () => now })
+    const response = await handler(request({ action: 'provider-status' }, scheduled ? { 'X-Jove-Content-Job': 'synthetic-job' } : {}))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ provider: 'openrouter', state: 'accepted', httpStatus: 200,
+      key: { limitUsd: 3, remainingUsd: 2.9, usageUsd: 0.1, isFreeTier: false }, generationVerified: false, observedAt: now })
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+    expect(scheduled ? authenticateJob : authenticate).toHaveBeenCalledOnce()
+    expect(scheduled ? authenticate : authenticateJob).not.toHaveBeenCalled()
+    expect(providerFetch).toHaveBeenCalledOnce(); expect(workerOptions).not.toHaveBeenCalled()
+    expect(db.calls).toEqual([])
+  })
+  it.each([400, 401, 402, 403, 429, 500, 503])('returns bounded provider-status HTTP %s without provider body or billing writes', async status => {
+    const db = new MemoryRpc(), context = { ownerId, admin: db, user: db } as unknown as OwnerContext
+    const cancel = vi.fn(() => new Promise<void>(() => {}))
+    const providerFetch = vi.fn(async () => new Response(new ReadableStream({ cancel }), { status }))
+    const handler = createContentHandler(name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined,
+      { authenticate: async () => context, providerFetch, now: () => now })
+    const response = await handler(request({ action: 'provider-status' }))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ provider: 'openrouter', state: [401, 403].includes(status) ? 'rejected' : 'unverified',
+      httpStatus: status, key: null, generationVerified: false, observedAt: now })
+    expect(providerFetch).toHaveBeenCalledOnce(); expect(cancel).toHaveBeenCalledOnce(); expect(db.calls).toEqual([])
+  })
+  it.each([false, true])('rejects provider-status overrides before reading credentials: job=%s', async scheduled => {
+    const read: string[] = [], db = new MemoryRpc(), context = { ownerId, admin: db, user: db } as unknown as OwnerContext
+    const providerFetch = vi.fn(async () => { throw new Error('No provider request allowed') })
+    const handler = createContentHandler(name => { read.push(name); return undefined },
+      { authenticate: async () => context, authenticateJob: async () => context, providerFetch })
+    for (const extra of [{ url: 'https://example.invalid' }, { ownerId: 'other' }, { key: 'PRIVATE' }, { refresh: true }]) {
+      const response = await handler(request({ action: 'provider-status', ...extra }, scheduled ? { 'X-Jove-Content-Job': 'synthetic-job' } : {}))
+      expect(response.status).toBe(400)
+    }
+    expect(providerFetch).not.toHaveBeenCalled(); expect(read).not.toContain('OPENROUTER_API_KEY'); expect(db.calls).toEqual([])
+  })
+  it('keeps the job payload union separate from owner actions and the legacy probe', async () => {
+    const db = new MemoryRpc(), context = { ownerId, admin: db, user: db } as unknown as OwnerContext
+    const providerFetch = vi.fn(async () => { throw new Error('No provider request allowed') })
+    const workerOptions = vi.fn(() => { throw new Error('Synthetic refresh-entry marker') })
+    const handler = createContentHandler(() => undefined, { authenticateJob: async () => context, providerFetch, workerOptions })
+    for (const body of [null, [], { probe: true }, { action: 'refresh' }, { action: 'status' }, { action: 'history' },
+      { action: 'audio' }, { action: 'lessons' }, { action: 'provider-status', profile: {} }]) {
+      const response = await handler(request(body, { 'X-Jove-Content-Job': 'synthetic-job' }))
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ error: { code: 'CONTENT_JOB_REQUEST' } })
+    }
+    expect(db.calls).toEqual([]); expect(workerOptions).not.toHaveBeenCalled()
+    expect((await handler(request({}, { 'X-Jove-Content-Job': 'synthetic-job' }))).status).toBe(503)
+    expect(workerOptions).toHaveBeenCalledOnce()
+    expect(db.calls.map(call => call.action)).toEqual(['profile'])
+    expect(providerFetch).not.toHaveBeenCalled()
+  })
+  it.each(['malformed', 'missing', 'coercion', 'negative-usage', 'infinite', 'oversized', 'boolean'])(
+    'keeps provider-status unverified for %s metadata without reflecting it', async kind => {
+      const db = new MemoryRpc(), context = { ownerId, admin: db, user: db } as unknown as OwnerContext
+      const data: Record<string, unknown> = { limit: 3, limit_remaining: 2.9, usage: 0.1, is_free_tier: false, label: 'PRIVATE' }
+      if (kind === 'missing') delete data.limit_remaining
+      if (kind === 'coercion') data.usage = '0.1'
+      if (kind === 'negative-usage') data.usage = -1
+      if (kind === 'boolean') data.is_free_tier = 'false'
+      const body = kind === 'malformed' ? 'PRIVATE invalid JSON' : kind === 'infinite' ? '{"data":{"usage":1e999}}' :
+        JSON.stringify({ data, extra: kind === 'oversized' ? 'PRIVATE'.repeat(3000) : null })
+      const providerFetch = vi.fn(async () => new Response(body))
+      const handler = createContentHandler(name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined,
+        { authenticate: async () => context, providerFetch, now: () => now })
+      const response = await handler(request({ action: 'provider-status' }))
+      expect(await response.json()).toEqual({ provider: 'openrouter', state: 'unverified', httpStatus: 200,
+        key: null, generationVerified: false, observedAt: now })
+      expect(providerFetch).toHaveBeenCalledOnce(); expect(db.calls).toEqual([])
+    })
+  it.each([[null, null], [0, 0], [3, -0.1]])('preserves unknown/zero/exhausted provider-status cap %s / %s', async (limit, remaining) => {
+    const db = new MemoryRpc(), context = { ownerId, admin: db, user: db } as unknown as OwnerContext
+    const handler = createContentHandler(name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined, {
+      authenticate: async () => context, providerFetch: async () => new Response(JSON.stringify({ data: {
+        limit, limit_remaining: remaining, usage: 0, is_free_tier: true,
+      } })), now: () => now,
+    })
+    const response = await handler(request({ action: 'provider-status' }))
+    expect(await response.json()).toMatchObject({ state: 'accepted', key: { limitUsd: limit, remainingUsd: remaining, usageUsd: 0 }, generationVerified: false })
+    expect(db.calls).toEqual([])
+  })
+  it.each(['missing', 'direct-gemini', 'direct-with-unused-router'])(
+    'does not probe an absent or inactive router key: %s', async kind => {
+      const db = new MemoryRpc(), context = { ownerId, admin: db, user: db } as unknown as OwnerContext
+      const providerFetch = vi.fn(async () => { throw new Error('No provider request allowed') })
+      const config: Record<string, string> = kind === 'missing' ? {} : { JOVE_CONTENT_AUDIO_PROVIDER: 'gemini', GEMINI_API_KEY: 'synthetic-only' }
+      if (kind === 'direct-with-unused-router') config.OPENROUTER_API_KEY = 'synthetic-unused'
+      const handler = createContentHandler(name => config[name], { authenticate: async () => context, providerFetch, now: () => now })
+      const response = await handler(request({ action: 'provider-status' }))
+      expect(await response.json()).toEqual({ provider: 'gemini', state: kind === 'missing' ? 'not-configured' : 'unsupported',
+        httpStatus: null, key: null, generationVerified: false, observedAt: now })
+      expect(providerFetch).not.toHaveBeenCalled(); expect(db.calls).toEqual([])
+    })
+  it.each(['fetch', 'body', 'redirect'])(
+    'bounds provider-status %s failure without retries or raw transport details', async kind => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        const db = new MemoryRpc(), context = { ownerId, admin: db, user: db } as unknown as OwnerContext
+        const providerFetch = vi.fn(async () => {
+          if (kind === 'redirect') throw new Error('PRIVATE redirect refused')
+          if (kind === 'fetch') return new Promise<Response>(() => {})
+          return new Response(new ReadableStream())
+        })
+        const handler = createContentHandler(name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined,
+          { authenticate: async () => context, providerFetch, now: () => now })
+        const pending = handler(request({ action: 'provider-status' }))
+        await vi.waitFor(() => expect(providerFetch).toHaveBeenCalledOnce())
+        await vi.advanceTimersByTimeAsync(8001)
+        const response = await pending
+        expect(await response.json()).toEqual({ provider: 'openrouter', state: 'unverified', httpStatus: kind === 'body' ? 200 : null,
+          key: null, generationVerified: false, observedAt: now })
+        expect(providerFetch).toHaveBeenCalledOnce(); expect(db.calls).toEqual([])
+      } finally { vi.useRealTimers() }
+    })
   it('rejects invalid sessions, forged scheduler credentials and browser scheduler requests before reading service credentials', async () => {
     const read: string[]=[]
     const handler = createContentHandler(name=>{read.push(name);return undefined})
     expect((await handler(request({action:'status'}))).status).toBe(401)
     expect((await handler(request({}, {'X-Jove-Content-Job':'fake'}))).status).toBe(401)
     expect((await handler(request({}, {'X-Jove-Content-Job':'fake',Origin:'https://mnijc19-netizen.github.io'}))).status).toBe(403)
+    expect((await handler(request({action:'provider-status'}))).status).toBe(401)
+    expect((await handler(request({action:'provider-status'}, {'X-Jove-Content-Job':'fake'}))).status).toBe(401)
+    expect((await handler(request({action:'provider-status'}, {'X-Jove-Content-Job':'fake',Origin:'https://mnijc19-netizen.github.io'}))).status).toBe(403)
     expect(read).not.toContain('SUPABASE_SERVICE_ROLE_KEY')
+    expect(read).not.toContain('OPENROUTER_API_KEY')
   })
   it('accepts persisted lesson/profile API only after auth and rejects arbitrary source URLs', async () => {
     const db = new MemoryRpc(), context={ownerId,admin:db,user:db} as unknown as OwnerContext

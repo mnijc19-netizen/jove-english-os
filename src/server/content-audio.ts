@@ -38,6 +38,53 @@ function rejectHttp(response: Response, provider: AudioHttpDiagnostic['provider'
   throw failure
 }
 
+const keyStatusSchema = z.object({ data: z.object({
+  limit: z.number().min(0).max(1e9).nullable(),
+  limit_remaining: z.number().min(-1e9).max(1e9).nullable(),
+  usage: z.number().min(0).max(1e9), is_free_tier: z.boolean(),
+}) })
+/** Read-only key metadata, NOT a generation test, account-balance proof or a
+ * receipt for any historical request. Never return the provider's raw object. */
+export async function inspectContentProviderAccess(input: {
+  env: ServerEnvironment; fetcher?: typeof fetch; now?: () => number; signal: AbortSignal
+}) {
+  const key = input.env('OPENROUTER_API_KEY')
+  const provider = input.env('JOVE_CONTENT_AUDIO_PROVIDER') !== 'gemini' && key ? 'openrouter' as const : 'gemini' as const
+  let httpStatus: number | null = null
+  const result = (state: 'not-configured' | 'unsupported' | 'accepted' | 'rejected' | 'unverified',
+    key: { limitUsd: number | null; remainingUsd: number | null; usageUsd: number; isFreeTier: boolean } | null = null) =>
+    ({ provider, state, httpStatus, key, generationVerified: false as const, observedAt: (input.now ?? Date.now)() })
+  if (provider !== 'openrouter') return result(input.env('GEMINI_API_KEY') ? 'unsupported' : 'not-configured')
+  if (input.signal.aborted) return result('unverified')
+  const controller = new AbortController(), signal = AbortSignal.any([input.signal, controller.signal])
+  let interrupted!: () => void
+  const cancelled = new Promise<never>((_resolve, reject) => { interrupted = () => reject(new Error('Provider metadata interrupted')) })
+  void cancelled.catch(() => undefined)
+  signal.addEventListener('abort', interrupted, { once: true })
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    return await Promise.race([cancelled, (async () => {
+      const response = await (input.fetcher ?? fetch)('https://openrouter.ai/api/v1/key', {
+        method: 'GET', redirect: 'error', credentials: 'omit', cache: 'no-store', signal,
+        headers: { Authorization: `Bearer ${key}` },
+      })
+      httpStatus = response.status
+      if (signal.aborted || !response.ok) {
+        try { void response.body?.cancel().catch(() => {}) } catch { /* No raw cleanup errors. */ }
+        return result(!signal.aborted && [401, 403].includes(response.status) ? 'rejected' : 'unverified')
+      }
+      const bytes = await boundedBody(new Request('https://internal.invalid', { method: 'POST', body: response.body,
+        signal, duplex: 'half' } as RequestInit), 16 * 1024, 8000)
+      signal.throwIfAborted()
+      const checked = keyStatusSchema.safeParse(JSON.parse(new TextDecoder().decode(bytes)))
+      if (!checked.success) return result('unverified')
+      const data = checked.data.data
+      return result('accepted', { limitUsd: data.limit, remainingUsd: data.limit_remaining, usageUsd: data.usage, isFreeTier: data.is_free_tier })
+    })()])
+  } catch { return result('unverified') }
+  finally { clearTimeout(timer); signal.removeEventListener('abort', interrupted); controller.abort() }
+}
+
 interface AudioReceipt { id: string; usage: ContentUsage }
 function validAudioReceipt(receipt: AudioReceipt): boolean {
   const usage = receipt.usage

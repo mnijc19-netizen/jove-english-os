@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js'
 import { z } from 'zod'
 import { authenticatedOwner, boundedBody, corsHeaders, digestRequest, GatewayError, jsonResponse, reserve, safeFailure, settle,
   type OwnerContext, type ServerEnvironment } from './gateway'
-import { createContentAudioServices } from './content-audio'
+import { createContentAudioServices, inspectContentProviderAccess } from './content-audio'
 import { validateSourceUrl } from '../content/pipeline'
 import { recordContentLearningUse, runContentRefresh, selectAndPersistContentLessons, type ContentBudget, type ContentRefreshOptions, type PersistedContentSegment } from './content-worker'
 
@@ -12,11 +12,15 @@ const profileSchema = z.object({ targetDifficulty: z.number().min(0).max(1), fat
   recentSourceIds: z.array(z.string().max(100)).max(100).optional(),
 }).strict()
 const segmentId = z.string().regex(/^authentic-[a-f0-9]{64}$/u)
+const providerStatusPayload = z.object({ action: z.literal('provider-status') }).strict()
+// Job authority cannot select arbitrary owner actions, even if added later.
+const jobPayload = z.union([z.object({}).strict().transform(() => ({ action: 'refresh' as const })), providerStatusPayload])
 const payload = z.discriminatedUnion('action', [
   z.object({ action: z.literal('lessons'), profile: profileSchema, limit: z.number().int().min(1).max(10).optional(), requestId: z.string().min(1).max(80).optional() }).strict(),
   z.object({ action: z.literal('audio'), segmentId }).strict(),
   z.object({ action: z.literal('history'), segmentId, eventId: z.string().min(1).max(100), event: z.enum(['started','completed','skipped']) }).strict(),
   z.object({ action: z.literal('status') }).strict(),
+  providerStatusPayload,
   z.object({ action: z.literal('refresh') }).strict(),
 ])
 export function createContentBudget(context: OwnerContext): ContentBudget {
@@ -108,10 +112,12 @@ export function createContentHandler(env: ServerEnvironment, dependencies: {
       const bytes = await boundedBody(request, 32 * 1024)
       let raw: unknown
       try { raw = bytes.length ? JSON.parse(new TextDecoder().decode(bytes)) : {} } catch { throw new GatewayError(400, 'CONTENT_REQUEST', 'Invalid content request.') }
-      if (scheduled && JSON.stringify(raw) !== '{}') throw new GatewayError(400, 'CONTENT_JOB_REQUEST', 'Scheduled jobs do not accept source URLs or owner overrides.')
-      const parsed = payload.safeParse(scheduled ? { action: 'refresh' } : raw)
-      if (!parsed.success) throw new GatewayError(400, 'CONTENT_REQUEST', 'Invalid content request.')
+      const parsed = (scheduled ? jobPayload : payload).safeParse(raw)
+      if (!parsed.success) throw new GatewayError(400, scheduled ? 'CONTENT_JOB_REQUEST' : 'CONTENT_REQUEST', 'Invalid content request.')
       const body = parsed.data
+      if (body.action === 'provider-status') return jsonResponse(await inspectContentProviderAccess({
+        env, fetcher: dependencies.providerFetch, now, signal: request.signal,
+      }), headers)
       if (body.action === 'status') return jsonResponse(await contentRpc(context, 'status'), headers)
       if (body.action === 'history') {
         await recordContentLearningUse({ adminClient: context.admin, ownerId: context.ownerId, ...body })
