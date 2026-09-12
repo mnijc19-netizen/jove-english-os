@@ -620,7 +620,7 @@ describe('content worker state transitions and inspection boundary', () => {
     expect(db.calls.slice(history.length).filter(call => call.args.itemId === blocked.id).map(call => call.action)).toEqual(['finish-item'])
     for (const [key, value] of intents) expect(db.intents.get(key)).toBe(value)
     for (const [key, value] of records) expect(db.records.get(key)).toEqual(value)
-    for (const [path, bytes] of blobs) expect(store.blobs.get(path)).toEqual(bytes)
+    for (const [path, bytes] of blobs) expect(Buffer.from(store.blobs.get(path)!).equals(Buffer.from(bytes))).toBe(true)
     expect(read).not.toHaveBeenCalledWith(before.object_path)
     expect(network.mock.calls.filter(([request]) => request.role === 'audio').map(([request]) => request.url)).toEqual([`${origin}/audio/fresh.mp3`])
     expect(reserve).toHaveBeenCalledOnce()
