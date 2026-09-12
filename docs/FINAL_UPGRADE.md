@@ -1,5 +1,15 @@
 # Final upgrade contract — 2026-09-08
 
+## Owner amendment — 2026-09-13 (takes precedence)
+
+- External publisher playback is preferred: store links, lesson metadata, original study prompts and learner progress instead of routinely downloading/rehosting whole audio. Embed only when permitted; otherwise open the publisher page. Selection and learning sequence remain automatic, not a user-managed list of bookmarks.
+- Retain guided listening, retrieval, expression practice, recorded retell, spaced review, progression and cloud sync. Publisher playback has limited observability: clicks are not completed listening; self-reported listening is not objective comprehension, precise timing or an acoustic assessment. External-only audio is not available offline; saved local work remains available.
+- Reliable automatic pronunciation/prosody scoring is no longer required. Keep reference listening, recording/replay and retries; retain separation of language feedback from acoustic claims. Existing optional adapter code and historical evidence need not be deleted, but absent acoustic credentials must not block delivery.
+- Continuous metadata/link discovery and appropriate everyday coverage are still required. The existing paid audio-analysis pipeline is not a prerequisite for external lessons. Do not relabel its rejected/quarantined clips as verified human audio, erase billing holds, or silently replay failed requests.
+- The owner subsequently requested publishing the completed subset now. Release the verified external-study flow and existing upgrades after CI and production checks; explicitly retain incomplete recurring supply/AI/device acceptance as remaining work instead of blocking this partial release on final-upgrade completion.
+
+The original traceability below is historical where it conflicts with this amendment; all other learning, privacy, sync, migration and production acceptance requirements remain in force.
+
 The owner's 47-section final instruction supersedes incompatible V1 exclusions. It authorizes autonomous implementation, review, repair, tests, commit/push, deployment and production acceptance without phase approvals. Human login, OTP, credentials and paid commitments remain owner-only. No phase is the final deliverable. Do all unblocked implementation before requesting indispensable owner action.
 
 ## Requirement traceability (original section numbers)

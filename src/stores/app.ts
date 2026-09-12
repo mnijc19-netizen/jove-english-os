@@ -22,6 +22,7 @@ import {
   type Assessment,
 } from "../domain/types";
 import { demoMaterials } from "../content/materials";
+import { externalMaterials } from "../content/external";
 import { OpenRouterProvider } from "../ai/provider";
 import { profileSchema, settingsSchema } from "../db/schema";
 import { useCloud } from "./cloud";
@@ -144,7 +145,7 @@ export const useApp = defineStore("app", () => {
   }
   async function init() {
     try {
-      await initialize(demoMaterials);
+      await initialize([...demoMaterials, ...externalMaterials]);
       await refresh();
       ready.value = true;
       void useCloud().start(refresh);

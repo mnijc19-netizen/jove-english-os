@@ -8,7 +8,7 @@ import type { ReviewedReference } from './references'
 import { SpeechError } from './types'
 
 /** Own persisted session/outbox; pages retain their existing drafts and conversations. */
-export function usePronunciationSession(scope: Ref<string>, materialId?: Ref<string>) {
+export function usePronunciationSession(scope: Ref<string>, materialId?: Ref<string>, enabled = true) {
   const app = useApp(), reference = shallowRef<ReviewedReference | null>(null)
   const savedAudioId = ref(''), savedReferenceId = ref(''), pendingAttempt = shallowRef<PronunciationAttempt>()
   const active = ref(false), loading = ref(true), problem = ref('')
@@ -55,6 +55,7 @@ export function usePronunciationSession(scope: Ref<string>, materialId?: Ref<str
     evidenceQueue = operation; return operation
   }
   async function load() {
+    if (!enabled) { loading.value = false; return }
     // Retry repairs transient IO, never an invalidated principal epoch. Only a
     // fresh mounted journal can bind again after sign-out or A→B→A.
     if (accountChanged || stopped) return

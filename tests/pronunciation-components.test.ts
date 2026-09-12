@@ -15,6 +15,7 @@ import { acousticEvents, ObservedPracticeClock } from '../src/speech/events'
 import * as longitudinal from '../src/domain/longitudinal'
 import { defaultProfile, defaultSettings, type StudyEvent, type StudySession, type Conversation, type Material } from '../src/domain/types'
 import { demoMaterials, missions } from '../src/content/materials'
+import * as externalStudy from '../src/content/external'
 import { useRecordingUrl } from '../src/composables/useRecordingUrl'
 
 const identitySource = vi.hoisted(() => ({ auth: undefined as unknown }))
@@ -88,7 +89,7 @@ interface PageState {
   heard: () => Promise<void>; ended: () => Promise<void>
   conversation?: Conversation; observation: { sessionId: string; priorExposure: boolean; difficulty: number; level: string; mode: string } | null
 }
-function mountPage(name: 'Listen' | 'Speak', evaluate: Record<string, unknown> = {}, options: { materials?: Material[]; renderTemplate?: boolean; prepareAudio?: (material: Material, signal?: AbortSignal) => Promise<Blob>; transientAudio?: WeakSet<Blob> } = {}) {
+function mountPage(name: 'Listen' | 'Speak', evaluate: Record<string, unknown> = {}, options: { legacyAcoustic?: boolean; materials?: Material[]; renderTemplate?: boolean; prepareAudio?: (material: Material, signal?: AbortSignal) => Promise<Blob>; transientAudio?: WeakSet<Blob> } = {}) {
   const sessions = new Map<string, StudySession>(), conversations = new Map<string, Conversation>()
   const audios = new Map<string, { id: string; kind: string; blob: Blob; duration: number; createdAt?: number }>()
   const clone = <T,>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value)) as T
@@ -119,8 +120,11 @@ function mountPage(name: 'Listen' | 'Speak', evaluate: Record<string, unknown> =
     vue: Vue, 'vue-router': { useRoute: () => route, useRouter: () => ({ push: vi.fn() }), onBeforeRouteLeave: (fn: () => Promise<boolean | undefined>) => guards.push(fn), onBeforeRouteUpdate: vi.fn() },
     '../stores/app': { useApp: () => appState }, '../db/db': { db: storage }, '../db/repository': { saveError: vi.fn(), addChunk: vi.fn() },
     '../composables/useRequest': { useRequest: () => ({ busy: Vue.ref(false), error: Vue.ref(''), cancel: vi.fn(), run: async (fn: (s: AbortSignal) => Promise<unknown>) => fn(new AbortController().signal) }) },
-    '../content/materials': { demoMaterials, missions }, '../domain/longitudinal': longitudinal,
-    '../speech/practice': practice, '../speech/events': { ObservedPracticeClock },
+    '../content/materials': { demoMaterials, missions }, '../content/external': externalStudy, '../domain/longitudinal': longitudinal,
+    // Keep historical recovery coverage of the retained optional adapter. Normal
+    // production routes disable it; a separate default-mode assertion is below.
+    '../speech/practice': { usePronunciationSession: (scope: Vue.Ref<string>, id?: Vue.Ref<string>, enabled?: boolean) =>
+      (practice.usePronunciationSession as (...args: unknown[]) => unknown)(scope, id, options.legacyAcoustic === false ? enabled : true) }, '../speech/events': { ObservedPracticeClock },
     '../cloud/content': { prepareContentAudio: prepareAudio, contentAudioIsTransient: (blob: Blob) => options.transientAudio?.has(blob) ?? false },
   }
   for (const component of ['AudioPlayer', 'SavedRecording', 'Recorder', 'Icon', 'PronunciationPractice']) dependencies[`../components/${component}.vue`] = { default: Vue.defineComponent({ render: () => Vue.h('div') }) }
@@ -278,6 +282,12 @@ describe('Listen authentic clip playback and lifecycle', () => {
 })
 
 describe('compiled Listen/Speak page contracts and actual pronunciation persistence', () => {
+  it.each(['Listen', 'Speak'] as const)('normal %s route no longer starts an acoustic session', async name => {
+    const view = mountPage(name, {}, { legacyAcoustic: false }); await flush()
+    expect(view.refs.session).not.toHaveBeenCalled()
+    expect(view.refs.references).not.toHaveBeenCalled()
+    expect(view.refs.assess).not.toHaveBeenCalled()
+  })
   it('allows practice reload after a read timeout but never rebinds a permanently invalidated practice lifetime', async () => {
     const view = mountPage('Speak'); await flush()
     view.refs.session.mockImplementationOnce(() => ({ ...sessionFixture(), assertCurrent: vi.fn(async () => { throw new SpeechError('TIMEOUT') }) }))

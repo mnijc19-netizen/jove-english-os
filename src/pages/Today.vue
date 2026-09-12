@@ -105,7 +105,7 @@ async function start(task: PlanTask) {
         </div>
         <p class="muted">Your focus · {{ skillLabel(app.plan.focus) }}</p>
         <p v-if="app.contentState === 'loading'" class="help-text" role="status">Preparing suitable lessons and short audio. Your saved practice stays available.</p>
-        <p v-else-if="app.contentState === 'empty'" class="help-text" role="status">No new human recording has passed the quality checks yet. Saved lessons remain available; new content will be checked automatically.</p>
+        <p v-else-if="app.contentState === 'empty'" class="help-text" role="status">Publisher lessons open at their source; your guided practice and progress stay here. Saved local lessons are also available.</p>
         <p v-else-if="app.contentState === 'error'" class="help-text" role="status">New lessons or audio could not finish loading. Your saved work is safe.
           <button class="text-button" @click="app.loadContent(true)">Retry loading</button>
         </p>
@@ -254,7 +254,7 @@ async function start(task: PlanTask) {
         <h2>{{ material.title }}</h2>
         <p>
           {{ material.topic }} · {{ material.sourceLabel }} ·
-          {{ Math.round(material.duration) }} seconds
+          {{ material.externalStudy ? 'external lesson · guided short practice' : Math.round(material.duration) + ' seconds' }}
         </p>
       </div>
       <RouterLink

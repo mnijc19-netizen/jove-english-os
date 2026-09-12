@@ -6,6 +6,7 @@ import { db } from "../db/db";
 import { addChunk } from "../db/repository";
 import { useRequest } from "../composables/useRequest";
 import { demoMaterials } from "../content/materials";
+import { externalPracticeReady } from "../content/external";
 import { contentAudioIsTransient, prepareContentAudio } from "../cloud/content";
 import type { Evaluation, MaterialChunk, StudyEvent, StudySession } from "../domain/types";
 import AudioPlayer from "../components/AudioPlayer.vue";
@@ -28,6 +29,8 @@ interface WordLookup {
   edited: boolean; chineseShown: boolean; revision: number; chunkId: string;
 }
 interface ListeningDraft {
+  externalReflection: StudyEvent | null;
+  externalExpression: string; externalExample: string; externalMeaning: string;
   stage: number; answer: string; estimate: number; listened: boolean;
   selfCheck: number | null; audioId: string; sentence: number; phrase: number;
   chinese: boolean; chineseUsed: boolean; revealed: boolean; answerRevealed: boolean;
@@ -38,6 +41,8 @@ interface ListeningDraft {
   playbackRates: number[]; playbackRateUnknown: boolean;
 }
 const freshDraft = (): ListeningDraft => ({
+  externalReflection: null,
+  externalExpression: '', externalExample: '', externalMeaning: '',
   stage: 0, answer: "", estimate: 50, listened: false, selfCheck: null, audioId: "",
   sentence: -1, phrase: -1, chinese: false, chineseUsed: false, revealed: false,
   answerRevealed: false, chunked: false, playCount: 0, completedPlays: 0,
@@ -47,7 +52,9 @@ const freshDraft = (): ListeningDraft => ({
 const app = useApp(), route = useRoute(), router = useRouter();
 const player = ref<InstanceType<typeof AudioPlayer>>();
 const materialId = ref(""), sid = ref(""), startedAt = ref(0), completedAt = ref<number>();
-const pronunciation = usePronunciationSession(sid, materialId);
+// Owner removed automatic acoustic assessment from normal learning.
+const acousticAssessmentEnabled = false;
+const pronunciation = usePronunciationSession(sid, materialId, acousticAssessmentEnabled);
 const { reference: pronunciationReference, savedAudioId: pronunciationAudioId, savedReferenceId: pronunciationReferenceId,
   pendingAttempt: pronunciationAttempt, active: pronunciationActive, loading: pronunciationLoading, problem: pronunciationProblem,
   disabled: pronunciationDisabled, recoveredResults: pronunciationResults } = pronunciation;
@@ -61,6 +68,9 @@ const draft = reactive<ListeningDraft>(freshDraft());
 const { stage, answer, estimate, listened, selfCheck, sentence, chinese, chunked, feedback } = toRefs(draft);
 const savedAudioId = computed({ get: () => draft.audioId, set: (value: string) => { draft.audioId = value; } });
 const material = computed(() => app.materials.find(m => m.id === materialId.value));
+const externalReady = computed(() => externalPracticeReady({ listened: draft.listened, answer: draft.answer,
+  expression: draft.externalExpression, example: draft.externalExample, audioId: draft.audioId }));
+const externalLocked = computed(() => !!draft.externalReflection || !!completedAt.value);
 const blobUrl = ref(""), hydrating = ref(true), restoreFailed = ref(false), localError = ref(""), working = ref(false), repeating = ref(false);
 const audioLoading = ref(false), audioError = ref(""), audioReload = ref(0), audioTransient = ref(false);
 const { busy, error, run, cancel } = useRequest();
@@ -509,6 +519,50 @@ async function recorded(value: { audioId: string; duration: number }) {
       data: { duration: value.duration, audioId: value.audioId, materialId: materialId.value, sentence: sentence.value, imitation: true } });
   } catch { localError.value = "Your recording reference is retained. Retry saving its learning evidence before leaving."; }
 }
+async function externalRecorded(value: { audioId: string; duration: number }) {
+  savedAudioId.value = value.audioId;
+  try { await evidence({ id: `${sid.value}-external-retell-${value.audioId}`, type: 'EXTERNAL_RETELL_RECORDED',
+    source: 'objective', sessionId: sid.value, data: { materialId: materialId.value, audioId: value.audioId,
+      duration: value.duration, playbackObserved: false, acousticAssessed: false } }); }
+  catch { localError.value = 'Recording saved. Retry saving its practice record before leaving.'; }
+}
+async function finishExternal() {
+  if (!material.value?.externalStudy || !externalReady.value || captureActive.value) return;
+  const expectedGeneration = generation;
+  let readyToFinish = false;
+  await safely(async () => {
+    const id = materialId.value, sessionId = sid.value, token = generation;
+    // Freeze before I/O: route changes replace reactive fields, and retries must
+    // reuse the exact immutable evidence ID, timestamp and payload.
+    const frozen = JSON.parse(JSON.stringify(draft)) as ListeningDraft;
+    const reflection: StudyEvent = frozen.externalReflection ?? {
+      id: `${sessionId}-external-reflection`, timestamp: Date.now(), type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report', sessionId,
+      data: { materialId: id, response: frozen.answer, expression: frozen.externalExpression, example: frozen.externalExample,
+        meaning: frozen.externalMeaning, audioId: frozen.audioId, listened: true, playbackObserved: false, comprehensionVerified: false } };
+    const current = () => token === generation && !disposed && sid.value === sessionId && materialId.value === id;
+    const asset = await db.audio.get(String(reflection.data!.audioId));
+    if (!current()) return;
+    if (!asset?.blob.size) throw new Error('Recording is not available');
+    draft.externalReflection = reflection;
+    await save();
+    if (!current()) return;
+    await evidence(reflection);
+    if (!current()) return;
+    // Learner-entered meanings stay explicitly unverified; saving no score cannot
+    // certify vocabulary mastery or a publisher transcript that we do not hold.
+    if (String(reflection.data!.meaning).trim()) await addChunk({ text: String(reflection.data!.expression).trim(),
+      meaningEn: String(reflection.data!.meaning).trim(), meaningZh: '', example: String(reflection.data!.example).trim() }, id);
+    if (!current()) return;
+    await save();
+    readyToFinish = token === generation && !disposed;
+  });
+  if (readyToFinish && expectedGeneration === generation && !localError.value) await finish();
+}
+function externalStep(next: number) {
+  if (completedAt.value || captureActive.value || !material.value?.externalStudy) return;
+  if (next === 1 && (!draft.listened || !draft.answer.trim()) || next === 2 && (!draft.externalExpression.trim() || !draft.externalExample.trim())) return;
+  return safely(async () => { stage.value = next; await save(); });
+}
 function finish() {
   if (captureActive.value) return;
   return safely(async () => {
@@ -524,7 +578,7 @@ function finish() {
       if (taskId && !completed) { app.notice = "Practice saved. This assignment is no longer in today's plan."; return; }
     }
     if (token === generation && !disposed) {
-      const next = taskId ? await app.continueAssignment(taskId) : { path: "/learn", query: { material: id, sourceSession: sessionId } };
+      const next = taskId ? await app.continueAssignment(taskId) : material.value?.externalStudy ? { path: '/', query: {} } : { path: "/learn", query: { material: id, sourceSession: sessionId } };
       if (token === generation && !disposed) await router.push(next);
     }
   });
@@ -611,7 +665,46 @@ onBeforeUnmount(() => {
     <p v-if="localError" class="error" role="alert">{{ localError }}
       <button class="text-button" :disabled="working || hydrating" @click="retrySave">Retry saving / loading</button>
     </p>
-    <div v-if="material && !hydrating && !restoreFailed" class="practice-layout" :aria-busy="working">
+    <section v-if="material?.externalStudy && !hydrating && !restoreFailed" class="panel" :aria-busy="working">
+      <p class="eyebrow">PUBLISHER PLAYBACK · GUIDED PRACTICE</p>
+      <h2>{{ material.title }}</h2>
+      <p class="help-text">{{ material.externalStudy.publisher }} · {{ material.externalStudy.level }} · opens on the original website. Internet required for its audio.</p>
+      <p>{{ material.externalStudy.mission }}</p>
+      <div class="step-strip"><span :class="{ active: stage === 0 }">01 · Listen</span><span :class="{ active: stage === 1 }">02 · Notice</span><span :class="{ active: stage === 2 }">03 · Retell</span></div>
+      <div v-if="stage === 0" class="response-area">
+      <h3>1 · Listen, then return</h3>
+      <p>Use the first short conversation, or about one minute of a longer lesson. Keep its script closed for your first listen.</p>
+      <a class="button primary" :href="material.sourceUrl" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open today's listening lesson ↗</a>
+      <p class="help-text">The recording stays with the publisher. Jove cannot observe its playback or whether captions were shown; opening this link earns no ability score.</p>
+      <label><input v-model="draft.listened" type="checkbox" :disabled="externalLocked || working" /> I listened and have returned (self-report).</label>
+      <label for="external-summary">What happened? Explain the main meaning in your own words.</label>
+      <textarea id="external-summary" v-model="draft.answer" rows="3" :readonly="externalLocked" maxlength="4000" />
+      <button class="button primary" :disabled="!draft.listened || !draft.answer.trim() || working" @click="externalStep(1)">Continue to notice an expression</button>
+      </div>
+      <div v-if="stage === 1" class="response-area">
+      <h3>2 · Check and use one expression</h3>
+      <p>Now check the publisher's script or explanation. Pick one useful expression and use it in a different situation.</p>
+      <label for="external-expression">Expression you noticed</label>
+      <input id="external-expression" v-model="draft.externalExpression" maxlength="100" :readonly="externalLocked" />
+      <label for="external-example">Your own new sentence</label>
+      <textarea id="external-example" v-model="draft.externalExample" rows="2" maxlength="1000" :readonly="externalLocked" />
+      <label for="external-meaning">Meaning you checked (optional; saves the expression for spaced review)</label>
+      <input id="external-meaning" v-model="draft.externalMeaning" maxlength="800" :readonly="externalLocked" />
+      <button class="button primary" :disabled="!draft.externalExpression.trim() || !draft.externalExample.trim() || working" @click="externalStep(2)">Continue to spoken retell</button>
+      </div>
+      <div v-if="stage >= 2" class="response-area">
+      <h3>3 · Close the script and retell</h3>
+      <p>Explain the situation aloud in 2–4 sentences. Play your recording back, notice one thing to improve, and try again. No automatic pronunciation score.</p>
+      <Recorder
+        label="External lesson retell" :saved-audio-id="savedAudioId" :disabled="working || externalLocked"
+        @active="shadowCaptureActive = $event" @recorded="externalRecorded" />
+      <p class="help-text">Your draft and recording use the existing save/sync system. This reflection is not an independently graded comprehension test.</p>
+      <button class="button primary" :disabled="!externalReady || working || captureActive" @click="finishExternal">Save practice and continue</button>
+      </div>
+      <button v-if="stage > 0" class="text-button" :disabled="working || captureActive || !!completedAt" @click="externalStep(stage - 1)">Previous step</button>
+      <RouterLink to="/" class="text-button">Return to Today</RouterLink>
+    </section>
+    <div v-else-if="material && !hydrating && !restoreFailed" class="practice-layout" :aria-busy="working">
       <section class="panel practice-main">
         <div class="step-strip">
           <span :class="{ active: stage === 0 }">01 · Blind listen</span
@@ -874,13 +967,14 @@ onBeforeUnmount(() => {
             />
           </details>
           <PronunciationPractice
+v-if="acousticAssessmentEnabled"
             :reference="pronunciationReference" :saved-audio-id="pronunciationAudioId"
             :saved-reference-id="pronunciationReferenceId" :pending-attempt="pronunciationAttempt"
             :recovered-results="pronunciationResults"
             :persist-attempt="pronunciation.persistAttempt" :disabled="pronunciationDisabled || working || busy || shadowCaptureActive"
             @recorded="pronunciation.recorded" @evaluated="pronunciation.evaluated" @active="pronunciationActive = $event" />
           <p v-if="pronunciationProblem" class="error" role="alert">{{ pronunciationProblem }}</p>
-          <button class="text-button" :disabled="pronunciationLoading || captureActive" @click="pronunciation.retry">Reload reviewed pronunciation reference / recover saved evidence</button>
+          <button v-if="acousticAssessmentEnabled" class="text-button" :disabled="pronunciationLoading || captureActive" @click="pronunciation.retry">Reload reviewed pronunciation reference / recover saved evidence</button>
           <button class="button primary wide" :disabled="working || busy || captureActive" @click="finish">
             Continue to active recall <Icon name="arrow" :size="17" />
           </button>

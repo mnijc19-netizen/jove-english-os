@@ -35,7 +35,8 @@ const selected = computed(
 );
 const evaluation = computed(() => conversation.value?.evaluation);
 const pronunciationScope = computed(() => conversation.value?.id || 'speak-practice');
-const pronunciation = usePronunciationSession(pronunciationScope);
+const acousticAssessmentEnabled = false;
+const pronunciation = usePronunciationSession(pronunciationScope, undefined, acousticAssessmentEnabled);
 const { reference: pronunciationReference, savedAudioId: pronunciationAudioId, savedReferenceId: pronunciationReferenceId,
   pendingAttempt: pronunciationAttempt, active: pronunciationActive, loading: pronunciationLoading,
   problem: pronunciationProblem, disabled: pronunciationDisabled, recoveredResults: pronunciationResults } = pronunciation;
@@ -650,7 +651,7 @@ onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
             Skip for now
           </button>
         </div>
-        <details class="section">
+        <details v-if="acousticAssessmentEnabled" class="section">
           <summary>Separate sentence pronunciation practice · not conversation fluency</summary>
           <PronunciationPractice
             :reference="pronunciationReference" :saved-audio-id="pronunciationAudioId"

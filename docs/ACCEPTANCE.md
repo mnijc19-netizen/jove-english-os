@@ -2,7 +2,7 @@
 
 Completion is unproven until every gate below has current evidence. Record evidence and residual limits in STATUS.md; demo/mocked adapters cannot prove paid provider integration.
 
-The final-upgrade gates in `FINAL_UPGRADE.md` are additive and mandatory. Older V1 acceptance is historical, not final completion. In particular, actual cloud sync/RLS/migration, autonomous authentic content delivery, real acoustic assessment, long-term recovery/plateau/reading, server secrets/budget/retention and desktop/mobile WebKit must be proven; provider stubs and Pixel emulation alone are insufficient.
+The final-upgrade gates and latest owner amendments in `FINAL_UPGRADE.md` take precedence. Older V1 acceptance is historical, not final completion. Actual cloud sync/RLS/migration, autonomous external-content delivery, long-term recovery/plateau/reading, server secrets/budget/retention and desktop/mobile WebKit still need appropriate evidence; provider stubs and Pixel emulation alone are insufficient. Automatic acoustic scoring and bulk hosted source audio are no longer mandatory. The owner separately authorizes publishing the verified subset now, with remaining final-upgrade gaps explicitly disclosed.
 
 1. CONFIG: inspect global/project/ancestor instructions, config/requirements/defaults/old role routing; preserve global settings and verify project Astra Ultra and actual active session metadata.
 2. SPEC: durable product, architecture, learning science, decisions, acceptance and operating docs; full approved scope retained.

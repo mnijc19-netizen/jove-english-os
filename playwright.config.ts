@@ -38,13 +38,13 @@ export default defineConfig({
     },
     {
       name: "webkit-desktop",
-      testMatch: ["**/webkit.spec.ts", "**/longitudinal.spec.ts"],
+      testMatch: ["**/webkit.spec.ts", "**/longitudinal.spec.ts", "**/external-study.spec.ts"],
       use: { ...devices["Desktop Safari"], viewport: { width: 1440, height: 1000 } },
     },
     {
       // Emulated viewport/touch/user agent, not an actual iPhone or Safari app.
       name: "webkit-mobile",
-      testMatch: ["**/webkit.spec.ts", "**/longitudinal.spec.ts"],
+      testMatch: ["**/webkit.spec.ts", "**/longitudinal.spec.ts", "**/external-study.spec.ts"],
       use: { ...devices["iPhone 13"], defaultBrowserType: "webkit" },
     },
     {

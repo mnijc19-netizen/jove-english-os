@@ -126,13 +126,15 @@ describe('Today automatic content coordination', () => {
   it('reports an empty quality-screened supply rather than presenting demos as human lessons', async () => {
     services.refresh.mockResolvedValue([])
     await signIn(); await vi.waitFor(() => expect(app.contentState).toBe('empty'))
-    expect(app.materials.every(m => m.synthetic)).toBe(true)
+    expect(app.materials.filter(m => !m.externalStudy).every(m => m.synthetic)).toBe(true)
+    expect(app.materials.filter(m => m.externalStudy).every(m => !m.authenticPlayback && !m.audioId && !m.audioPath)).toBe(true)
     expect(services.audio).not.toHaveBeenCalled()
   })
   it('keeps saved work usable through a supply error and retries on reconnect', async () => {
     services.refresh.mockRejectedValueOnce(new Error('fixture disconnect'))
     await signIn(); await vi.waitFor(() => expect(app.contentState).toBe('error'))
-    expect(app.materials).toHaveLength(6)
+    expect(app.materials.filter(m => !m.externalStudy)).toHaveLength(6)
+    expect(app.materials.some(m => m.externalStudy)).toBe(true)
     window.dispatchEvent(new Event('offline')); await app.loadContent()
     expect(app.contentState).toBe('offline')
     window.dispatchEvent(new Event('online'))

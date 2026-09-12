@@ -1,5 +1,7 @@
 # Product specification — approved scope
 
+Current final-upgrade requirements and the September13 external-playback/optional-acoustics/partial-release amendments are in `FINAL_UPGRADE.md`; they supersede conflicting historical V1 boundaries below.
+
 Jove English OS serves one Chinese-native learner pursuing real-world English independence. Priority: natural listening, spontaneous speaking, high-frequency chunks, intelligibility/prosody, productive grammar, reading, writing. Exams are secondary transfer benefits. This complete V1 includes all requirements below; milestones do not redefine completion.
 
 ## Core loop

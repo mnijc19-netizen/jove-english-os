@@ -1,5 +1,7 @@
 # Jove English OS: permanent working rules
 
+Owner amendment, 2026-09-13: external publisher playback/links are preferred over bulk audio hosting. Keep automatic selection, guided in-site practice, review and cross-device progress; an opened link is not listening evidence. Automatic acoustic pronunciation/prosody scoring is removed from required delivery; retain listen/record/replay/retry without invented scores. This explicit amendment supersedes conflicting original final-upgrade requirements. Do not resume paid content-audio diagnostics merely to satisfy the superseded hosting workflow.
+
 Read `docs/PRODUCT_SPEC.md`, `docs/ARCHITECTURE.md`, `docs/LEARNING_SCIENCE.md`, `docs/ACCEPTANCE.md`, and `docs/DECISIONS.md` before modifying this project. Preserve requirements through context compaction. Track actual remaining work in `docs/STATUS.md`.
 
 This is a personal adaptive English trainer. Real-world listening and spontaneous speaking are the north star. Deliver the complete input → retrieval → output → repair → spaced review → transfer → evidence → adaptive plan loop. Do not replace learning behavior with decorative UI or invented progress.

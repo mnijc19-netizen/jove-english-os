@@ -1,5 +1,7 @@
 # Architecture
 
+September13 delivery amendment: curated external lesson metadata uses the existing Material/Listen/planner/session/sync architecture. Publisher media opens externally; the app stores original learning prompts and learner work, not copied publisher audio or transcripts. Normal practice no longer invokes automatic acoustic assessment. See `FINAL_UPGRADE.md` for current scope and partial-release boundaries.
+
 Vue 3/TypeScript/Vite SPA, hash-history Vue Router, Pinia UI state, Dexie IndexedDB persistence, Zod validation, mature ts-fsrs scheduling, Vitest integration/unit tests and Playwright browser tests. CSS variables express the small design system without a second styling dependency. GitHub Actions publishes Vite dist to GitHub Pages at `/jove-english-os/`; PWA scope/start URL share that base.
 
 `src/domain/types.ts` defines shared serializable entities. `src/domain/engine.ts` computes evidence aggregation, modality-specific review scheduling and deterministic plans. `src/db/` provides migration/bootstrap, atomic learning updates and backup. `src/ai/` defines provider contracts, schemas and OpenRouter implementation. `src/audio/` handles capture, PCM conversion, replay and speech. `src/content/` holds reviewed demo material and import helpers. `src/stores/` coordinates persistent state for Vue. `src/pages/` owns task flows; components provide reusable accessible controls.

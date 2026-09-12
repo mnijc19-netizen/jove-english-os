@@ -460,14 +460,14 @@ async function discover() {
             <span class="eyebrow">{{
               m.sourceKind === "curated" ? "CURATED PRACTICE" : m.sourceKind
             }}</span
-            ><span class="muted">{{ m.duration }} sec</span>
+            ><span class="muted">{{ m.externalStudy ? 'Publisher playback' : m.duration + ' sec' }}</span>
           </div>
           <h2>{{ m.title }}</h2>
           <p class="material-source">
             {{ m.sourceLabel }}{{ m.synthetic ? " · synthetic speech" : "" }}
           </p>
           <div class="row between">
-            <span class="muted">{{ m.chunks.length }} useful expressions</span
+            <span class="muted">{{ m.externalStudy ? 'Listen → notice → recorded retell' : m.chunks.length + ' useful expressions' }}</span
             ><RouterLink :to="'/listen?material=' + m.id" class="text-button"
               >Explore <Icon name="arrow" :size="16"
             /></RouterLink>

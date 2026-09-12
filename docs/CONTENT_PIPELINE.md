@@ -1,5 +1,11 @@
 # Authentic content pipeline
 
+## Current delivery amendment — 2026-09-13
+
+The owner now prefers publisher-hosted playback and explicitly requests publishing the completed subset before further pipeline work. `src/content/external.ts` adds four metadata-only starter lessons; normal Listen guides recall, expression use and a recorded retell after opening the publisher page. No iframe, automatic media download, copied transcript or publisher exercise is included. This is a finite editorial selection, not yet recurring automatic discovery. Earlier hosted-pipeline implementation and limitations below are historical and no longer mandatory release gates.
+
+The three VOA entries are the official [Lesson1](https://learningenglish.voanews.com/a/lets-learn-english-lesson-one/3111026.html), [Lesson3](https://learningenglish.voanews.com/a/lets-learn-english-lesson-3-i-am-here/3126527.html) and [Lesson10](https://learningenglish.voanews.com/a/lets-learn-english-lesson-10/3285228.html). Their [course description](https://learningenglish.voanews.com/p/5644.html) identifies videos featuring young Americans. Randall's [First Date](https://www.esl-lab.com/easy/first-date/) is individually supported by the [publisher FAQ](https://www.esl-lab.com/faqs/) describing his daughter's recording. That FAQ also discloses AI voices elsewhere: provenance must be checked per lesson, not inferred from the domain. The publisher [permits direct lesson links](https://www.esl-lab.com/blog-update-april2020/) and retains its [copyright terms](https://www.esl-lab.com/copyright_terms/). Page content and provenance were checked September12 UTC; this is not an acoustic audit or proof that every device can play the external media.
+
 ## Implemented scope and acceptance boundary
 
 Pure parsers/selection, executable ingest, SQL persistence, actual private clips, authenticated handler, scheduler installation contract, native-audio provider and budget adapter are implemented. Existing Vue/pages, Dexie, evidence, FSRS and Material architecture are retained. Browser integration is main-owned in src/cloud/content.ts.

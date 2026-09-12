@@ -38,6 +38,7 @@ export interface AuthenticPlayback {
   sentenceRanges: { startSeconds: number; endSeconds: number }[];
 }
 export interface Material {
+  externalStudy?: { publisher: string; level: 'beginner' | 'intermediate' | 'advanced'; mission: string; checkedAt: number };
   authenticPlayback?: AuthenticPlayback;
   id: string; title: string; topic: string; difficulty: number; duration: number;
   transcript: string; translation?: string; sentences: string[]; audioPath?: string; audioId?: string;

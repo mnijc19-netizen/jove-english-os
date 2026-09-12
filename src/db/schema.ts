@@ -99,13 +99,21 @@ export const authenticPlaybackSchema = z.strictObject({
   })
 })
 export const materialSchema = z.strictObject({
+  externalStudy: z.strictObject({ publisher: short, level: z.enum(['beginner', 'intermediate', 'advanced']),
+    mission: z.string().min(1).max(1000), checkedAt: timestampSchema }).optional(),
   authenticPlayback: authenticPlaybackSchema.optional(),
   id, title: short, topic: short, difficulty: proportion, duration: z.number().min(0).max(1_000_000),
   transcript: text, translation: text.optional(), sentences: strings, audioPath: audioPath.optional(), audioId: id.optional(),
   sourceKind: z.enum(['curated', 'text', 'url', 'audio', 'discovery', 'generated']), sourceUrl: httpUrl.optional(),
   sourceLabel: short, license: short.optional(), synthetic: z.boolean(), approved: z.boolean(),
   question: text, answer: text, keywords: strings, chunks: z.array(materialChunkSchema).max(10_000), createdAt: timestampSchema,
-})
+}).refine(m => !m.externalStudy || (!m.authenticPlayback && !m.audioPath && !m.audioId && !m.synthetic &&
+  !m.transcript && !m.sentences.length && !!m.sourceUrl && (() => {
+    try { const url = new URL(m.sourceUrl!); return url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash &&
+      (url.hostname === 'learningenglish.voanews.com' && /^\/a\/[a-z0-9-]+\/\d+\.html$/u.test(url.pathname) ||
+      url.hostname === 'www.esl-lab.com' && /^\/(?:easy|intermediate|difficult)\/[a-z0-9-]+\/$/u.test(url.pathname))
+    } catch { return false }
+  })()), 'External lessons require a publisher page, not copied transcripts or certified playback')
 export const sessionSchema = z.strictObject({
   id, kind: short, materialId: id.optional(), startedAt: timestampSchema, completedAt: timestampSchema.optional(), stage: short, draft: z.record(safeKey, json),
 }).refine(s => s.completedAt === undefined || s.completedAt >= s.startedAt, 'Session ends before it starts')

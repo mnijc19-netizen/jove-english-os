@@ -139,7 +139,8 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   // Screened, approachable human speech leads normal listening. A hard authentic
   // recording does not displace a comprehensible bridge simply for being human.
   const authentic = approachable.filter(m => m.authenticPlayback && !m.synthetic)
-  const listeningPool = authentic.length ? authentic : approachable.length ? approachable : approved
+  const external = approachable.filter(m => m.externalStudy && !m.synthetic)
+  const listeningPool = authentic.length ? authentic : external.length ? external : approachable.length ? approachable : approved
   const boundMaterialId = today?.tasks.find(task => !task.done && !task.optional && task.kind === 'listen')?.materialId ?? today?.tasks.find(task => !task.done && !task.optional && task.materialId)?.materialId
   const material = approved.find(item => item.id === boundMaterialId) ?? [...listeningPool].sort((a, b) =>
     (approachable.length ? rank(b) - rank(a) : Math.abs(a.difficulty - targetDifficulty) - Math.abs(b.difficulty - targetDifficulty)) || order(a.id, b.id))[0]
@@ -179,7 +180,10 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   if (failuresDue) candidates.push({ kind: 'repair', title: 'Repair and try a new context', reason: `Focus on up to ${adjustment.maxRepairTargets} useful corrections. Keep prompted retries separate from independent transfer.`, weight: 2 })
   const assignedFluency = today?.tasks.find(task => !task.optional && (task.kind === 'shadow' || task.kind === 'retell'))
   const fluencyKind = assignedFluency?.kind ?? (fatigue >= 0.6 ? 'shadow' : 'retell')
-  candidates.push({ kind: fluencyKind, title: fluencyKind === 'shadow' ? 'Shadow a short sentence' : 'Retell without the script', reason: 'Build fluency through repetition and compare your recordings.', weight: adjustment.fluencyMinutes / 3 + (fluencyCount < Math.max(inputCount, outputCount) ? 0.5 : 0), materialId: material?.id })
+  // External listening already contains a recorded retell. Existing standalone
+  // retell/shadow pages still require a local text reference; never invent one.
+  const fluencyMaterial = material?.externalStudy ? [...approved].filter(m => !m.externalStudy && m.transcript.trim()).sort((a, b) => rank(b) - rank(a) || order(a.id, b.id))[0] : material
+  candidates.push({ kind: fluencyKind, title: fluencyKind === 'shadow' ? 'Shadow a short sentence' : 'Retell without the script', reason: 'Build fluency through repetition and compare your recordings.', weight: adjustment.fluencyMinutes / 3 + (fluencyCount < Math.max(inputCount, outputCount) ? 0.5 : 0), materialId: fluencyMaterial?.id })
   const lastAssessment = [...ordered].reverse().find(e => ['assessment-completed', 'assessment_completed'].includes(e.type.toLowerCase()))
   if (profile.onboarded && now - (lastAssessment?.timestamp ?? profile.createdAt) >= 14 * day) {
     candidates.push({ kind: 'assessment', title: 'Your two-week check-in', reason: 'Compare listening, retelling, conversation and a real-life mission using a consistent rubric.', weight: 2 })
