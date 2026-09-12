@@ -399,12 +399,21 @@ export function contentAudioWindow(bytes: Uint8Array, mimeType: string, start: n
 
 const text = z.string().min(1).max(4000).refine(value => !/<\/?(?:script|iframe)|javascript:/iu.test(value) && !value.includes(String.fromCharCode(0)))
 const cue = z.object({ startTime: z.number().nonnegative(), endTime: z.number().positive(), body: text, speaker: z.string().max(100).optional() }).strict()
-const evidence = z.object({ value: z.union([z.boolean(), z.number().finite(), z.enum(['general-american','other-english','mixed']), z.null()]),
+const evidence = <T extends z.ZodType>(value: T) => z.object({ value: value.nullable(),
   confidence: z.number().min(0).max(1), reason: z.string().max(800) }).strict()
 const factNames = ['humanSpeech','englishSpeech','accent','clarity','noiseFraction','musicFraction','speakerCount','coherent','safe','thirdPartyClear','learningValue'] as const
+// Match the existing per-fact inspection contract, not a union that permits
+// boolean speaker counts or numeric safety claims. Null remains unknown.
+const reviewFacts = z.object({
+  humanSpeech: evidence(z.boolean()), englishSpeech: evidence(z.boolean()),
+  accent: evidence(z.enum(['general-american', 'other-english', 'mixed'])),
+  clarity: evidence(z.number().min(0).max(1)), noiseFraction: evidence(z.number().min(0).max(1)),
+  musicFraction: evidence(z.number().min(0).max(1)), speakerCount: evidence(z.number().int().min(1).max(20)),
+  coherent: evidence(z.boolean()), safe: evidence(z.boolean()), thirdPartyClear: evidence(z.boolean()), learningValue: evidence(z.boolean()),
+}).strict()
 const reviewSchema = z.object({ inspectedStartSeconds: z.number().nonnegative(), inspectedEndSeconds: z.number().positive(),
   wholeIntervalInspected: z.boolean(), heard: z.array(cue).min(1).max(200),
-  facts: z.object(Object.fromEntries(factNames.map(name => [name, evidence])) as Record<typeof factNames[number], typeof evidence>).strict(),
+  facts: reviewFacts,
   thirdParty: z.enum(['none-detected','uncertain']),
   lesson: z.object({ question: text, answer: text, keywords: z.array(z.string().min(1).max(100)).min(1).max(20),
     chunks: z.array(z.object({ text: z.string().min(1).max(100), meaningEn: text, meaningZh: text, example: text }).strict()).min(1).max(8) }).strict(),

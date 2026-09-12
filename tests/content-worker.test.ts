@@ -1777,6 +1777,51 @@ describe('real audio service contract (synthetic transport tests, not acoustic v
       .rejects.toMatchObject({ code: 'CONTENT_AUDIO_INTERVAL' })
     expect(calls).toHaveLength(2)
   })
+  it.each([
+    ...[
+    ['humanSpeech', 1], ['englishSpeech', 'general-american'], ['accent', true], ['accent', 0.9],
+    ['clarity', true], ['clarity', 1.01], ['clarity', -0.01],
+    ['noiseFraction', false], ['noiseFraction', -1], ['noiseFraction', 2],
+    ['musicFraction', 'mixed'], ['musicFraction', -1], ['musicFraction', 2],
+    ['speakerCount', true], ['speakerCount', 1.5], ['speakerCount', 0], ['speakerCount', 21],
+    ['coherent', 1], ['safe', 'mixed'], ['thirdPartyClear', 0.95], ['learningValue', 1],
+    ].map(([name, value]) => ({ name: String(name), value, valid: false })),
+    ...['humanSpeech', 'englishSpeech', 'accent', 'clarity', 'noiseFraction', 'musicFraction', 'speakerCount',
+      'coherent', 'safe', 'thirdPartyClear', 'learningValue'].map(name => ({ name, value: null, valid: true })),
+    ...[
+      ['humanSpeech', false], ['englishSpeech', false], ['coherent', false], ['safe', false], ['thirdPartyClear', false], ['learningValue', false],
+      ['accent', 'other-english'], ['accent', 'mixed'], ['clarity', 0], ['clarity', 1],
+      ['noiseFraction', 0], ['noiseFraction', 1], ['musicFraction', 0], ['musicFraction', 1], ['speakerCount', 1], ['speakerCount', 20],
+    ].map(([name, value]) => ({ name: String(name), value, valid: true })),
+  ])('enforces field-specific $name fact semantics for $value without losing receipts', async ({ name, value, valid }) => {
+    const opts = options(); await runContentRefresh(opts)
+    const segment = [...opts.adminClient.records.values()][0]!.segment
+    const bytes = pcmFixture(60), hash = createHash('sha256').update(bytes).digest('hex')
+    const selected: Record<string, { value: unknown; confidence: number; reason: string }> = Object.fromEntries(Object.entries(facts()).filter(([key]) => key !== 'transcriptAlignment')
+      .map(([key, fact]) => [key, { value: fact.status === 'observed' ? fact.value : null, confidence: 0.95, reason: 'Synthetic contract fixture only' }]))
+    selected[name]!.value = value
+    const network = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'google/gemini-2.5-flash',
+        architecture: { input_modalities: ['audio'] }, supported_parameters: ['structured_outputs'] }] }))
+      return new Response(JSON.stringify({ id: 'gen-synthetic-fact-contract', model: 'google/gemini-2.5-flash',
+        choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ inspectedStartSeconds: 0, inspectedEndSeconds: 60,
+          wholeIntervalInspected: true, heard: phrases.map((body, i) => ({ startTime: i * 10, endTime: (i + 1) * 10, body })),
+          facts: selected, thirdParty: 'none-detected', lesson: { question: 'What did they cook?', answer: 'Dinner.', keywords: ['dinner'],
+            chunks: [{ text: 'come over', meaningEn: 'visit', meaningZh: '来做客', example: 'Come over tomorrow.' }] } }) } }],
+        usage: { total_tokens: 1234, cost: 0.008 } }))
+    }) as typeof fetch
+    const services = createContentAudioServices({ env: key => key === 'OPENROUTER_API_KEY' ? 'synthetic-contract-only' : undefined, fetcher: network })
+    const pending = services.analyzeAudio({ requestId: 'fact-contract', requestFingerprint: hash, segment,
+      audio: { bytes, sha256: hash, mimeType: 'audio/wav', objectPath: 'fixture' }, interval: { startSeconds: 0, endSeconds: 60 },
+      sourcePolicy: testSource().rights, sourcePolicyHash: hash, signal: new AbortController().signal })
+    if (valid) {
+      const result = await pending
+      expect(result.usage.costUsd).toBe(0.008)
+      expect(result.facts[name as keyof Inspection]).toMatchObject(value === null ? { status: 'unknown' } : { status: 'observed', value })
+    } else await expect(pending).rejects.toMatchObject({ code: 'CONTENT_AUDIO_SCHEMA',
+      receipt: { id: 'gen-synthetic-fact-contract', usage: { costUsd: 0.008 } } })
+    expect(network).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('authenticated content API and budget adapter', () => {
