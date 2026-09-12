@@ -1572,6 +1572,56 @@ describe('bounded MP3 prefix frame preparation (not acoustic or decoder certific
 })
 
 describe('real audio service contract (synthetic transport tests, not acoustic validation)', () => {
+  it.each(['openrouter', 'gemini'].flatMap(provider => [400, 401, 402, 403, 408, 413, 429, 500, 502, 503]
+    .map(status => ({ provider, status }))))(
+    'retains bounded $provider HTTP $status diagnostics without body data, retries or a settled charge', async ({ provider, status }) => {
+      const opts = options()
+      opts.fetcher = fetcher(rss(false))
+      const cancel = vi.fn(() => {
+        if (status === 502) throw new Error('PRIVATE cancellation failure')
+        if (status === 503) return new Promise<void>(() => {})
+      })
+      const failure = new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode('PRIVATE response and credential')) }, cancel,
+      }), { status, headers: { 'x-private': 'PRIVATE header' } })
+      const network = vi.fn(async (url: string | URL | Request) => {
+        if (String(url).endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'google/gemini-2.5-flash',
+          architecture: { input_modalities: ['audio'] }, supported_parameters: ['structured_outputs'] }] }))
+        return failure
+      }) as typeof fetch
+      opts.transcribe = createContentAudioServices({ env: name => name ===
+        (provider === 'openrouter' ? 'OPENROUTER_API_KEY' : 'GEMINI_API_KEY') ? 'synthetic-only' : undefined,
+      fetcher: network }).transcribe
+      const settle = vi.fn(opts.budget!.settle)
+      opts.budget = { ...opts.budget!, settle }
+      const result = await runContentRefresh(opts)
+      const code = status === 429 ? 'CONTENT_AUDIO_RATE_LIMIT' : 'CONTENT_AUDIO_PROVIDER_FAILURE'
+      expect(opts.adminClient.calls.find(call => call.action === 'usage')?.args.usage).toEqual({
+        costUsd: null, errorCode: code, httpDiagnostic: { provider, stage: 'generate', status },
+      })
+      expect(settle).toHaveBeenCalledExactlyOnceWith({ reservationId: 'test-budget', status: 'uncertain', usage: null })
+      expect(network).toHaveBeenCalledTimes(provider === 'openrouter' ? 2 : 1)
+      expect(cancel).toHaveBeenCalledOnce()
+      expect(result.errors).toContainEqual({ sourceId: testSource().id, code })
+      expect(result.eligibleSegments).toBe(0)
+      expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
+      expect(JSON.stringify([result, opts.adminClient.calls])).not.toContain('PRIVATE')
+    })
+  it('distinguishes a public catalog HTTP failure from a generation attempt', async () => {
+    const opts = options()
+    opts.fetcher = fetcher(rss(false))
+    const cancel = vi.fn()
+    const network = vi.fn(async () => new Response(new ReadableStream({ cancel }), { status: 503 }))
+    opts.transcribe = createContentAudioServices({ env: name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined,
+      fetcher: network }).transcribe
+    const result = await runContentRefresh(opts)
+    expect(opts.adminClient.calls.find(call => call.action === 'usage')?.args.usage).toEqual({
+      costUsd: null, errorCode: 'CONTENT_AUDIO_CATALOG', httpDiagnostic: { provider: 'openrouter', stage: 'catalog', status: 503 },
+    })
+    expect(network).toHaveBeenCalledOnce(); expect(cancel).toHaveBeenCalledOnce()
+    expect(events.filter(event => event.startsWith('budget-'))).toEqual(['budget-reserved', 'budget-uncertain'])
+    expect(result.eligibleSegments).toBe(0)
+  })
   it.each(['schema', 'timing', 'incomplete', 'unknown-cost', 'zero-cost'])(
     'keeps the provider receipt for rejected %s without approving a lesson or replaying', async kind => {
       const opts = options()
@@ -1599,7 +1649,7 @@ describe('real audio service contract (synthetic transport tests, not acoustic v
       expect((opts.audioStore as ReturnType<typeof makeStore>).blobs.size).toBe(1)
       expect(JSON.stringify([result, opts.adminClient.calls])).not.toContain('PRIVATE')
     })
-  it.each(['id', 'model', 'units', 'lookalike-error'])(
+  it.each(['id', 'model', 'units', 'lookalike-error', 'lookalike-http'])(
     'keeps an unknown charge when %s cannot establish a valid receipt', async kind => {
       const opts = options()
       opts.fetcher = fetcher(rss(false))
@@ -1608,6 +1658,9 @@ describe('real audio service contract (synthetic transport tests, not acoustic v
           architecture: { input_modalities: ['audio'] }, supported_parameters: ['structured_outputs'] }] }))
         if (kind === 'lookalike-error') throw Object.assign(new Error('PRIVATE provider transport detail'), {
           receipt: { id: 'gen-false', usage: { costUsd: 0, units: 0, unitName: 'tokens', provider: 'openrouter-native-audio', model: 'google/gemini-2.5-flash' } },
+        })
+        if (kind === 'lookalike-http') throw Object.assign(new GatewayError(503, 'CONTENT_AUDIO_PROVIDER_FAILURE', 'PRIVATE response'), {
+          diagnostic: { provider: 'openrouter', stage: 'generate', status: 402, extra: 'PRIVATE' },
         })
         return new Response(JSON.stringify({ id: kind === 'id' ? 'PRIVATE invalid id' : 'gen-synthetic-invalid-receipt',
           model: kind === 'model' ? 'PRIVATE invalid model' : 'google/gemini-2.5-flash',
@@ -1619,6 +1672,7 @@ describe('real audio service contract (synthetic transport tests, not acoustic v
       opts.budget = { ...opts.budget!, settle }
       const result = await runContentRefresh(opts)
       expect(settle).toHaveBeenCalledExactlyOnceWith({ reservationId: 'test-budget', status: 'uncertain', usage: null })
+      expect(opts.adminClient.calls.find(call => call.action === 'usage')?.args.usage).not.toHaveProperty('httpDiagnostic')
       expect(result.eligibleSegments).toBe(0)
       expect(JSON.stringify([result, opts.adminClient.calls])).not.toContain('PRIVATE')
     })
@@ -2250,6 +2304,32 @@ describe.runIf(localEnabled)('dedicated local PostgreSQL persistence and RLS (no
     expect(sql(`select count(*) from public.content_request_intents where item_id='${itemId}';`)).toBe('2')
     expect(sql(`select count(*) from public.content_usage u join public.content_request_intents i on i.request_id=u.request_id where u.item_id='${itemId}';`)).toBe('2')
     expect([...store.blobs.keys()].sort().map(path => path.split('/')[0])).toEqual(['clips', 'prefixes'])
+  }, 30_000)
+  it('persists HTTP failure metadata through real JSONB and owner RLS without inventing usage', async () => {
+    const feed = fetcher(rss(false).replace('<guid>one</guid>', '<guid>stored-http-failure</guid>'))
+    const network = vi.fn(async (url: string | URL | Request) => String(url).endsWith('/models')
+      ? new Response(JSON.stringify({ data: [{ id: 'google/gemini-2.5-flash', architecture: { input_modalities: ['audio'] },
+        supported_parameters: ['structured_outputs'] }] })) : new Response('PRIVATE response', { status: 402 })) as typeof fetch
+    const services = createContentAudioServices({ env: name => name === 'OPENROUTER_API_KEY' ? 'synthetic-only' : undefined, fetcher: network })
+    const store = makeStore(), settle = vi.fn(budget().settle)
+    const opts: ContentRefreshOptions = { ...options(), adminClient: admin, sources: [source], ownerId: localOwner, now: Date.now,
+      fetcher: request => feed({ ...request, etag: null }), transcribe: services.transcribe, audioStore: store,
+      budget: { ...budget(), settle }, transcriptOrigin: undefined, forcePoll: true }
+    const result = await runContentRefresh(opts)
+    const itemId = createHash('sha256').update(JSON.stringify([source.id, 'stored-http-failure'])).digest('hex')
+    const row = JSON.parse(sql(`select jsonb_build_object('status',status,'cost',cost_usd,'usage',usage)
+      from public.content_usage where item_id='${itemId}';`))
+    expect(row).toEqual({ status: 'uncertain', cost: null, usage: { costUsd: null, errorCode: 'CONTENT_AUDIO_PROVIDER_FAILURE',
+      httpDiagnostic: { provider: 'openrouter', stage: 'generate', status: 402 } } })
+    expect(settle).toHaveBeenCalledExactlyOnceWith({ reservationId: 'test-budget', status: 'uncertain', usage: null })
+    expect(network).toHaveBeenCalledTimes(2)
+    expect(result.eligibleSegments).toBe(0); expect(store.blobs.size).toBe(1)
+    for (const [user, expected] of [[localOwner, '1'], [outsider, '0']]) {
+      const count = sql(`begin; set local role authenticated; set local request.jwt.claim.sub='${user}';
+        select count(*) from public.content_usage where item_id='${itemId}'; rollback;`)
+        .split('\n').filter(value => !['BEGIN', 'SET', 'ROLLBACK'].includes(value))
+      expect(count).toEqual([expected])
+    }
   }, 30_000)
   it('fences expired workers and prevents two overlapping claims', async () => {
     const args = { sourceId: source.id, runId: crypto.randomUUID(), source, configHash: 'a'.repeat(64), forcePoll: true, canAnalyze: false }

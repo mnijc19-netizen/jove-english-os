@@ -6,7 +6,7 @@ import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, VOA_LESSON_CANDIDATES,
 import type { ContentSource, FeedEpisode, LearnerContentProfile, TimedTranscript, TranscriptReference } from '../content/pipeline-types'
 import { ContentNetworkError, fetchContentResource, type ContentFetchResult } from './content-network'
 import { CONTENT_POLICY_EVIDENCE, revalidateContentRights } from './content-rights'
-import { contentAudioDuration, contentStoredAudioWindow, prepareContentMp3Prefix, ContentAudioResponseError } from './content-audio'
+import { contentAudioDuration, contentAudioHttpDiagnostic, contentStoredAudioWindow, prepareContentMp3Prefix, ContentAudioResponseError } from './content-audio'
 import { auditVoaLessonCandidates, type VoaCandidateAudit } from './content-voa'
 import { GatewayError } from './gateway'
 import type {
@@ -400,9 +400,11 @@ async function providerCall<T extends { usage: ContentUsage }>(context: JobConte
     if (error instanceof ContentAudioResponseError) {
       try { usage = validateUsage(error.receipt.usage); providerRequestId = error.receipt.id } catch { /* Invalid receipt is not billing evidence. */ }
     }
+    const httpDiagnostic = contentAudioHttpDiagnostic(error)
     try { await context.options.budget!.settle({ reservationId: reserved.reservationId, status: 'uncertain', usage }) } catch { /* Primary outcome stays uncertain. */ }
     try { await context.call('usage', { itemId: item.id, revision: item.revision, ownerId: context.ownerId, requestId, purpose, status: 'uncertain',
-      usage: { ...(usage ?? { costUsd: null }), ...(providerRequestId ? { providerRequestId } : {}), errorCode: codeOf(error) } }) } catch { /* Lease loss must not permit stale writes. */ }
+      usage: { ...(usage ?? { costUsd: null }), ...(providerRequestId ? { providerRequestId } : {}),
+        ...(httpDiagnostic ? { httpDiagnostic } : {}), errorCode: codeOf(error) } }) } catch { /* Lease loss must not permit stale writes. */ }
     throw error
   }
 }
