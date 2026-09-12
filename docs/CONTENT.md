@@ -1,5 +1,13 @@
 # Curated demo content and audio
 
+## External-course continuation checkpoint — 2026-09-13
+
+The four existing publisher links remain the current external reserve. The planner now remembers valid submitted guided reflections across all available history, selects eligible unpractised lessons first, and revisits the oldest practice after exhaustion. This records participation, not verified comprehension or acoustic skill; it does not change FSRS scheduling or retarget an existing task. Recurring metadata delivery and broader graded coverage remain required.
+
+Candidate screening checked the [ESL-Lab easy directory](https://www.esl-lab.com/easy/) and publisher pages for apartments, hotel reservations, immigration/customs, train tickets, coffee shop, restaurant orders and phone messages. The [Coffee Shop page](https://www.esl-lab.com/easy/coffee-shop/) explicitly discloses AI collaboration, without establishing whether that includes its audio. Do not infer a human voice from an institutional name, a speaker-count field or the absence of an AI label. These candidates were not added as approved human references. Inspect provenance and source terms before admission; store links/original prompts only, not copied media/transcripts. Source discovery must not require paid audio-model retries.
+
+## Existing original demo pack
+
 `src/content/materials.ts` exports `demoMaterials: Material[]`, `missions`, `assessmentPrompts`, and `assessmentRubric`. Six original scripts cover everyday life, technology, and living abroad. Each has five sentences, three useful multiword chunks with English/Chinese meanings and a new-context example, a Chinese translation, an English meaning question, an expected answer, and four keyword cues. Register is included in each chunk's English explanation because MaterialChunk has no separate register field.
 
 All scripts are original project writing, with editorial review and automated consistency checks by the implementation agent. `sourceKind: 'curated'`, `approved: true`, and `sourceLabel: 'Original reviewed demo / synthetic speech'` describe curated original demos. They do not claim a human editorial panel, external publication, authentic conversation, or human voice recording. Independent product review remains a main-task acceptance gate. No external transcript, personal data, API key, or third-party audio recording is bundled. The license field describes text provenance; it does not claim ownership of the Windows voice engine or impose a new project license.

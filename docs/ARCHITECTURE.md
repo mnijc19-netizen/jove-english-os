@@ -1,5 +1,7 @@
 # Architecture
 
+Approved multilingual direction (2026-09-13): display brand Jove Language OS; keep the existing repository, Pages base/hash routes, PWA scope and database identities. Reuse the engine and infrastructure, not one blended learner state. Language-specific profile/evidence/cards/materials/plans/AI context and sync/backup migrations precede an enabled Japanese entry. Preserve the working English runtime throughout. See the ordered gates in `FINAL_UPGRADE.md`; this is an architecture requirement, not a claim that language isolation already exists.
+
 September13 delivery amendment: curated external lesson metadata uses the existing Material/Listen/planner/session/sync architecture. Publisher media opens externally; the app stores original learning prompts and learner work, not copied publisher audio or transcripts. Normal practice no longer invokes automatic acoustic assessment. See `FINAL_UPGRADE.md` for current scope and partial-release boundaries.
 
 Vue 3/TypeScript/Vite SPA, hash-history Vue Router, Pinia UI state, Dexie IndexedDB persistence, Zod validation, mature ts-fsrs scheduling, Vitest integration/unit tests and Playwright browser tests. CSS variables express the small design system without a second styling dependency. GitHub Actions publishes Vite dist to GitHub Pages at `/jove-english-os/`; PWA scope/start URL share that base.

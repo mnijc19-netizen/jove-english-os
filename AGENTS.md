@@ -1,4 +1,6 @@
-# Jove English OS: permanent working rules
+# Jove Language OS: permanent working rules
+
+Owner approval, 2026-09-13: evolve this same website into English and Japanese learning spaces, sharing infrastructure but isolating curricula, learner evidence, reviews and plans by language. Implement English content continuity first, then safe language isolation, then Japanese learning. Preserve the existing repository, URL, database identities, PWA scope and English history during the display-name change. Japanese must have its own kana/kanji/reading, mora/pitch-awareness, grammar/register and real-life task design; not translated English exercises. `docs/FINAL_UPGRADE.md` contains the current objective and staged acceptance. Do not expose unfinished Japanese as usable. No paid retry without new diagnostic evidence; after two equivalent failures report the blocker and pursue an unblocked task. Preserve safety and independent review; do not repeat unchanged full test matrices for documentation-only checkpoints.
 
 Owner amendment, 2026-09-13: external publisher playback/links are preferred over bulk audio hosting. Keep automatic selection, guided in-site practice, review and cross-device progress; an opened link is not listening evidence. Automatic acoustic pronunciation/prosody scoring is removed from required delivery; retain listen/record/replay/retry without invented scores. This explicit amendment supersedes conflicting original final-upgrade requirements. Do not resume paid content-audio diagnostics merely to satisfy the superseded hosting workflow.
 

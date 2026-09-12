@@ -117,7 +117,7 @@ function focusPractice() {
   <div v-else class="app-shell">
     <header class="mobile-header">
       <RouterLink to="/today" class="brand"
-        ><span class="brand-mark">j.</span>Jove English<span class="os"
+        ><span class="brand-mark">j.</span>Jove Language<span class="os"
           >OS</span
         ></RouterLink
       ><button
@@ -133,7 +133,7 @@ function focusPractice() {
       <RouterLink to="/today" class="brand desktop-brand"
         ><span class="brand-mark">j.</span
         ><span
-          >Jove English<small>YOUR PERSONAL PRACTICE</small></span
+          >Jove Language<small>YOUR PERSONAL PRACTICE</small></span
         ></RouterLink
       >
       <p class="nav-label">YOUR WORKSPACE</p>

@@ -1,5 +1,6 @@
 import { skillNames, type DailyPlan, type Material, type Profile, type ReviewCard, type Skill, type SkillName, type StudyEvent, type PlanTask } from './types'
 import { startedTaskIds, planLongitudinal } from './longitudinal'
+import { externalLessonCandidates } from '../content/external'
 
 // Scores, strengths, confidence and fatigue use 0..1, matching the shared UI/provider contract.
 const day = 86_400_000
@@ -131,7 +132,9 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   const rank = (m: Material) => {
     const haystack = `${m.title} ${m.topic} ${m.keywords.join(' ')}`.toLocaleLowerCase('en-US')
     const interest = interestTokens.filter(i => i && haystack.includes(i)).length * 3
-    const exposure = recent.filter(e => e.data?.materialId === m.id).length
+    // External participation is handled by the all-time candidate pool below;
+    // offering/opening a link must not advance its curriculum position.
+    const exposure = m.externalStudy ? 0 : recent.filter(e => e.data?.materialId === m.id).length
     return interest - Math.abs(m.difficulty - targetDifficulty) * 4 - exposure * 0.5
   }
   const approved = materials.filter(m => m.approved)
@@ -139,7 +142,7 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   // Screened, approachable human speech leads normal listening. A hard authentic
   // recording does not displace a comprehensible bridge simply for being human.
   const authentic = approachable.filter(m => m.authenticPlayback && !m.synthetic)
-  const external = approachable.filter(m => m.externalStudy && !m.synthetic)
+  const external = externalLessonCandidates(approachable, ordered, now)
   const listeningPool = authentic.length ? authentic : external.length ? external : approachable.length ? approachable : approved
   const boundMaterialId = today?.tasks.find(task => !task.done && !task.optional && task.kind === 'listen')?.materialId ?? today?.tasks.find(task => !task.done && !task.optional && task.materialId)?.materialId
   const material = approved.find(item => item.id === boundMaterialId) ?? [...listeningPool].sort((a, b) =>
@@ -155,7 +158,9 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   const failuresDue = actionableFailures.length || due.some(card => card.errorId)
   const candidates: { kind: PlanTask['kind']; title: string; reason: string; weight: number; materialId?: string; id?: string }[] = []
   if (due.length) candidates.push({ kind: 'review', title: 'Revisit a manageable selection', reason: `${due.length} selected cards. Other due cards stay saved for later; each attempt keeps its own schedule.`, weight: Math.max(1, adjustment.reviewMinutes) })
-  candidates.push({ kind: 'listen', title: 'Listen for the meaning', reason: `Focus on ${skillLabel(focus).toLowerCase()}. ${material ? `Try “${material.title}”.` : 'Choose an approved passage.'} Work in ${adjustment.segmentSeconds}-second sections; aim for about ${adjustment.newInputSeconds} seconds of new input.`, weight: adjustment.inputMinutes / 3 + (inputSkills.includes(focus) ? 1 : 0) + (outputCount > inputCount ? 1 : 0), materialId: material?.id })
+  candidates.push({ kind: 'listen', title: 'Listen for the meaning', reason: material?.externalStudy
+    ? `Practise “${material.title}” on the publisher page, then return to recall the meaning, reuse an expression and record your response.`
+    : `Focus on ${skillLabel(focus).toLowerCase()}. ${material ? `Try “${material.title}”.` : 'Choose an approved passage.'} Work in ${adjustment.segmentSeconds}-second sections; aim for about ${adjustment.newInputSeconds} seconds of new input.`, weight: adjustment.inputMinutes / 3 + (inputSkills.includes(focus) ? 1 : 0) + (outputCount > inputCount ? 1 : 0), materialId: material?.id })
   const readingOptions = longitudinal.reading.candidates.filter(f => f.fit !== 'too-hard').flatMap(f => {
     const candidate = approved.find(m => m.id === f.materialId)
     return candidate && (f.fit === 'likely-fit' || candidate.difficulty <= adjustment.readingTargetDifficulty + 0.1) ? [candidate] : []

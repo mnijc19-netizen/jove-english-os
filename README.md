@@ -1,10 +1,12 @@
-# Jove English OS
+# Jove Language OS
+
+Formerly Jove English OS. The display name is evolving; the repository, public URL, PWA scope and existing English learning data stay unchanged. English is currently available; Japanese is approved future work, not an enabled course yet. The current objective and ordered acceptance gates are in `docs/FINAL_UPGRADE.md`.
 
 A personal, local-first English trainer focused on natural listening and spontaneous speaking. It connects input, comprehension, chunks, retrieval, conversation, correction, delayed review and new-context transfer. Learning estimates carry evidence; completing a page never establishes mastery.
 
 ## Start learning
 
-Website: [Jove English OS](https://mnijc19-netizen.github.io/jove-english-os/). Release verification is recorded in `docs/STATUS.md`.
+Website: [Jove Language OS](https://mnijc19-netizen.github.io/jove-english-os/). Release verification is recorded in `docs/STATUS.md`.
 
 **Release boundary:** the final-upgrade worktree is not yet production-accepted. The public website still serves the accepted V1 runtime. Account synchronization, automated authentic content and acoustic practice described below must not be treated as live until the exact release and production journeys are recorded in `docs/STATUS.md`.
 

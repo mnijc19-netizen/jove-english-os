@@ -1,5 +1,7 @@
 # Acceptance contract
 
+The approved Jove Language OS objective in `FINAL_UPGRADE.md` adds Japanese-specific learning and language-isolation gates, while preserving English and the existing public URL. A changed display name is not multilingual acceptance. Validate old English records/IDs, language-scoped plans/FSRS/AI context, sync/export/reset separation, shared total-time budgeting and real Japanese kana/reading/listening/output/review journeys before exposing Japanese. Current pending items are explicit in STATUS.md.
+
 Completion is unproven until every gate below has current evidence. Record evidence and residual limits in STATUS.md; demo/mocked adapters cannot prove paid provider integration.
 
 The final-upgrade gates and latest owner amendments in `FINAL_UPGRADE.md` take precedence. Older V1 acceptance is historical, not final completion. Actual cloud sync/RLS/migration, autonomous external-content delivery, long-term recovery/plateau/reading, server secrets/budget/retention and desktop/mobile WebKit still need appropriate evidence; provider stubs and Pixel emulation alone are insufficient. Automatic acoustic scoring and bulk hosted source audio are no longer mandatory. The owner separately authorizes publishing the verified subset now, with remaining final-upgrade gaps explicitly disclosed.

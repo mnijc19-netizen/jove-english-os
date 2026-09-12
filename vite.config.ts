@@ -18,9 +18,9 @@ export default defineConfig(({ command, mode }) => {
       registerType: "prompt",
       includeAssets: ["icon.svg", "audio/*.wav"],
       manifest: {
-        name: "Jove English OS",
-        short_name: "Jove English",
-        description: "Your personal practice for real-world English.",
+        name: "Jove Language OS",
+        short_name: "Jove Language",
+        description: "Your personal practice for real-world language use.",
         theme_color: "#476b63",
         background_color: "#f7f8f5",
         display: "standalone",

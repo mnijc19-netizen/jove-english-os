@@ -1,6 +1,6 @@
 # Product specification — approved scope
 
-Current final-upgrade requirements and the September13 external-playback/optional-acoustics/partial-release amendments are in `FINAL_UPGRADE.md`; they supersede conflicting historical V1 boundaries below.
+Current final-upgrade requirements, the approved Jove Language OS English/Japanese objective and the September13 external-playback/optional-acoustics/partial-release amendments are in `FINAL_UPGRADE.md`; they supersede conflicting historical V1 boundaries below. Shared infrastructure must not blend language-specific learner evidence or curricula. Japanese ships only after its own real-life learning path and migration/isolation acceptance; the current runtime remains English until then.
 
 Jove English OS serves one Chinese-native learner pursuing real-world English independence. Priority: natural listening, spontaneous speaking, high-frequency chunks, intelligibility/prosody, productive grammar, reading, writing. Exams are secondary transfer benefits. This complete V1 includes all requirements below; milestones do not redefine completion.
 

@@ -1,5 +1,11 @@
 # Learning science and limits
 
+## Approved Japanese adaptation — 2026-09-13
+
+The shared input/retrieval/output/repair/spacing/transfer principles below are not a license to translate English exercises mechanically. The [Japan Foundation's Irodori course introduction](https://www.irodori.jpf.go.jp/en/about.html), checked 2026-09-13, organizes everyday communication by Can-do tasks with listening, authentic/quasi-authentic reading/writing and contextual grammar/kanji support; its four parts span A1 through A2/B1. This is a curriculum reference, not an experiment validating our app or a complete advanced Japanese program. Link to permitted publisher resources; do not assume rights to redistribute their media.
+
+Implementation requirements: diagnose kana/sound, reading and listening separately; teach kana with early communication and kanji readings in words; fade furigana/romaji based on performance; practise mora length/gemination/nasal timing and pitch awareness with reviewed reference speech; teach particles, conjugation, omitted context and polite/casual register in real tasks. Use Chinese help without assuming Chinese-character recognition proves Japanese comprehension. Japanese needs its own segmentation/reading normalization and evaluator rubric. These are language-specific design choices to validate, not an optimal fixed daily formula. Automatic acoustic scores are not required; reference listening, recording/replay and delayed/new-context language assessment remain. Skill/evidence/FSRS state must stay independent of English.
+
 Bounded evidence audit completed 2026-09-07. The sources below support learning principles; they do not validate this app, its planner, an AI evaluator, or a particular learner's outcome. This is a targeted primary-source check, not a systematic review. Implementation acceptance remains governed by ACCEPTANCE.md.
 
 | Principle and fetched source | Finding and product implication | Limit |
