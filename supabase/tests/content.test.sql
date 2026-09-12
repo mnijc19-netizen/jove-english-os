@@ -206,6 +206,74 @@ begin
     raise exception 'Audio cleanup erased replay protection or billing uncertainty'; end if;
 end $$;
 
+-- A pre-intent worker can lose its lease/process before writing content_usage.
+-- The service ledger survives; changing acquisition must not authorize a retry.
+do $$ declare uk uuid:=gen_random_uuid(); other_owner uuid:=gen_random_uuid(); run_key uuid:=gen_random_uuid();
+  sk text:='orphan-ledger-'||replace(gen_random_uuid()::text,'-','');
+  ik text:=md5(gen_random_uuid()::text)||md5(gen_random_uuid()::text);
+  old_item text:=md5(gen_random_uuid()::text)||md5(gen_random_uuid()::text);
+  old_fp text:=md5(gen_random_uuid()::text)||md5(gen_random_uuid()::text);
+  new_fp text:=md5(gen_random_uuid()::text)||md5(gen_random_uuid()::text);
+  args jsonb; old_args jsonb; result jsonb; original_ledger jsonb; state text;
+begin
+  insert into auth.users(id) values(uk),(other_owner);
+  insert into public.app_members(user_id) values(uk),(other_owner);
+  insert into public.service_preferences(user_id,daily_budget_usd,monthly_budget_usd) values(uk,2,2);
+  perform public.content_worker('claim',jsonb_build_object('sourceId',sk,'runId',run_key,'configHash',repeat('a',64),
+    'source',jsonb_build_object('id',sk,'enabled',true,'name','SYNTHETIC ORPHAN TEST')));
+  perform public.content_worker('ingest',jsonb_build_object('sourceId',sk,'runId',run_key,'items',jsonb_build_array(
+    jsonb_build_object('id',ik,'revision',repeat('b',64),'episode',jsonb_build_object('sourceId',sk,'guid','SYNTHETIC NEW ITEM')),
+    jsonb_build_object('id',old_item,'revision',repeat('b',64),'episode',jsonb_build_object('sourceId',sk,'guid','SYNTHETIC OLD ITEM')))));
+  args:=jsonb_build_object('sourceId',sk,'runId',run_key,'itemId',ik,'revision',repeat('b',64),'purpose','content-stt','scope','',
+    'requestId','content-stt-'||new_fp,'fingerprint',new_fp,'audioSha256',repeat('e',64));
+  old_args:=args||jsonb_build_object('itemId',old_item,'requestId','content-stt-'||old_fp,'fingerprint',old_fp);
+  insert into public.service_usage(user_id,request_id,fingerprint,dispatch_nonce,service,status,reserved_usd)
+    values(uk,'content-stt-'||old_fp,old_fp,gen_random_uuid(),'content','uncertain',0.5);
+  select to_jsonb(u) into original_ledger from public.service_usage u where user_id=uk;
+  result:=public.content_request_intent(args);
+  if result->>'allowed' is distinct from 'false' then raise exception 'Orphan service reservation authorized a new content intent'; end if;
+  if public.content_legacy_service_unmapped() is distinct from true then raise exception 'Orphan preflight was not closed'; end if;
+  if exists(select 1 from public.content_request_intents where item_id=ik)
+    or (select to_jsonb(u) from public.service_usage u where user_id=uk) is distinct from original_ledger then
+    raise exception 'Orphan denial changed intent or original unknown hold'; end if;
+  -- No content/checkpoint row exists; denial must precede budget reservation.
+  if result->>'allowed'='true' then
+    perform public.reserve_service_call(uk,'content-stt-'||new_fp,new_fp,'content',0.5,gen_random_uuid());
+  end if;
+  if (select count(*) from public.service_usage where user_id=uk)<>1 then raise exception 'Orphan retry created a second hold'; end if;
+  foreach state in array array['reserved','completed','failed'] loop
+    update public.service_usage set status=state where user_id=uk;
+    if public.content_request_intent(args)->>'allowed' is distinct from 'false' then raise exception 'Ledger status hid orphan mapping'; end if;
+  end loop;
+  update public.service_usage set status='uncertain' where user_id=uk;
+  insert into public.content_usage(request_id,user_id,item_id,purpose,status,usage)
+    values('content-stt-'||old_fp,uk,null,'content-stt','uncertain','{"synthetic":true}');
+  if public.content_request_intent(args)->>'allowed' is distinct from 'false' then raise exception 'Null-item checkpoint cleared orphan'; end if;
+  update public.content_usage set item_id=old_item,user_id=other_owner where request_id='content-stt-'||old_fp;
+  if public.content_request_intent(args)->>'allowed' is distinct from 'false' then raise exception 'Other owner checkpoint cleared orphan'; end if;
+  update public.content_usage set user_id=uk where request_id='content-stt-'||old_fp;
+  if public.content_legacy_service_unmapped() is distinct from false then raise exception 'Trustworthy old item mapping not recognized'; end if;
+  if public.content_request_intent(args)->>'allowed' is distinct from 'true' then raise exception 'Mapped different old item blocked fresh work'; end if;
+  if public.content_request_intent(old_args)->>'allowed' is distinct from 'false' then raise exception 'Old mapped item became replayable'; end if;
+  -- A modern intent is committed BEFORE reservation. Losing the later usage
+  -- checkpoint does not orphan that trustworthy binding or erase the hold.
+  delete from public.content_usage where request_id='content-stt-'||old_fp;
+  insert into public.content_request_intents(item_id,revision,purpose,scope,request_id,fingerprint,audio_sha256)
+    values(old_item,repeat('b',64),'content-stt','','content-stt-'||old_fp,old_fp,repeat('e',64));
+  if public.content_request_intent(args)->>'allowed' is distinct from 'true' then raise exception 'Interrupted modern checkpoint blocked unrelated work'; end if;
+  if public.content_request_intent(old_args)->>'allowed' is distinct from 'true' then raise exception 'Stable modern binding stopped being idempotent'; end if;
+  if public.content_request_intent(old_args||jsonb_build_object('requestId','content-stt-'||repeat('f',64),'fingerprint',repeat('f',64)))->>'allowed'
+    is distinct from 'false' then raise exception 'Interrupted modern checkpoint rebound its fingerprint'; end if;
+  update public.service_usage set fingerprint=repeat('f',64) where user_id=uk;
+  if public.content_request_intent(args)->>'allowed' is distinct from 'false' then raise exception 'Mismatched intent fingerprint cleared orphan'; end if;
+  update public.service_usage set fingerprint=old_fp where user_id=uk;
+  if (select to_jsonb(u) from public.service_usage u where user_id=uk) is distinct from original_ledger then
+    raise exception 'Replay checks changed original ledger'; end if;
+  update public.content_sources set lease_until=null where id=sk;
+  begin perform public.content_request_intent(args); raise exception 'Null lease expiry admitted intent';
+  exception when serialization_failure then null; end;
+end $$;
+
 set local role authenticated;
 do $$ begin
   begin perform public.content_worker('status','{}'); raise exception 'Browser invoked service RPC';
@@ -217,6 +285,8 @@ do $$ begin
   begin perform 1 from public.content_request_intents; raise exception 'Browser read private request bindings';
   exception when insufficient_privilege then null; end;
   begin perform public.content_request_intent('{}'); raise exception 'Browser created provider request intent';
+  exception when insufficient_privilege then null; end;
+  begin perform public.content_legacy_service_unmapped(); raise exception 'Browser inspected private legacy ledger state';
   exception when insufficient_privilege then null; end;
   begin perform public.content_audio_work('order','{"sourceIds":[]}'); raise exception 'Browser reordered provider work';
   exception when insufficient_privilege then null; end;

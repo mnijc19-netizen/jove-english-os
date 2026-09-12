@@ -1268,6 +1268,22 @@ describe('versioned prefix acquisition and recovery (synthetic media, not human 
     expect(opts.adminClient.intents.size).toBe(1)
     expect(analyze).toHaveBeenCalledOnce()
   })
+  it('does not reserve or dispatch when an interrupted legacy service ledger has no item mapping', async () => {
+    const { opts } = setup()
+    const original = opts.adminClient.rpc.bind(opts.adminClient)
+    opts.adminClient.rpc = async (name, input) => name === 'content_request_intent'
+      ? { data: { allowed: false, reason: 'legacy-ledger-reconciliation-required' }, error: null }
+      : original(name, input)
+    const reserve = vi.spyOn(opts.budget!, 'reserve')
+    const analyze = vi.fn(analyzer)
+    opts.analyzeAudio = analyze
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toContainEqual(expect.objectContaining({ code: 'content-provider-reconciliation-required' }))
+    expect(reserve).not.toHaveBeenCalled()
+    expect(analyze).not.toHaveBeenCalled()
+    expect(opts.adminClient.intents.size).toBe(0)
+    expect(opts.adminClient.calls.some(call => call.action === 'usage')).toBe(false)
+  })
   it('cancels a stalled intent lookup without reserving a paid request', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     let release!: () => void, started!: () => void
