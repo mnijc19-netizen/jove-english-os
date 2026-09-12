@@ -103,6 +103,95 @@ begin
   exception when serialization_failure then null; end;
 end $$;
 
+-- Explicit acquisition coexistence, JSONB recovery and logical spending fence.
+-- Synthetic metadata only; no provider, Storage upload or human approval.
+do $$
+declare sk text:='test-prefix-sql-'||replace(gen_random_uuid()::text,'-',''); rk uuid:=gen_random_uuid(); uk uuid:=gen_random_uuid();
+  ik text:=repeat('7',64); rev text:=repeat('8',64); sha text:=repeat('9',64); c jsonb; base jsonb; asset jsonb;
+  r jsonb; tr jsonb; intent jsonb; patch jsonb;
+begin
+  insert into auth.users(id) values(uk); insert into public.app_members(user_id) values(uk);
+  perform public.content_worker('claim',jsonb_build_object('sourceId',sk,'runId',rk,'configHash',repeat('a',64),
+    'source',jsonb_build_object('id',sk,'enabled',true,'name','Synthetic prefix fixture')));
+  base:=jsonb_build_object('sourceId',sk,'runId',rk,'itemId',ik,'revision',rev);
+  perform public.content_worker('ingest',base||jsonb_build_object('items',jsonb_build_array(jsonb_build_object('id',ik,'revision',rev,
+    'episode',jsonb_build_object('guid','SYNTHETIC PREFIX TEST ONLY','sourceId',sk)))));
+  c:=jsonb_build_object('version','mpeg-prefix-v1','networkKind','prefix','receivedBytes',417000,'sourceBytes',10000000,
+    'sourceByteStart',0,'sourceByteEndExclusive',417000,'startSeconds',0,'endSeconds',1000.0*1152/44100,
+    'frameCount',1000,'sampleRate',44100,'samplesPerFrame',1152,'removedMetadataFrame',null,'discardedTrailingBytes',0,
+    'stopReason','range-boundary','gaplessAdjustment','not-applied');
+  if public.content_mp3_coverage_v1_valid(c,417000) is distinct from true then raise exception 'Valid prefix coverage rejected'; end if;
+  for patch in select value from jsonb_array_elements('[{"version":"unknown"},{"sourceByteStart":1},{"networkKind":"complete"},
+      {"frameCount":1000.5},{"endSeconds":601},{"frameCount":null},{"extra":"field"},{"gaplessAdjustment":"invented"}]'::jsonb) loop
+    if public.content_mp3_coverage_v1_valid(c||patch,417000) is distinct from false then raise exception 'Invalid prefix coverage accepted'; end if;
+  end loop;
+  if public.content_mp3_coverage_v1_valid(null,417000) is distinct from false then raise exception 'Missing coverage accepted'; end if;
+  asset:=jsonb_build_object('sha256',sha,'bytes',417000,'mimeType','audio/mpeg');
+  perform public.content_worker('asset',base||asset||jsonb_build_object('objectPath','episodes/'||ik||'/'||sha));
+  perform public.content_worker('asset',base||asset||jsonb_build_object('objectPath','prefixes/'||ik||'/'||sha,
+    'acquisitionVersion','mpeg-prefix-v1','coverage',c));
+  if (select count(*) from public.content_audio_assets where item_id=ik) is distinct from 2 then raise exception 'Prefix replaced complete asset'; end if;
+  perform public.content_worker('asset-ready',base||jsonb_build_object('sha256',sha,'acquisitionVersion','mpeg-prefix-v1'));
+  if not exists(select 1 from public.content_audio_assets where item_id=ik and acquisition_version='complete-v1' and state='preparing' and coverage is null) then
+    raise exception 'Prefix readiness changed old asset'; end if;
+  r:=public.content_worker('pending',base||jsonb_build_object('acquisitionVersion','mpeg-prefix-v1'));
+  if jsonb_array_length(r) is distinct from 1 or r->0->>'audio_acquisition_version' is distinct from 'mpeg-prefix-v1'
+    or r->0->'audio_coverage' is distinct from c then raise exception 'Prefix JSONB recovery mismatch'; end if;
+  r:=public.content_worker('pending',base);
+  if r->0->>'object_path' is not null then raise exception 'Legacy caller acquired a prefix'; end if;
+  perform public.content_worker('asset-ready',base||jsonb_build_object('sha256',sha));
+  r:=public.content_worker('pending',base||jsonb_build_object('acquisitionVersion','mpeg-prefix-v1'));
+  if jsonb_array_length(r) is distinct from 1 or r->0->>'audio_acquisition_version' is distinct from 'complete-v1' then
+    raise exception 'Existing complete acquisition was not reused'; end if;
+  begin
+    perform public.content_worker('asset',base||asset||jsonb_build_object('objectPath','prefixes/'||ik||'/'||sha,
+      'acquisitionVersion','mpeg-prefix-v1','coverage',c||jsonb_build_object('sourceBytes',10000001)));
+    raise exception 'Same digest rebound to different coverage';
+  exception when unique_violation then null; end;
+  tr:=jsonb_build_object('reference',jsonb_build_object('origin','authorized-stt','derivation',jsonb_build_object('audioSha256',sha,'audioCoverage',c)),
+    'cues','[]'::jsonb);
+  perform public.content_worker('checkpoint',base||jsonb_build_object('transcript',tr,'fingerprint',repeat('a',64)));
+  r:=public.content_worker('pending',base||jsonb_build_object('acquisitionVersion','mpeg-prefix-v1'));
+  if r->0->>'audio_acquisition_version' is distinct from 'mpeg-prefix-v1' then
+    raise exception 'Same-digest acquisitions ignored STT coverage'; end if;
+  begin
+    perform public.content_worker('checkpoint',base||jsonb_build_object('transcript',jsonb_set(tr,'{reference,derivation,audioCoverage,sourceBytes}','10000001'::jsonb),'fingerprint',repeat('b',64)));
+    raise exception 'Existing STT rebound to different coverage';
+  exception when unique_violation then null; end;
+  begin
+    perform public.content_worker('checkpoint',base||jsonb_build_object('transcript',jsonb_set(tr,'{reference,derivation,audioSha256}',to_jsonb(repeat('b',64))),'fingerprint',repeat('b',64)));
+    raise exception 'Existing STT rebound to a new audio digest';
+  exception when unique_violation then null; end;
+  intent:=base||jsonb_build_object('purpose','content-stt','scope','','requestId','content-stt-'||repeat('c',64),
+    'fingerprint',repeat('c',64),'audioSha256',sha);
+  if public.content_request_intent(intent)->>'allowed' is distinct from 'true' then raise exception 'First logical intent rejected'; end if;
+  if public.content_request_intent(intent)->>'allowed' is distinct from 'true' then raise exception 'Same logical intent was not idempotent'; end if;
+  if public.content_request_intent(intent||jsonb_build_object('requestId','content-stt-'||repeat('d',64),'fingerprint',repeat('d',64)))->>'allowed'
+    is distinct from 'false' then raise exception 'Changed fingerprint bypassed logical intent'; end if;
+  if (select count(*) from public.content_request_intents where item_id=ik) is distinct from 1 then raise exception 'Intent duplicated'; end if;
+  begin
+    perform public.content_request_intent(intent||jsonb_build_object('runId',gen_random_uuid()));
+    raise exception 'Stale lease wrote request intent';
+  exception when serialization_failure then null; end;
+  insert into public.content_usage(request_id,user_id,item_id,purpose,status,cost_usd,usage)
+    values('content-stt-'||repeat('e',64),uk,ik,'content-stt','uncertain',null,'{"synthetic":true}'::jsonb);
+  if public.content_request_intent(intent)->>'allowed' is distinct from 'false' then raise exception 'Unmapped historical charge was ignored'; end if;
+  if not exists(select 1 from public.content_usage where item_id=ik and status='uncertain' and cost_usd is null) then
+    raise exception 'Historical uncertainty was changed'; end if;
+  update public.content_audio_assets set expires_at=clock_timestamp()-interval '1 second'
+    where item_id=ik and acquisition_version='mpeg-prefix-v1';
+  r:=public.content_worker('retention',base);
+  if r is distinct from jsonb_build_array('prefixes/'||ik||'/'||sha) then raise exception 'Prefix retention selected wrong acquisition'; end if;
+  if public.content_worker('retention',base) is distinct from r then raise exception 'Failed prefix deletion was not recoverable'; end if;
+  perform public.content_worker('retention-finish',base||jsonb_build_object('paths',r));
+  if (select count(*) from public.content_audio_assets where item_id=ik) is distinct from 1
+    or not exists(select 1 from public.content_audio_assets where item_id=ik and acquisition_version='complete-v1' and state='ready') then
+    raise exception 'Prefix retention removed the complete acquisition'; end if;
+  if not exists(select 1 from public.content_request_intents where item_id=ik)
+    or not exists(select 1 from public.content_usage where item_id=ik and status='uncertain' and cost_usd is null) then
+    raise exception 'Audio cleanup erased replay protection or billing uncertainty'; end if;
+end $$;
+
 set local role authenticated;
 do $$ begin
   begin perform public.content_worker('status','{}'); raise exception 'Browser invoked service RPC';
@@ -110,6 +199,10 @@ do $$ begin
   begin perform 1 from public.content_transcripts; raise exception 'Browser read uninspected transcript';
   exception when insufficient_privilege then null; end;
   begin perform 1 from public.content_segment_audio; raise exception 'Browser read private clip registry';
+  exception when insufficient_privilege then null; end;
+  begin perform 1 from public.content_request_intents; raise exception 'Browser read private request bindings';
+  exception when insufficient_privilege then null; end;
+  begin perform public.content_request_intent('{}'); raise exception 'Browser created provider request intent';
   exception when insufficient_privilege then null; end;
   begin perform public.install_content_schedule('https://abcdefghijklmnopqrst.supabase.co/functions/v1/content','jove-content-job-test'); raise exception 'Browser installed schedule';
   exception when insufficient_privilege then null; end;

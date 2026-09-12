@@ -43,7 +43,7 @@ export interface ContentSource {
 export interface TranscriptReference {
   url: string; format: TranscriptFormat; language: string | null
   origin: 'publisher-feed' | 'publisher-template' | 'authorized-stt'
-  derivation?: { audioSha256: string; audioDurationSeconds?: number; provider: string; processedAt: number; evidenceId: string }
+  derivation?: { audioSha256: string; audioDurationSeconds?: number; audioCoverage?: ContentMp3Coverage; provider: string; processedAt: number; evidenceId: string }
 }
 export interface FeedEpisode {
   sourceId: string; guid: string; title: string; pageUrl: string; feedUrl: string
@@ -145,9 +145,19 @@ export interface InspectionValues {
   learningValue: boolean
 }
 export type Inspection = { [K in keyof InspectionValues]: Fact<InspectionValues[K]> }
+/** Exact byte-zero acquisition provenance, not the complete source duration or digest. */
+export interface ContentMp3Coverage {
+  version: 'mpeg-prefix-v1'; networkKind: 'complete' | 'prefix'
+  receivedBytes: number; sourceBytes: number; sourceByteStart: number; sourceByteEndExclusive: number
+  startSeconds: 0; endSeconds: number; frameCount: number; sampleRate: number; samplesPerFrame: number
+  removedMetadataFrame: 'Xing' | 'Info' | 'VBRI' | null; discardedTrailingBytes: number
+  stopReason: 'duration-limit' | 'range-boundary' | 'complete'; gaplessAdjustment: 'not-applied'
+}
 export interface AudioArtifact {
   /** Digest of the ACTUAL analyzed audio bytes, after any dynamic ad insertion. */
   sha256: string; url: string; durationSeconds: number
+  /** Required for a bounded source; durationSeconds then describes this artifact only. */
+  coverage?: ContentMp3Coverage
 }
 export interface AnalysisRequest {
   segmentId: string; timingFingerprint: string; contentFingerprint: string

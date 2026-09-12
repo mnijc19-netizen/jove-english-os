@@ -14,7 +14,7 @@ import { GatewayError, type OwnerContext } from '../src/server/gateway'
 import {
   buildContentTaskInventory, planContentSourceRefresh, readOwnerContentTaskInventory, reviewVoaLifeTaskDialogue,
   recordContentLearningUse, runContentRefresh, runVoaCandidatePilot, selectAndPersistContentLessons,
-  type ContentAdminClient, type ContentAudioAnalyzer, type ContentAudioStore, type ContentBudget,
+  type ContentAdminClient, type ContentAudioAnalyzer, type ContentAudioInput, type ContentAudioStore, type ContentBudget,
   type ContentRefreshOptions, type ContentLifeTaskReview, type EligibleContentLesson, type PersistedContentSegment,
 } from '../src/server/content-worker'
 
@@ -64,7 +64,7 @@ const analyzer: ContentAudioAnalyzer = async request => {
   events.push('analyze')
   expect(events.indexOf('audio-saved')).toBeLessThan(events.indexOf('budget-reserved'))
   expect(events.indexOf('budget-reserved')).toBeLessThan(events.indexOf('analyze'))
-  const window = contentAudioWindow(request.audio.bytes, request.audio.mimeType, request.interval.startSeconds, request.interval.endSeconds)
+  const window = contentStoredAudioWindow(request.audio, request.interval.startSeconds, request.interval.endSeconds)
   return { requestFingerprint: request.requestFingerprint, audioSha256: request.audio.sha256,
     audioDurationSeconds: window.originalDurationSeconds, inspectedStartSeconds: request.interval.startSeconds, inspectedEndSeconds: request.interval.endSeconds,
     audioEvidence: { providerRequestId: 'SYNTHETIC-TEST-ONLY', originalAudioSha256: request.audio.sha256,
@@ -94,12 +94,14 @@ function fetcher(feed = rss()): ContentFetcher {
 }
 
 type DbItem = { id: string; revision: string; episode: unknown; status: string; attempts: number; transcript: TimedTranscript | null;
-  saved_segments: PersistedContentSegment[]; object_path: string | null; audio_sha256: string | null; audio_mime: string | null }
+  saved_segments: PersistedContentSegment[]; object_path: string | null; audio_sha256: string | null; audio_mime: string | null;
+  audio_acquisition_version?: 'complete-v1' | 'mpeg-prefix-v1'; audio_coverage?: ContentAudioInput['audio']['coverage'] }
 class MemoryRpc implements ContentAdminClient {
   items = new Map<string, DbItem>()
   records = new Map<string, PersistedContentSegment>()
   recommendations: { id: string; request_id: string; segment_id: string; lesson: EligibleContentLesson }[] = []
   calls: { action: string; args: Record<string, unknown> }[] = []
+  intents = new Map<string, string>()
   etag: string | null = null
   config = testSource()
   locked = false
@@ -123,6 +125,14 @@ class MemoryRpc implements ContentAdminClient {
   }
   async rpc(_name: string, input?: Record<string, unknown>): Promise<Awaited<ReturnType<ContentAdminClient['rpc']>>> {
     const action = input!.action as string, args = input!.args as Record<string, unknown>
+    if (_name === 'content_request_intent') {
+      const scope = JSON.stringify([args.itemId, args.revision, args.purpose, args.scope])
+      const binding = JSON.stringify([args.requestId, args.fingerprint, args.audioSha256])
+      const previous = this.intents.get(scope)
+      if (!previous) this.intents.set(scope, binding)
+      this.calls.push({ action: 'request-intent', args: structuredClone(args) })
+      return { data: { allowed: !previous || previous === binding }, error: null }
+    }
     this.calls.push({ action, args: structuredClone(args) })
     let data: unknown = {}
     const item = this.items.get(args.itemId as string)
@@ -155,7 +165,9 @@ class MemoryRpc implements ContentAdminClient {
     else if (action === 'pending') data = [...this.items.values()].filter(item => ['pending', 'retry'].includes(item.status) || args.canAnalyze && item.status === 'awaiting-analysis')
       .map(item => ({ ...item, saved_segments: [...this.records.values()] }))
     else if (action === 'checkpoint') item!.transcript = args.transcript as TimedTranscript
-    else if (action === 'asset') { item!.object_path = args.objectPath as string; item!.audio_sha256 = args.sha256 as string; item!.audio_mime = args.mimeType as string }
+    else if (action === 'asset') { item!.object_path = args.objectPath as string; item!.audio_sha256 = args.sha256 as string; item!.audio_mime = args.mimeType as string
+      item!.audio_acquisition_version = args.acquisitionVersion as 'complete-v1' | 'mpeg-prefix-v1' | undefined
+      item!.audio_coverage = args.coverage as ContentAudioInput['audio']['coverage'] }
     else if (action === 'save-segment') { const record = args.record as PersistedContentSegment; this.records.set(record.segment.id, structuredClone(record)) }
     else if (action === 'finish-item') { item!.status = args.status as string; item!.attempts++ }
     else if (action === 'candidates') data = { candidates: [...this.records.values()].filter(record => record.status === 'eligible').map(record => ({ id: record.segment.id, record, config: this.config })), recent: this.recommendations }
@@ -1115,6 +1127,152 @@ describe.runIf(process.env.JOVE_CONTENT_PREFIX_DECODE_PROBE === '1')('actual bou
   }, 90000)
 })
 
+describe('versioned prefix acquisition and recovery (synthetic media, not human approval)', () => {
+  function setup(seconds = 90, withTranscript = true) {
+    const opts = options(), prefix = mp3PrefixFixture(seconds), base = fetcher(rss(withTranscript))
+    opts.audioAcquisition = 'mpeg-prefix-v1'
+    opts.limits = { ...opts.limits, audioBytes: prefix.bytes.length }
+    opts.fetcher = async request => {
+      if (request.role !== 'audio') return base(request)
+      expect(request.audioPrefixBytes).toBe(prefix.bytes.length)
+      return { ...(await base(request)), body: prefix.bytes, status: 206, contentType: 'audio/mpeg',
+        byteCoverage: { kind: 'prefix', start: 0, endExclusive: prefix.bytes.length, totalBytes: prefix.bytes.length + 100000 } }
+    }
+    return { opts, prefix }
+  }
+  it('stores the exact prefix and covered clip without treating 45 seconds as a full episode', async () => {
+    const { opts } = setup(45)
+    opts.analyzeAudio = analyzer
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toEqual([])
+    expect(result.eligibleSegments).toBe(1)
+    const record = [...opts.adminClient.records.values()][0]!
+    expect(record.segment.endSeconds).toBe(40)
+    expect(record.segment.episode.durationSeconds).toBeNull()
+    expect(record.artifact!.coverage).toMatchObject({ version: 'mpeg-prefix-v1', startSeconds: 0 })
+    expect(record.artifact!.durationSeconds).toBeCloseTo(record.artifact!.coverage!.endSeconds, 8)
+    expect(record.clip!.timingBasis).toBe('mpeg-frame-count-with-xing-v1')
+    expect([...((opts.audioStore as ReturnType<typeof makeStore>).blobs.keys())].sort().map(path => path.split('/')[0])).toEqual(['clips', 'prefixes'])
+    expect(opts.adminClient.calls.find(call => call.action === 'clip')!.args.acquisitionVersion).toBe('mpeg-prefix-v1')
+    expect(opts.adminClient.intents.size).toBe(1)
+  })
+  it('restores bound prefix STT and its original source duration without another STT dispatch', async () => {
+    const { opts } = setup(90, false)
+    const transcribe = vi.fn(async (request: Parameters<NonNullable<ContentRefreshOptions['transcribe']>>[0]) => ({
+      requestFingerprint: request.requestFingerprint, audioSha256: request.audio.sha256,
+      audioDurationSeconds: contentAudioDuration(request.audio.bytes, request.audio.mimeType),
+      transcriptJson: JSON.stringify({ version: '1.0.0', segments: phrases.map((body, i) => ({ startTime: i * 10, endTime: (i + 1) * 10, body })) }),
+      provider: 'fixture-only', evidenceId: 'synthetic-prefix-stt', usage,
+    }))
+    opts.transcribe = transcribe
+    expect((await runContentRefresh(opts)).errors).toEqual([])
+    expect(transcribe).toHaveBeenCalledOnce()
+    const item = [...opts.adminClient.items.values()][0]!
+    expect(item.transcript!.reference.derivation!.audioCoverage!.version).toBe('mpeg-prefix-v1')
+    expect((item.episode as FeedEpisode).durationSeconds).toBeNull()
+    opts.analyzeAudio = analyzer
+    expect((await runContentRefresh(opts)).errors).toEqual([])
+    expect(transcribe).toHaveBeenCalledOnce()
+    expect([...opts.adminClient.records.values()][0]!.status).toBe('eligible')
+    expect([...opts.adminClient.records.values()][0]!.segment.episode.durationSeconds).toBeNull()
+  })
+  it('rejects inconsistent restored coverage before another spending reservation', async () => {
+    const { opts } = setup()
+    opts.analyzeAudio = async () => { throw new Error('Synthetic interrupted analysis') }
+    await runContentRefresh(opts)
+    const item = [...opts.adminClient.items.values()][0]!
+    item.audio_coverage!.frameCount++
+    const reserved = events.filter(event => event === 'budget-reserved').length
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toContainEqual(expect.objectContaining({ code: 'CONTENT_AUDIO_PREFIX_COVERAGE' }))
+    expect(events.filter(event => event === 'budget-reserved')).toHaveLength(reserved)
+  })
+  it('refuses a changed model fingerprint for the same interrupted analysis before spending', async () => {
+    const { opts } = setup()
+    const analyze = vi.fn(async () => { throw new Error('Synthetic interrupted analysis') })
+    opts.analyzeAudio = analyze
+    await runContentRefresh(opts)
+    const reserved = events.filter(event => event === 'budget-reserved').length
+    opts.analyzerVersion = 'fixture-updated-model'
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toContainEqual(expect.objectContaining({ code: 'content-provider-reconciliation-required' }))
+    expect(events.filter(event => event === 'budget-reserved')).toHaveLength(reserved)
+    expect(analyze).toHaveBeenCalledOnce()
+  })
+  it.each(['non-mpeg-partial', 'missing-coverage', 'storage-failure'] as const)('does not reserve or dispatch when prefix preparation fails: %s', async failure => {
+    const { opts } = setup()
+    const fetch = opts.fetcher!
+    opts.fetcher = async request => {
+      const response = await fetch(request)
+      if (request.role !== 'audio') return response
+      return { ...response, ...(failure === 'non-mpeg-partial' ? { contentType: 'audio/ogg' } : {}),
+        ...(failure === 'missing-coverage' ? { byteCoverage: undefined } : {}) }
+    }
+    if (failure === 'storage-failure') opts.audioStore!.put = async () => { throw new Error('Synthetic prefix persistence failure') }
+    const analyze = vi.fn(analyzer)
+    opts.analyzeAudio = analyze
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toHaveLength(1)
+    expect(result.eligibleSegments).toBe(0)
+    expect(events).not.toContain('budget-reserved')
+    expect(opts.adminClient.intents.size).toBe(0)
+    expect(analyze).not.toHaveBeenCalled()
+    expect(opts.adminClient.calls.filter(call => call.action === 'asset-ready')).toHaveLength(0)
+  })
+  it('preserves a small complete WAV acquisition when prefix mode receives a complete representation', async () => {
+    const opts = options()
+    opts.audioAcquisition = 'mpeg-prefix-v1'
+    opts.analyzeAudio = analyzer
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toEqual([])
+    expect(result.eligibleSegments).toBe(1)
+    const record = [...opts.adminClient.records.values()][0]!
+    expect(record.artifact!.coverage).toBeUndefined()
+    expect(record.artifact!.sha256).toBe(createHash('sha256').update(fixtureAudio).digest('hex'))
+    expect([...((opts.audioStore as ReturnType<typeof makeStore>).blobs.keys())].sort().map(path => path.split('/')[0])).toEqual(['clips', 'episodes'])
+  })
+  it('lets the atomic budget gate refuse the same unresolved prefix intent without another dispatch', async () => {
+    const { opts } = setup()
+    const reserve = vi.spyOn(opts.budget!, 'reserve')
+    const analyze = vi.fn(async () => { throw new Error('Synthetic unknown provider outcome') })
+    opts.analyzeAudio = analyze
+    await runContentRefresh(opts)
+    expect(analyze).toHaveBeenCalledOnce()
+    reserve.mockResolvedValue({ allowed: true, acquired: false, replay: true, reservationId: 'existing-synthetic-hold' })
+    const result = await runContentRefresh(opts)
+    expect(result.errors).toContainEqual(expect.objectContaining({ code: 'content-provider-reconciliation-required' }))
+    expect(reserve).toHaveBeenCalledTimes(2)
+    expect(reserve.mock.calls[1]![0]).toEqual(reserve.mock.calls[0]![0])
+    expect(opts.adminClient.intents.size).toBe(1)
+    expect(analyze).toHaveBeenCalledOnce()
+  })
+  it('cancels a stalled intent lookup without reserving a paid request', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let release!: () => void, started!: () => void
+    const waiting = new Promise<void>(resolve => { release = resolve })
+    const observed = new Promise<void>(resolve => { started = resolve })
+    const { opts } = setup()
+    opts.limits = { ...opts.limits, runMs: 20 }
+    const original = opts.adminClient.rpc.bind(opts.adminClient)
+    opts.adminClient.rpc = async (name, input) => {
+      if (name === 'content_request_intent') { started(); await waiting }
+      return original(name, input)
+    }
+    const analyze = vi.fn(analyzer)
+    opts.analyzeAudio = analyze
+    let finished = false
+    const running = runContentRefresh(opts).then(result => { finished = true; return result })
+    try {
+      await observed
+      await vi.advanceTimersByTimeAsync(20)
+      expect(finished).toBe(true)
+      expect((await running).nextGates).toContain('content-run-timeout-or-cancelled')
+      expect(analyze).not.toHaveBeenCalled()
+      expect(events).not.toContain('budget-reserved')
+    } finally { release(); await running; vi.useRealTimers() }
+  })
+})
+
 describe('bounded MP3 prefix frame preparation (not acoustic or decoder certification)', () => {
   function frame(version = 3, br = 9, mono = false, crc = false) {
     const rate = 44100 / (version === 3 ? 1 : version === 2 ? 2 : 4)
@@ -1560,9 +1718,11 @@ function sql(statement: string): string {
 function sqlLiteral(value: string): string { return `'${value.replace(/'/gu, "''")}'` }
 function postgresAdmin(): ContentAdminClient {
   return { async rpc(name, input) {
-    if (name !== 'content_worker') throw new Error('Unexpected RPC')
+    if (!['content_worker', 'content_request_intent'].includes(name)) throw new Error('Unexpected RPC')
     try {
-      const output = sql(`select public.content_worker(${sqlLiteral(input!.action as string)},${sqlLiteral(JSON.stringify(input!.args))}::jsonb);`)
+      const args = sqlLiteral(JSON.stringify(input!.args))
+      const output = sql(name === 'content_request_intent' ? `select public.content_request_intent(${args}::jsonb);` :
+        `select public.content_worker(${sqlLiteral(input!.action as string)},${args}::jsonb);`)
       return { data: JSON.parse(output), error: null }
     } catch { return { data: null, error: { code: 'SQL_TEST_ERROR' } } }
   } }
@@ -1957,6 +2117,49 @@ describe.runIf(localEnabled)('dedicated local PostgreSQL persistence and RLS (no
     expect(second.eligibleSegments).toBe(1)
     expect(transcribe).toHaveBeenCalledOnce()
     expect(sql(`select count(*) from public.content_segments where item_id='${itemId}' and status='eligible';`)).toBe('1')
+  }, 30_000)
+  it('recovers a prefix STT checkpoint and binds a versioned clip through real PostgreSQL JSONB', async () => {
+    const prefix = mp3PrefixFixture(90)
+    const feed = fetcher(rss(false).replace('<guid>one</guid>', '<guid>stored-prefix-stt</guid>'))
+    const store = makeStore()
+    const transcribe = vi.fn<NonNullable<ContentRefreshOptions['transcribe']>>(async request => ({
+      audioSha256: request.audio.sha256, requestFingerprint: request.requestFingerprint,
+      audioDurationSeconds: contentAudioDuration(request.audio.bytes, request.audio.mimeType),
+      provider: 'fixture-prefix-stt', evidenceId: 'SYNTHETIC-PREFIX-STT-ONLY', usage,
+      transcriptJson: JSON.stringify({ version: '1.0.0', segments: phrases.map((body, i) => ({ startTime: i * 10, endTime: (i + 1) * 10, body })) }),
+    }))
+    const opts: ContentRefreshOptions = { ...options(), adminClient: admin, sources: [source], ownerId: localOwner, now: Date.now,
+      audioAcquisition: 'mpeg-prefix-v1', audioStore: store, limits: { audioBytes: prefix.bytes.length },
+      transcribe, transcriptOrigin: undefined, forcePoll: true,
+      fetcher: async request => {
+        const response = await feed({ ...request, etag: null })
+        if (request.role !== 'audio') return response
+        expect(request.audioPrefixBytes).toBe(prefix.bytes.length)
+        return { ...response, status: 206, body: prefix.bytes, contentType: 'audio/mpeg',
+          byteCoverage: { kind: 'prefix', start: 0, endExclusive: prefix.bytes.length, totalBytes: prefix.bytes.length + 100000 } }
+      } }
+    const first = await runContentRefresh(opts)
+    expect(first.errors).toEqual([])
+    expect(first.eligibleSegments).toBe(0)
+    expect(transcribe).toHaveBeenCalledOnce()
+    const itemId = createHash('sha256').update(JSON.stringify([source.id, 'stored-prefix-stt'])).digest('hex')
+    const saved = JSON.parse(sql(`select transcript from public.content_transcripts where item_id='${itemId}';`)) as TimedTranscript
+    expect(saved.reference.derivation!.audioCoverage!.version).toBe('mpeg-prefix-v1')
+    expect(sql(`select count(*) from public.content_audio_assets where item_id='${itemId}' and acquisition_version='mpeg-prefix-v1' and state='ready';`)).toBe('1')
+    expect([...store.blobs.keys()]).toHaveLength(1)
+    opts.analyzeAudio = analyzer
+    const second = await runContentRefresh(opts)
+    expect(second.errors).toEqual([])
+    expect(second.eligibleSegments).toBe(1)
+    expect(transcribe).toHaveBeenCalledOnce()
+    const rows = JSON.parse(sql(`select jsonb_agg(jsonb_build_object('record',s.record,'acquisition',a.source_acquisition_version,'timing',a.timing_basis))
+      from public.content_segments s join public.content_segment_audio a on a.segment_id=s.id where s.item_id='${itemId}' and s.status='eligible';`))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ acquisition: 'mpeg-prefix-v1', timing: 'mpeg-frame-count-with-xing-v1',
+      record: { artifact: { coverage: saved.reference.derivation!.audioCoverage }, segment: { episode: { durationSeconds: null } } } })
+    expect(sql(`select count(*) from public.content_request_intents where item_id='${itemId}';`)).toBe('2')
+    expect(sql(`select count(*) from public.content_usage u join public.content_request_intents i on i.request_id=u.request_id where u.item_id='${itemId}';`)).toBe('2')
+    expect([...store.blobs.keys()].sort().map(path => path.split('/')[0])).toEqual(['clips', 'prefixes'])
   }, 30_000)
   it('fences expired workers and prevents two overlapping claims', async () => {
     const args = { sourceId: source.id, runId: crypto.randomUUID(), source, configHash: 'a'.repeat(64), forcePoll: true, canAnalyze: false }

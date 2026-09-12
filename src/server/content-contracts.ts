@@ -1,5 +1,5 @@
 import type {
-  AnalysisResult, BoundInspection, ContentSegment, ContentSource, FeedEpisode, Inspection, LearnerContentProfile,
+  AnalysisResult, AudioArtifact, BoundInspection, ContentMp3Coverage, ContentSegment, ContentSource, FeedEpisode, Inspection, LearnerContentProfile,
   LessonEnrichment,
 } from '../content/pipeline-types'
 import type { Material } from '../domain/types'
@@ -31,15 +31,7 @@ export interface ContentRightsRecord {
   thirdParty: 'none-detected' | 'separately-cleared' | 'uncertain'
   evidenceUrls: string[]
 }
-/** Exact bounded acquisition provenance, never a full-episode digest/duration.
- * Source time is nominal MPEG sample time; encoder delay is not inferred. */
-export interface ContentMp3Coverage {
-  version: 'mpeg-prefix-v1'; networkKind: 'complete' | 'prefix'
-  receivedBytes: number; sourceBytes: number; sourceByteStart: number; sourceByteEndExclusive: number
-  startSeconds: 0; endSeconds: number; frameCount: number; sampleRate: number; samplesPerFrame: number
-  removedMetadataFrame: 'Xing' | 'Info' | 'VBRI' | null; discardedTrailingBytes: number
-  stopReason: 'duration-limit' | 'range-boundary' | 'complete'; gaplessAdjustment: 'not-applied'
-}
+export type { ContentMp3Coverage } from '../content/pipeline-types'
 export interface ContentAudioInput {
   requestId: string
   requestFingerprint: string
@@ -83,6 +75,8 @@ export interface ContentSttResult {
 export type ContentTranscriber = (input: ContentSttInput) => Promise<ContentSttResult>
 export interface ContentRefreshOptions {
   adminClient: ContentAdminClient
+  /** Trusted server setting; no user/feed/model-controlled acquisition mode. */
+  audioAcquisition?: 'complete-v1' | 'mpeg-prefix-v1'
   fetcher?: ContentFetcher
   /** Trusted reviewed policy baselines only. Not a user/feed-supplied setting. */
   rightsPolicies?: readonly ContentPolicyEvidence[]
@@ -116,11 +110,11 @@ export interface ContentRefreshSummary {
 }
 export interface PersistedContentSegment {
   segment: ContentSegment; inspection: BoundInspection | null; analysis: AnalysisResult | null
-  artifact: { sha256: string; url: string; durationSeconds: number } | null
+  artifact: AudioArtifact | null
   objectPath: string | null; lesson: LessonEnrichment | null; material: Material | null
   quality: unknown; status: 'quarantined' | 'eligible'; rightsRecord: ContentRightsRecord | null
   audioEvidence?: ContentAudioResult['audioEvidence']
-  /** Immutable analyzed clip; artifact above continues to identify the original episode. */
+  /** Immutable analyzed clip; artifact above identifies its exact stored parent and coverage. */
   clip?: ContentPlayback
 }
 export interface ContentPlayback {

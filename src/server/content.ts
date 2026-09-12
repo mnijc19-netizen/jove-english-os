@@ -139,7 +139,7 @@ export function createContentHandler(env: ServerEnvironment, dependencies: {
         const result = await runContentRefresh({ adminClient: context.admin, ownerId: context.ownerId, now,
           analyzeAudio: services.available ? services.analyzeAudio : undefined, transcribe: services.available ? services.transcribe : undefined, analyzerVersion: services.version,
           transcriberVersion: services.version, prepareTranscription: services.prepareTranscription, budget: createContentBudget(context),
-          costCeilings: { analysisUsd: 0.5, transcriptionUsd: 0.5 }, profile: savedProfile ?? undefined,
+          costCeilings: { analysisUsd: 0.5, transcriptionUsd: 0.5 }, profile: savedProfile ?? undefined, audioAcquisition: 'mpeg-prefix-v1',
           limits: { runMs: 110_000, episodesPerSource: 1, segmentsPerEpisode: 2 },
           ...dependencies.workerOptions?.(context), signal: request.signal,
         })

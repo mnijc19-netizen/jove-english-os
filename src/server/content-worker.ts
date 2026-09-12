@@ -1,12 +1,12 @@
 import {
-  assessSegment, bindAnalysis, createAnalysisRequest, contentTranscriptUrn, ContentPipelineError, parseRssFeed, parseOpenYapPreviewManifest,
+  assessSegment, bindAnalysis, canonicalContentJson, createAnalysisRequest, contentTranscriptUrn, ContentPipelineError, parseRssFeed, parseOpenYapPreviewManifest,
   parseTimedTranscript, PIPELINE_LIMITS, resolveEpisodeAudioUrl, rightsReasons, sliceTranscript, textMetrics, toMaterial, validateSourceUrl,
 } from '../content/pipeline'
 import { ALLOWLISTED_CONTENT_SOURCES, CONTENT_LIFE_TASKS, VOA_LESSON_CANDIDATES, type ContentLifeTask } from '../content/sources'
 import type { ContentSource, FeedEpisode, LearnerContentProfile, TimedTranscript, TranscriptReference } from '../content/pipeline-types'
 import { ContentNetworkError, fetchContentResource, type ContentFetchResult } from './content-network'
 import { CONTENT_POLICY_EVIDENCE, revalidateContentRights } from './content-rights'
-import { contentAudioDuration, contentAudioWindow, ContentAudioResponseError } from './content-audio'
+import { contentAudioDuration, contentStoredAudioWindow, prepareContentMp3Prefix, ContentAudioResponseError } from './content-audio'
 import { auditVoaLessonCandidates, type VoaCandidateAudit } from './content-voa'
 import { GatewayError } from './gateway'
 import type {
@@ -312,7 +312,7 @@ export function createSupabaseContentAudioStore(adminClient: ContentAdminClient)
       if (result.error && (result.error.statusCode !== '409' || await digest(await get(path)) !== await digest(bytes))) fail('audio-save-failed')
     },
     async remove(paths) {
-      if (paths.some(path => !/^(?:episodes|clips)\/[a-f0-9]{64}\/[a-f0-9]{64}$/u.test(path))) fail('invalid-content-object-path')
+      if (paths.some(path => !/^(?:episodes|prefixes|clips)\/[a-f0-9]{64}\/[a-f0-9]{64}$/u.test(path))) fail('invalid-content-object-path')
       if ((await bucket.remove(paths)).error) fail('audio-remove-failed')
     },
   }
@@ -321,6 +321,8 @@ interface PendingItem {
   id: string; revision: string; episode: FeedEpisode; attempts: number
   transcript: TimedTranscript | null; saved_segments: PersistedContentSegment[]
   object_path: string | null; audio_sha256: string | null; audio_mime: string | null
+  audio_acquisition_version?: 'complete-v1' | 'mpeg-prefix-v1' | null
+  audio_coverage?: ContentAudioInput['audio']['coverage'] | null
 }
 interface Claim {
   acquired: boolean; reason?: string; feedDue?: boolean; etag?: string | null; last_modified?: string | null; failures?: number
@@ -331,7 +333,7 @@ interface JobContext {
   summary: ContentRefreshSummary; now: () => number; controller: AbortController
   audioStore: ContentAudioStore | null; maxAudio: number; maxSegments: number; processVersion: string
   call: <T>(action: string, args?: Record<string, unknown>) => Promise<T>
-  fetch: (url: string, role: 'feed' | 'audio' | 'transcript', maxBytes: number, etag?: string | null, modified?: string | null) => Promise<ContentFetchResult>
+  fetch: (url: string, role: 'feed' | 'audio' | 'transcript', maxBytes: number, etag?: string | null, modified?: string | null, audioPrefixBytes?: number) => Promise<ContentFetchResult>
 }
 function decodeResource(response: ContentFetchResult, role: 'feed' | 'transcript' | 'publisher-manifest'): string {
   if (response.status !== 200) fail(response.status === 429 ? 'publisher-rate-limited' : `publisher-http-${response.status}`)
@@ -366,10 +368,18 @@ async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise
   } finally { signal.removeEventListener('abort', abort) }
 }
 async function providerCall<T extends { usage: ContentUsage }>(context: JobContext, item: PendingItem, purpose: 'content-analysis' | 'content-stt',
-  requestId: string, fingerprint: string, invoke: () => Promise<T>): Promise<T> {
+  requestId: string, fingerprint: string, scope: string, audioSha256: string, invoke: () => Promise<T>): Promise<T> {
   const notReady = budgetReady(context, purpose)
   if (notReady) return fail(notReady)
   await context.call('heartbeat')
+  const intent = await abortable(Promise.resolve(context.options.adminClient.rpc('content_request_intent', { args: {
+    sourceId: context.source.id, runId: context.summary.runId, itemId: item.id, revision: item.revision,
+    purpose, scope, requestId, fingerprint, audioSha256,
+  } })), context.controller.signal)
+  if (intent.error?.code === '40001') return fail('content-lease-or-revision-lost')
+  if (intent.error || !intent.data || (intent.data as { allowed?: unknown }).allowed !== true)
+    return fail('content-provider-reconciliation-required')
+  if (context.controller.signal.aborted) return fail('content-run-timeout-or-cancelled')
   const reserved = await context.options.budget!.reserve({ ownerId: context.ownerId!, requestId, fingerprint, purpose,
     maxCostUsd: purpose === 'content-analysis' ? context.options.costCeilings!.analysisUsd : context.options.costCeilings!.transcriptionUsd })
   if (!reserved.allowed) return fail('content-budget-denied')
@@ -409,12 +419,29 @@ async function getAudio(context: JobContext, item: PendingItem, purpose: 'conten
   if (item.object_path && item.audio_sha256 && item.audio_mime) {
     const bytes = await context.audioStore.get(item.object_path)
     if (bytes.byteLength > context.maxAudio || await digest(bytes) !== item.audio_sha256) fail('saved-audio-hash-mismatch')
-    return { bytes, sha256: item.audio_sha256, mimeType: item.audio_mime, objectPath: item.object_path }
+    const audio = { bytes, sha256: item.audio_sha256, mimeType: item.audio_mime, objectPath: item.object_path,
+      ...(item.audio_coverage ? { coverage: item.audio_coverage } : {}) }
+    if ((item.audio_acquisition_version ?? 'complete-v1') === 'mpeg-prefix-v1') {
+      if (!audio.coverage || item.object_path !== `prefixes/${item.id}/${audio.sha256}`) fail('saved-audio-coverage-mismatch')
+      contentStoredAudioWindow(audio, 0, audio.coverage.endSeconds)
+    } else if (audio.coverage || item.object_path !== `episodes/${item.id}/${audio.sha256}`) fail('saved-audio-coverage-mismatch')
+    return audio
   }
-  const response = await context.fetch(resolveEpisodeAudioUrl(item.episode, context.source), 'audio', context.maxAudio)
+  const prefixBytes = context.options.audioAcquisition === 'mpeg-prefix-v1' ? Math.min(context.maxAudio, 8 * 1024 * 1024) : undefined
+  const response = await context.fetch(resolveEpisodeAudioUrl(item.episode, context.source), 'audio', prefixBytes ?? context.maxAudio, undefined, undefined, prefixBytes)
   // VOA serves genuine MPEG frames as audio/mp3. Canonicalize only this verified
   // alias; neither an extension nor an MP3 header alone admits arbitrary bytes.
   const mimeType = response.contentType === 'audio/mp3' ? 'audio/mpeg' : response.contentType
+  if (prefixBytes && mimeType === 'audio/mpeg') {
+    if (![200, 206].includes(response.status)) fail('invalid-audio-response')
+    const prefix = prepareContentMp3Prefix(response.body, response.contentType, response.byteCoverage)
+    const sha256 = await digest(prefix.bytes), objectPath = `prefixes/${item.id}/${sha256}`
+    await context.call('asset', { itemId: item.id, revision: item.revision, acquisitionVersion: 'mpeg-prefix-v1',
+      sha256, objectPath, bytes: prefix.bytes.length, mimeType: prefix.mimeType, coverage: prefix.coverage })
+    await context.audioStore.put(objectPath, prefix.bytes, prefix.mimeType)
+    await context.call('asset-ready', { itemId: item.id, revision: item.revision, acquisitionVersion: 'mpeg-prefix-v1', sha256 })
+    return { ...prefix, sha256, objectPath }
+  }
   if (response.status !== 200 || !['audio/mpeg', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/x-wav', 'audio/aac'].includes(mimeType) || !response.body.length) fail('invalid-audio-response')
   if (response.contentType === 'audio/mp3') {
     try { contentAudioDuration(response.body, mimeType) } catch { fail('invalid-audio-response') }
@@ -471,34 +498,42 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
       contentAudioDuration(audio.bytes, audio.mimeType)
       context.options.prepareTranscription?.(audio)
     } catch { return fail('content-transcription-decoder-required') }
-    const requestFingerprint = await digest(JSON.stringify([item.revision, audio.sha256, context.options.transcriberVersion, context.sourcePolicyHash]))
+    const requestFingerprint = await digest(JSON.stringify([item.revision, audio.sha256, context.options.transcriberVersion, context.sourcePolicyHash,
+      ...(audio.coverage ? ['mpeg-prefix-v1/xing-v1'] : [])]))
     const requestId = `content-stt-${requestFingerprint}`
     const prepared = audio
-    const result = await providerCall(context, item, 'content-stt', requestId, requestFingerprint, () => context.options.transcribe!({
+    const result = await providerCall(context, item, 'content-stt', requestId, requestFingerprint, '', audio.sha256, () => context.options.transcribe!({
       requestId, requestFingerprint, episode: structuredClone(item.episode), audio: prepared,
       sourcePolicy: structuredClone(context.source.rights), sourcePolicyHash: context.sourcePolicyHash, signal: context.controller.signal,
     }))
     if (result.audioSha256 !== audio.sha256 || result.requestFingerprint !== requestFingerprint || !finite(result.audioDurationSeconds) ||
-        result.audioDurationSeconds <= 0 || result.audioDurationSeconds > PIPELINE_LIMITS.mediaSeconds) fail('stt-response-binding-mismatch')
+        result.audioDurationSeconds <= 0 || result.audioDurationSeconds > PIPELINE_LIMITS.mediaSeconds ||
+        audio.coverage && Math.abs(result.audioDurationSeconds - audio.coverage.endSeconds) > 0.00000001) fail('stt-response-binding-mismatch')
     // Database identity, not a nonexistent public endpoint. Local HTTP never enters source URL allowlists.
     const reference: TranscriptReference = {
       url: contentTranscriptUrn(item.id), format: 'json', language: null, origin: 'authorized-stt',
-      derivation: { audioSha256: audio.sha256, audioDurationSeconds: result.audioDurationSeconds, provider: result.provider, processedAt: context.now(), evidenceId: result.evidenceId },
+      derivation: { audioSha256: audio.sha256, audioDurationSeconds: result.audioDurationSeconds,
+        ...(audio.coverage ? { audioCoverage: audio.coverage } : {}), provider: result.provider, processedAt: context.now(), evidenceId: result.evidenceId },
     }
     transcript = parseTimedTranscript(result.transcriptJson, reference, result.audioDurationSeconds)
-    item.episode = { ...item.episode, durationSeconds: result.audioDurationSeconds, transcripts: [...item.episode.transcripts, reference] }
+    item.episode = { ...item.episode, durationSeconds: audio.coverage ? item.episode.durationSeconds : result.audioDurationSeconds, transcripts: [...item.episode.transcripts, reference] }
   }
   const stored = transcript.reference.origin === 'authorized-stt' && transcript.reference.url === contentTranscriptUrn(item.id)
   if (transcript.reference.origin === 'authorized-stt') {
     if (!stored && (!context.options.transcriptOrigin || new URL(transcript.reference.url).origin !== new URL(context.options.transcriptOrigin).origin)) fail('content-transcript-origin-required')
-    item.episode = { ...item.episode, durationSeconds: transcript.reference.derivation?.audioDurationSeconds ?? item.episode.durationSeconds,
+    item.episode = { ...item.episode, durationSeconds: transcript.reference.derivation?.audioCoverage ? item.episode.durationSeconds : transcript.reference.derivation?.audioDurationSeconds ?? item.episode.durationSeconds,
       transcripts: item.episode.transcripts.some(ref => ref.url === transcript.reference.url) ? item.episode.transcripts : [...item.episode.transcripts, transcript.reference] }
   }
   await context.call('checkpoint', { itemId: item.id, revision: item.revision, transcript, fingerprint: await digest(JSON.stringify(transcript)) })
+  // Covered whole cues must be selected BEFORE grouping/ranking/the item limit.
+  // A publisher transcript remains cached in full even when spending is paused.
+  if (context.options.audioAcquisition === 'mpeg-prefix-v1' && context.options.analyzeAudio && !budgetReady(context, 'content-analysis'))
+    audio ??= await getAudio(context, item, 'content-analysis')
   const derived = transcript.reference.origin === 'authorized-stt' && !stored ? [{ origin: new URL(transcript.reference.url).origin, pathPrefix: '/content-transcripts/' }] : undefined
   // Publisher duration may omit inserted introductions. Actual decoded duration is mandatory at analysis binding.
   const slicingEpisode = { ...item.episode, durationSeconds: transcript.reference.origin === 'authorized-stt' ? item.episode.durationSeconds : null }
-  const sliced = await sliceTranscript(slicingEpisode, transcript, context.source, { retrievedAt: context.now(), derivedTranscriptRules: derived, storedTranscriptId: stored ? item.id : undefined })
+  const sliced = await sliceTranscript(slicingEpisode, transcript, context.source, { retrievedAt: context.now(), derivedTranscriptRules: derived,
+    storedTranscriptId: stored ? item.id : undefined, audioCoverage: audio?.coverage ?? transcript.reference.derivation?.audioCoverage })
   const rankedCandidates = sliced.segments.map(segment => ({ segment, metrics: textMetrics(segment) }))
     .sort((a, b) => Number(b.metrics.topics.includes('Everyday life')) - Number(a.metrics.topics.includes('Everyday life')) ||
       Math.abs(a.metrics.difficulty - 0.4) - Math.abs(b.metrics.difficulty - 0.4) || a.segment.startSeconds - b.segment.startSeconds)
@@ -525,15 +560,19 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
     const gate = !context.options.analyzeAudio ? 'audio-analyzer-unconfigured' : budgetReady(context, 'content-analysis')
     if (gate) { itemGates.add(gate); continue }
     audio ??= await getAudio(context, item, 'content-analysis')
-    let window: ReturnType<typeof contentAudioWindow>
-    try { window = contentAudioWindow(audio.bytes, audio.mimeType, candidate.startSeconds, candidate.endSeconds) }
+    if (transcript.reference.origin === 'authorized-stt' && (transcript.reference.derivation?.audioSha256 !== audio.sha256 ||
+        canonicalContentJson(transcript.reference.derivation?.audioCoverage ?? null) !== canonicalContentJson(audio.coverage ?? null)))
+      fail('content-transcript-artifact-recovery-required')
+    let window: ReturnType<typeof contentStoredAudioWindow>
+    try { window = contentStoredAudioWindow(audio, candidate.startSeconds, candidate.endSeconds) }
     catch { return fail('content-clip-decoder-required') }
     if (window.bytes.length > 10 * 1024 * 1024 || window.endSeconds - window.originSeconds > candidate.durationSeconds + 3)
       fail('content-clip-decoder-required')
-    const requestFingerprint = await digest(JSON.stringify([candidate.id, audio.sha256, context.options.analyzerVersion, context.sourcePolicyHash]))
+    const requestFingerprint = await digest(JSON.stringify([candidate.id, audio.sha256, context.options.analyzerVersion, context.sourcePolicyHash,
+      ...(audio.coverage ? ['mpeg-prefix-v1/xing-v1'] : [])]))
     const requestId = `content-a-${requestFingerprint}`
     const prepared = audio
-    const result = await providerCall(context, item, 'content-analysis', requestId, requestFingerprint, () => context.options.analyzeAudio!({
+    const result = await providerCall(context, item, 'content-analysis', requestId, requestFingerprint, candidate.id, audio.sha256, () => context.options.analyzeAudio!({
       requestId, requestFingerprint, segment: structuredClone(candidate), audio: prepared,
       interval: { startSeconds: candidate.startSeconds, endSeconds: candidate.endSeconds },
       sourcePolicy: structuredClone(context.source.rights), sourcePolicyHash: context.sourcePolicyHash, signal: context.controller.signal,
@@ -543,7 +582,8 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
     const rightsRecord = validateRightsRecord(result, context)
     const facts = structuredClone(result.facts)
     if (rightsRecord.thirdParty === 'uncertain') facts.thirdPartyClear = { status: 'unknown', reason: 'Audio/source review did not clear third-party material.' }
-    const artifact = { sha256: audio.sha256, url: candidate.episode.audioUrl, durationSeconds: result.audioDurationSeconds }
+    const artifact = { sha256: audio.sha256, url: candidate.episode.audioUrl, durationSeconds: result.audioDurationSeconds,
+      ...(audio.coverage ? { coverage: audio.coverage } : {}) }
     const analysis = { ...createAnalysisRequest(candidate, artifact), facts }
     const inspection = bindAnalysis(candidate, artifact, analysis, context.now())
     const assessmentContext = { source: context.source, now: context.now(), profile: screeningProfile, use, artifact, inspection }
@@ -563,7 +603,8 @@ async function processItem(context: JobContext, item: PendingItem): Promise<void
         startSeconds: candidate.startSeconds - window.originSeconds, endSeconds: candidate.endSeconds - window.originSeconds,
         clipOriginSeconds: window.originSeconds, timingBasis: window.timingBasis, mimeType: window.mimeType,
         byteLength: window.bytes.length, durationSeconds: window.endSeconds - window.originSeconds }
-      await context.call('clip', { itemId: item.id, revision: item.revision, segmentId: candidate.id, clip: record.clip })
+      await context.call('clip', { itemId: item.id, revision: item.revision, segmentId: candidate.id, clip: record.clip,
+        acquisitionVersion: audio.coverage?.version ?? 'complete-v1' })
       await context.audioStore!.put(record.clip.objectPath, window.bytes, window.mimeType)
       await context.call('clip-ready', { itemId: item.id, revision: item.revision, segmentId: candidate.id, sha256: clipSha256 })
       record.material = converted.material
@@ -603,6 +644,7 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
   const maxSegments = bound(options.limits?.segmentsPerEpisode, 6, 20)
   const maxItems = bound(options.limits?.feedItems, 25, 100)
   const maxAudio = bound(options.limits?.audioBytes, 64 * 1024 * 1024, 64 * 1024 * 1024)
+  if (options.audioAcquisition !== undefined && !['complete-v1', 'mpeg-prefix-v1'].includes(options.audioAcquisition)) fail('invalid-audio-acquisition')
   const runMs = bound(options.limits?.runMs, 90_000, 120_000)
   if (options.voaPilot && !['metadata', 'probe-audio', 'disabled'].includes(options.voaPilot)) fail('invalid-voa-pilot-mode')
   const summary: ContentTaskRefreshSummary = { runId: crypto.randomUUID(), sourcesClaimed: 0, sourcesSkipped: 0, feedsFetched: 0,
@@ -616,7 +658,7 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
   options.signal?.addEventListener('abort', cancel, { once: true })
   if (options.signal?.aborted) controller.abort()
   const timer = setTimeout(cancel, runMs)
-  const processVersion = `${options.analyzerVersion ?? 'no-analyzer'}/${options.transcriberVersion ?? 'no-stt'}`
+  const processVersion = `${options.analyzerVersion ?? 'no-analyzer'}/${options.transcriberVersion ?? 'no-stt'}${options.audioAcquisition === 'mpeg-prefix-v1' ? '/mpeg-prefix-v1' : ''}`
   const suppliedSources = (options.sources ?? ALLOWLISTED_CONTENT_SOURCES).filter(source =>
     (!options.sourceIds || options.sourceIds.includes(source.id)) && (!options.voaPilotOnly || source.id === 'voa-everyday-grammar'))
   const updateInventory = async () => {
@@ -640,8 +682,8 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
       const call = <T>(action: string, args: Record<string, unknown> = {}) => rpc<T>(options.adminClient, action, { ...args, sourceId: source.id, runId: summary.runId })
       const context: JobContext = { options, source, sourcePolicyHash: policyHash, ownerId: owner.ownerId, summary, now, controller, audioStore,
         maxAudio, maxSegments, processVersion, call,
-        async fetch(url, role, maxBytes, etag, modified) {
-          const response = await (options.fetcher ?? fetchContentResource)({ url, source, role, maxBytes, etag, lastModified: modified, signal: controller.signal })
+        async fetch(url, role, maxBytes, etag, modified, audioPrefixBytes) {
+          const response = await (options.fetcher ?? fetchContentResource)({ url, source, role, maxBytes, etag, lastModified: modified, audioPrefixBytes, signal: controller.signal })
           // Injection is a trusted transport seam, but cannot bypass the caller's URL/size boundary accidentally.
           validateSourceUrl(response.finalUrl, source.urls[role])
           if (response.body.byteLength > maxBytes) fail('response-too-large')
@@ -717,7 +759,7 @@ export async function runContentRefresh(options: ContentTaskRefreshOptions): Pro
               pollSeconds: source.cadenceHours * 3_600, heldItems: batch.quarantined.map(item => item.code) })
           }
         }
-        const pendingWindow = await call<PendingItem[]>('pending', { canAnalyze, processVersion, limit: 10 })
+        const pendingWindow = await call<PendingItem[]>('pending', { canAnalyze, processVersion, limit: 10, acquisitionVersion: options.audioAcquisition ?? 'complete-v1' })
         const pending = pendingWindow.sort((a, b) => Number(b.episode.guid.startsWith('voa-pilot:')) - Number(a.episode.guid.startsWith('voa-pilot:')))
           .slice(0, maxEpisodes)
         for (const item of pending) {

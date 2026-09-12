@@ -602,7 +602,11 @@ export function unknownInspection(reason = 'No inspection of the actual audio an
 function validateArtifact(segment: ContentSegment, artifact: AudioArtifact) {
   if (!/^[a-f0-9]{64}$/u.test(artifact.sha256) || artifact.url !== segment.episode.audioUrl ||
       !finite(artifact.durationSeconds) || artifact.durationSeconds < segment.endSeconds || artifact.durationSeconds > PIPELINE_LIMITS.mediaSeconds) fail('audio-artifact-mismatch')
+  if (artifact.coverage && (artifact.coverage.version !== 'mpeg-prefix-v1' || artifact.coverage.startSeconds !== 0 ||
+      !finite(artifact.coverage.endSeconds) || Math.abs(artifact.coverage.endSeconds - artifact.durationSeconds) > 0.00000001 || artifact.durationSeconds > 600)) fail('audio-artifact-coverage-mismatch')
   if (segment.transcriptReference.origin === 'authorized-stt' && segment.transcriptReference.derivation?.audioSha256 !== artifact.sha256) fail('stt-audio-artifact-mismatch')
+  if (segment.transcriptReference.origin === 'authorized-stt' &&
+      canonicalContentJson(segment.transcriptReference.derivation?.audioCoverage ?? null) !== canonicalContentJson(artifact.coverage ?? null)) fail('stt-audio-artifact-mismatch')
 }
 function segmentSnapshot(segment: ContentSegment): string {
   return canonicalContentJson([segment.id, segment.sourceId, segment.episode, segment.transcriptReference,
