@@ -939,6 +939,25 @@ describe('scheduled rights revalidation', () => {
 })
 
 describe.runIf(process.env.JOVE_CONTENT_AUDIO_PROBE==='1')('actual public audio bytes and current policy evidence (no paid analysis)',()=>{
+  it.each(['jb-the-launch', 'jb-linux-unplugged', 'open-yap-sample'])(
+    '%s supports verified byte-zero prefix acquisition without downloading the full episode', async id => {
+      const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === id)!
+      expect((await revalidateContentRights({ source })).status).toBe('verified')
+      const feed = await fetchContentResource({ source, role: 'feed', url: source.feedUrl, maxBytes: 12 * 1024 * 1024 })
+      expect(feed.status).toBe(200)
+      const batch = (source.feedFormat === 'open-yap-preview-jsonl' ? parseOpenYapPreviewManifest : parseRssFeed)(
+        new TextDecoder().decode(feed.body), source, { now: Date.now(), maxItems: 3 })
+      const episode = (id === 'open-yap-sample' ? batch.episodes.find(item => item.guid === 'conv_d4005da6db98.mp3') : batch.episodes[0])!
+      expect(episode).toBeDefined()
+      const response = await fetchContentResource({ source, role: 'audio', url: episode.audioUrl, maxBytes: 4096, audioPrefixBytes: 4096 })
+      expect(response.status).toBe(206)
+      expect(response.body.length).toBe(4096)
+      expect(response.byteCoverage).toMatchObject({ kind: 'prefix', start: 0, endExclusive: 4096 })
+      expect(response.byteCoverage!.totalBytes).toBeGreaterThan(4096)
+      expect(['audio/mpeg', 'audio/mp3']).toContain(response.contentType)
+      console.info(JSON.stringify({ actualPrefixProbe: id, receivedBytes: response.body.length, sourceBytes: response.byteCoverage!.totalBytes,
+        acquiredSha256: createHash('sha256').update(response.body).digest('hex'), timingVerified: false, acousticallyReviewed: false }))
+    }, 60000)
   it('fetches an exact HPR MP3 enclosure from the registered stable CDN and extracts measured frames', async () => {
     const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === 'hacker-public-radio')!
     const feed = await fetchContentResource({ source, role: 'feed', url: source.feedUrl, maxBytes: 12 * 1024 * 1024, timeoutMs: 20000 })

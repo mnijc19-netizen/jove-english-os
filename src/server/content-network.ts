@@ -10,11 +10,15 @@ export interface ContentFetchRequest {
   etag?: string | null; lastModified?: string | null; timeoutMs?: number; signal?: AbortSignal
   /** Policy checks use exact URLs, including every redirect; never inferred from remote HTML. */
   exactUrls?: readonly string[]
+  /** One byte-zero acquisition, not arbitrary seeking or multi-request stitching. */
+  audioPrefixBytes?: number
 }
 export interface ContentFetchResult {
   status: number; body: Uint8Array; finalUrl: string; contentType: string
   etag: string | null; lastModified: string | null; retryAfter: string | null
   dnsPinning: 'pinned-node-lookup' | 'pinned-deno-tls' | 'deno-preflight-only' | 'injected'
+  /** Representation bytes only: this does not establish audio timing or quality. */
+  byteCoverage?: { kind: 'complete' | 'prefix'; start: 0; endExclusive: number; totalBytes: number }
 }
 export type ContentFetcher = (request: ContentFetchRequest) => Promise<ContentFetchResult>
 export type ContentDnsResolver = (hostname: string) => Promise<string[]>
@@ -75,6 +79,23 @@ function header(value: string | null): string | null {
   return value && value.length <= 1_024 && !/[\r\n]/u.test(value) ? value : null
 }
 interface Hop { status: number; body: Uint8Array; headers: Headers }
+function prefixCoverage(result: Hop, limit: number): NonNullable<ContentFetchResult['byteCoverage']> {
+  const range = result.headers.get('content-range'), length = result.headers.get('content-length')
+  const type = result.headers.get('content-type')?.trim().toLowerCase() ?? ''
+  const encoding = result.headers.get('content-encoding')?.trim().toLowerCase()
+  if (!result.body.length || result.body.length > limit || type.startsWith('multipart/') || encoding && encoding !== 'identity' ||
+      length !== null && (!/^\d{1,16}$/u.test(length) || Number(length) !== result.body.length))
+    return networkError('invalid-audio-prefix-response')
+  if (result.status === 200 && range === null)
+    return { kind: 'complete', start: 0, endExclusive: result.body.length, totalBytes: result.body.length }
+  const match = /^bytes 0-(\d{1,16})\/(\d{1,16})$/u.exec(range ?? '')
+  if (result.status !== 206 || !match) return networkError('invalid-audio-prefix-response')
+  const last = Number(match[1]), total = Number(match[2])
+  if (!Number.isSafeInteger(last) || !Number.isSafeInteger(total) || total <= last ||
+      last + 1 !== result.body.length || result.body.length !== Math.min(limit, total))
+    return networkError('invalid-audio-prefix-response')
+  return { kind: result.body.length === total ? 'complete' : 'prefix', start: 0, endExclusive: last + 1, totalBytes: total }
+}
 async function nodeHop(url: string, addresses: string[], headers: Record<string, string>, limit: number, signal: AbortSignal): Promise<Hop> {
   const { request } = await import('node:https')
   const selected = addresses.find(address => address.includes('.')) ?? addresses[0]!
@@ -89,6 +110,12 @@ async function nodeHop(url: string, addresses: string[], headers: Record<string,
       },
     }, response => {
       const responseHeaders = new Headers()
+      let ranges = 0
+      for (let i = 0; i < response.rawHeaders.length; i += 2) {
+        if (response.rawHeaders[i]!.toLowerCase() === 'content-range' && ++ranges > 1) {
+          response.destroy(); reject(new ContentNetworkError('ambiguous-http-framing')); return
+        }
+      }
       for (const [key, value] of Object.entries(response.headers)) {
         if (typeof value === 'string') responseHeaders.set(key, value)
       }
@@ -138,6 +165,11 @@ export function createContentFetcher(options: {
 } = {}): ContentFetcher {
   return async request => {
     if (!Number.isInteger(request.maxBytes) || request.maxBytes < 1 || request.maxBytes > 64 * 1024 * 1024) networkError('invalid-network-limit')
+    const prefix = request.audioPrefixBytes
+    if (prefix !== undefined && (request.role !== 'audio' || !Number.isSafeInteger(prefix) || prefix < 1 ||
+        prefix > 8 * 1024 * 1024 || prefix > request.maxBytes || request.etag != null || request.lastModified != null))
+      networkError('invalid-audio-prefix-request')
+    const limit = prefix ?? request.maxBytes
     const timeout = Math.min(60_000, Math.max(1_000, request.timeoutMs ?? 20_000))
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeout)
@@ -158,11 +190,12 @@ export function createContentFetcher(options: {
         ])
         if (!addresses.length || addresses.length > 32 || addresses.some(address => !isPublicContentAddress(address))) networkError('non-public-dns-answer')
         const headers: Record<string, string> = { accept: '*/*', 'accept-encoding': 'identity', 'user-agent': 'JoveEnglishContent/1.0' }
+        if (prefix !== undefined) headers.range = `bytes=0-${prefix - 1}`
         if (redirect === 0 && header(request.etag ?? null)) headers['if-none-match'] = request.etag!
         if (redirect === 0 && header(request.lastModified ?? null)) headers['if-modified-since'] = request.lastModified!
         const deno = !!denoRuntime()
-        const result = options.transport ? await options.transport(url, addresses, headers, request.maxBytes, controller.signal) :
-          deno ? await denoHop(url, addresses, headers, request.maxBytes, controller.signal) : await nodeHop(url, addresses, headers, request.maxBytes, controller.signal)
+        const result = options.transport ? await options.transport(url, addresses, headers, limit, controller.signal) :
+          deno ? await denoHop(url, addresses, headers, limit, controller.signal) : await nodeHop(url, addresses, headers, limit, controller.signal)
         if ([301, 302, 303, 307, 308].includes(result.status)) {
           const location = result.headers.get('location')
           if (!location) networkError('redirect-without-location')
@@ -170,6 +203,7 @@ export function createContentFetcher(options: {
           continue
         }
         return { status: result.status, body: result.body, finalUrl: url,
+          ...(prefix !== undefined ? { byteCoverage: prefixCoverage(result, limit) } : {}),
           contentType: result.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '',
           etag: header(result.headers.get('etag')), lastModified: header(result.headers.get('last-modified')),
           retryAfter: header(result.headers.get('retry-after')),

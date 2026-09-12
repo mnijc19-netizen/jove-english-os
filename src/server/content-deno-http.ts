@@ -82,7 +82,7 @@ export async function readContentHttpResponse(socket: Pick<ContentSocket, 'read'
       if (headerBytes > 32768 || ++headerCount > 512) fail('response-headers-too-large')
       if (!line) break
       const [name, value] = field(line)
-      if (['content-length', 'transfer-encoding'].includes(name) && headers.has(name)) fail('ambiguous-http-framing')
+      if (['content-length', 'transfer-encoding', 'content-range'].includes(name) && headers.has(name)) fail('ambiguous-http-framing')
       headers.append(name, value)
     }
     if (status >= 200) break
@@ -139,7 +139,7 @@ export async function readContentHttpResponse(socket: Pick<ContentSocket, 'read'
           if (trailerBytes > 16384 || trailers > 128) fail('response-headers-too-large')
           if (!trailer) break
           const [name] = field(trailer)
-          if (['content-length', 'transfer-encoding', 'content-encoding', 'host', 'location', 'authorization'].includes(name)) fail('invalid-http-trailer')
+          if (['content-length', 'transfer-encoding', 'content-encoding', 'content-range', 'content-type', 'host', 'location', 'authorization'].includes(name)) fail('invalid-http-trailer')
         }
         break
       }
@@ -182,10 +182,13 @@ export async function pinnedDenoContentHop(runtime: Partial<ContentDenoRuntime>,
   if (typeof runtime.connect !== 'function' || typeof runtime.startTls !== 'function') fail('pinned-transport-unavailable')
   const url = new URL(rawUrl), selected = addresses.find(address => address.includes('.')) ?? addresses[0]
   if (!selected || url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) fail('invalid-pinned-request')
-  const allowed = new Set(['accept', 'accept-encoding', 'user-agent', 'if-none-match', 'if-modified-since'])
+  const allowed = new Set(['accept', 'accept-encoding', 'user-agent', 'if-none-match', 'if-modified-since', 'range'])
   for (const [name, value] of Object.entries(headers)) {
     if (!allowed.has(name) || value.length > 1024 || !/^[\t\x20-\x7e]*$/u.test(value)) fail('invalid-pinned-request')
   }
+  if (headers.range !== undefined && (!/^bytes=0-(?:0|[1-9]\d{0,6})$/u.test(headers.range) ||
+      Number(headers.range.slice(8)) >= Math.min(limit, 8 * 1024 * 1024) || headers['if-none-match'] !== undefined || headers['if-modified-since'] !== undefined))
+    fail('invalid-pinned-request')
   const request = new TextEncoder().encode('GET ' + url.pathname + url.search + ' HTTP/1.1\r\nHost: ' + url.hostname +
     '\r\nConnection: close\r\n' + Object.entries(headers).map(([name, value]) => name + ': ' + value + '\r\n').join('') + '\r\n')
   if (request.length > 8192) fail('invalid-pinned-request')

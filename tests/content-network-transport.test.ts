@@ -26,6 +26,97 @@ function connection(response: string | Uint8Array, address = '1.1.1.1', fragment
 
 afterEach(() => vi.unstubAllGlobals())
 
+describe('bounded byte-zero audio acquisition', () => {
+  const prefixRequest = { source, url: 'https://hpr.nyc3.cdn.digitaloceanspaces.com/eps/hpr4725.mp3',
+    role: 'audio' as const, maxBytes: 5, audioPrefixBytes: 5 }
+  function fixture(wire: string) {
+    const tcp = connection(''), tls = connection(wire, undefined, 1)
+    const connect = vi.fn(async () => tcp), startTls = vi.fn(async () => tls)
+    vi.stubGlobal('Deno', { connect, startTls })
+    return { tls, connect, run: () => createContentFetcher({ resolve: async () => ['1.1.1.1'] })(prefixRequest) }
+  }
+  it('keeps a bounded partial response distinct from the full source representation', async () => {
+    const { tls, run } = fixture('HTTP/1.1 206 Partial Content\r\nContent-Type: audio/mpeg\r\nContent-Length: 5\r\nContent-Range: bytes 0-4/90000000\r\n\r\nhello')
+    const result = await run()
+    expect(result.byteCoverage).toEqual({ kind: 'prefix', start: 0, endExclusive: 5, totalBytes: 90000000 })
+    expect(new TextDecoder().decode(tls.write.mock.calls[0]![0])).toContain('range: bytes=0-4\r\n')
+    expect(new TextDecoder().decode(result.body)).toBe('hello')
+    expect(result.dnsPinning).toBe('pinned-deno-tls')
+    expect(tls.close).toHaveBeenCalledOnce()
+  })
+  it.each([200, 206])('labels a fully received small representation complete with status %i', async status => {
+    const { run } = fixture(`HTTP/1.1 ${status} OK\r\nContent-Type: audio/mpeg\r\nContent-Length: 3\r\n${status === 206 ? 'Content-Range: bytes 0-2/3\r\n' : ''}\r\nabc`)
+    expect((await run()).byteCoverage).toEqual({ kind: 'complete', start: 0, endExclusive: 3, totalBytes: 3 })
+  })
+  it.each([
+    'bytes 1-5/90000000', 'bytes 0-4/*', 'bytes 0-4/4', 'bytes 0-5/90000000',
+    'bytes 0-3/90000000', 'bytes 0-4/9007199254740992', 'bytes 0-4/90000000, bytes 0-4/90000000', '',
+  ])('rejects an unverified range %s without promoting partial bytes to complete media', async range => {
+    const { run } = fixture(`HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\nContent-Range: ${range}\r\n\r\nhello`)
+    await expect(run()).rejects.toThrow('invalid-audio-prefix-response')
+  })
+  it.each([
+    'Content-Range: bytes 0-4/90\r\nContent-Range: bytes 0-4/90\r\n',
+    'Content-Type: multipart/byteranges; boundary=test\r\nContent-Range: bytes 0-4/90\r\n',
+  ])('rejects ambiguous or multipart partial representations %#', async headers => {
+    const { run } = fixture('HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\n' + headers + '\r\nhello')
+    await expect(run()).rejects.toThrow()
+  })
+  it('never retries as a full download when the server ignores the range', async () => {
+    const { connect, run } = fixture('HTTP/1.1 200 OK\r\nContent-Length: 90000000\r\n\r\n')
+    await expect(run()).rejects.toThrow('response-too-large')
+    expect(connect).toHaveBeenCalledOnce()
+  })
+  it.each([
+    'HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-4/90\r\nTransfer-Encoding: chunked\r\n\r\n6\r\n',
+    'HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-4/90\r\nContent-Encoding: gzip\r\n\r\n',
+    'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Range: bytes 0-4/90\r\n\r\nhello',
+    'HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nContent-Range: bytes */90\r\n\r\n',
+    'HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-4/90\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nContent-Range: bytes 0-4/5\r\n\r\n',
+  ])('rejects oversized, encoded, contradictory or trailer-modified prefixes %#', async wire => {
+    const { run } = fixture(wire)
+    await expect(run()).rejects.toThrow()
+  })
+  it('accepts verified chunked prefix bytes without changing the byte coverage', async () => {
+    const { run } = fixture('HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-4/90\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n')
+    expect((await run()).byteCoverage).toEqual({ kind: 'prefix', start: 0, endExclusive: 5, totalBytes: 90 })
+  })
+  it('keeps the prefix bound across redirects and refuses a rebound private address', async () => {
+    const transport = vi.fn(async (_url: string, _addresses: string[], headers: Record<string, string>, limit: number) => {
+      expect(headers.range).toBe('bytes=0-4')
+      expect(limit).toBe(5)
+      expect(headers.authorization).toBeUndefined()
+      return { status: 302, headers: new Headers({ location: prefixRequest.url }), body: new Uint8Array() }
+    })
+    const resolve = vi.fn().mockResolvedValueOnce(['1.1.1.1']).mockResolvedValueOnce(['127.0.0.1'])
+    await expect(createContentFetcher({ resolve, transport })(prefixRequest)).rejects.toThrow('non-public-dns-answer')
+    expect(transport).toHaveBeenCalledOnce()
+    expect(resolve).toHaveBeenCalledTimes(2)
+  })
+  it.each(['bytes=1-4', 'bytes=0-5', 'bytes=0-4,6-7', 'bytes=0-4\r\nAuthorization: PRIVATE'])(
+    'refuses unsafe native range %s before connecting', async range => {
+      const runtime = { connect: vi.fn(), startTls: vi.fn() }
+      await expect(pinnedDenoContentHop(runtime, prefixRequest.url, ['1.1.1.1'], { range }, 5, new AbortController().signal))
+        .rejects.toThrow('invalid-pinned-request')
+      expect(runtime.connect).not.toHaveBeenCalled()
+    })
+  it.each([0, -1, 1.5, 8388609, NaN])('rejects unsafe prefix size %s before DNS', async audioPrefixBytes => {
+    const resolve = vi.fn(async () => ['1.1.1.1'])
+    const transport = vi.fn(async () => ({ status: 200, headers: new Headers(), body: encoder.encode('hello') }))
+    await expect(createContentFetcher({ resolve, transport })({ ...prefixRequest, audioPrefixBytes })).rejects.toThrow('invalid-audio-prefix-request')
+    expect(resolve).not.toHaveBeenCalled()
+    expect(transport).not.toHaveBeenCalled()
+  })
+  it('forbids ranges on metadata or conditional requests before DNS', async () => {
+    const resolve = vi.fn(async () => ['1.1.1.1'])
+    const transport = vi.fn(async () => ({ status: 200, headers: new Headers(), body: encoder.encode('hello') }))
+    for (const override of [{ role: 'feed' as const }, { etag: 'prior' }, { lastModified: 'prior' }, { maxBytes: 4 }])
+      await expect(createContentFetcher({ resolve, transport })({ ...prefixRequest, ...override })).rejects.toThrow('invalid-audio-prefix-request')
+    expect(resolve).not.toHaveBeenCalled()
+    expect(transport).not.toHaveBeenCalled()
+  })
+})
+
 describe('default Deno content transport', () => {
   it('connects only to the validated IP, verifies the original TLS hostname and never falls back to fetch', async () => {
     const tcp = connection(''), tls = connection('HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello')
