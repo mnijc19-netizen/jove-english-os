@@ -233,20 +233,23 @@ export const useApp = defineStore("app", () => {
       return false;
     }
   }
-  async function evidence(
+  async function appendEvidence(
     event: Omit<StudyEvent, "id" | "timestamp"> & {
       id?: string;
       timestamp?: number;
     },
   ) {
     // UI retries reuse an operation ID; the original first-attempt evidence stays immutable.
-    if (event.id && (await db.events.get(event.id))) return;
+    if (event.id && (await db.events.get(event.id))) return false;
     await recordEvent({
       ...event,
       id: event.id ?? crypto.randomUUID(),
       timestamp: event.timestamp ?? Date.now(),
     });
-    await refresh();
+    return true;
+  }
+  async function evidence(event: Parameters<typeof appendEvidence>[0]) {
+    if (await appendEvidence(event)) await refresh();
   }
   async function generatedSpeech(
     text: string,
@@ -307,12 +310,26 @@ export const useApp = defineStore("app", () => {
     return blob;
   }
   async function beginTask(taskId: string) {
-    const task = plan.value.tasks.find((t) => t.id === taskId)
-    if (!task || task.done) return;
-    await db.plans.put(JSON.parse(JSON.stringify(plan.value)));
-    plans.value = await db.plans.toArray();
-    await evidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
-      data: { taskId: task.id, kind: taskActivity(task) === 'reading' ? 'reading' : task.kind, ...(task.materialId ? { materialId: task.materialId } : {}) } })
+    // Route hydration can resume after another tab or sync commits completion.
+    // Recompute from one current database snapshot; never write a stale Pinia
+    // plan over completed tasks, saved optional work or a changed daily budget.
+    const task = await db.transaction('rw', [db.plans, db.profiles, db.skills, db.cards, db.events, db.materials], async () => {
+      const now = Date.now(), date = new Date(now).toLocaleDateString('en-CA');
+      const previous = await db.plans.get(date);
+      if (previous?.tasks.find(t => t.id === taskId)?.done) return;
+      const [currentProfile, currentSkills, currentCards, currentEvents, currentMaterials] = await Promise.all([
+        db.profiles.get('main'), db.skills.toArray(), db.cards.toArray(), db.events.toArray(), db.materials.toArray(),
+      ]);
+      const current = makePlan(currentProfile ?? defaultProfile(), currentSkills, currentCards, currentEvents, currentMaterials, previous, now);
+      const requested = current.tasks.find(t => t.id === taskId);
+      if (!requested || requested.done) return;
+      await db.plans.put(current);
+      return requested;
+    });
+    try {
+      if (task) await appendEvidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
+        data: { taskId: task.id, kind: taskActivity(task) === 'reading' ? 'reading' : task.kind, ...(task.materialId ? { materialId: task.materialId } : {}) } })
+    } finally { await refresh(); }
   }
   async function continueAssignment(afterTaskId?: string) {
     const next = nextAssignedTask(plan.value, afterTaskId);
@@ -324,52 +341,57 @@ export const useApp = defineStore("app", () => {
     kind: string,
     identity: { taskId?: string; materialId?: string; activity?: 'reading' | 'chunks' } = {},
   ) {
-    const p = structuredClone(
-      JSON.parse(JSON.stringify(plan.value)),
-    ) as DailyPlan;
-    const eligible = p.tasks.filter((t) => t.kind === kind && (!t.optional || t.id === identity.taskId) && (!t.done || t.id === identity.taskId)
-      && (!identity.materialId || t.materialId === identity.materialId)
-      && (!identity.activity || taskActivity(t) === identity.activity)
-      // A legacy/free writing page may match a language task, never a reader.
-      && (kind !== 'learn' || identity.taskId || taskActivity(t) === 'chunks'));
-    const task = identity.taskId
-      ? eligible.find((t) => t.id === identity.taskId)
-      : identity.materialId
-        ? eligible.find((t) => t.materialId === identity.materialId)
-        : eligible.length === 1
-          ? eligible[0]
-          : undefined;
-    if (task) {
-      if (kind === 'learn' && task.id.endsWith(':reading')) {
-        const proof = events.value.filter(e => e.data?.taskId === task.id && e.data?.materialId === task.materialId);
-        if (!proof.some(e => e.type === 'READING_RESPONSE' && typeof e.data?.response === 'string' && !!e.data.response.trim()
-          && proof.some(retell => retell.type === 'READING_RETELL' && retell.sessionId === e.sessionId
-            && (typeof retell.data?.response === 'string' && !!retell.data.response.trim() || typeof retell.data?.audioId === 'string')))) return false;
+    const committed = await db.transaction('rw', [db.plans], async () => {
+      const displayed = plan.value;
+      // Completion is a change to one current assignment, not replacement of the
+      // full plan that happened to be rendered before another device committed.
+      const p = await db.plans.get(displayed.id) ?? JSON.parse(JSON.stringify(displayed)) as DailyPlan;
+      const eligible = p.tasks.filter((t) => t.kind === kind && (!t.optional || t.id === identity.taskId) && (!t.done || t.id === identity.taskId)
+        && (!identity.materialId || t.materialId === identity.materialId)
+        && (!identity.activity || taskActivity(t) === identity.activity)
+        // A legacy/free writing page may match a language task, never a reader.
+        && (kind !== 'learn' || identity.taskId || taskActivity(t) === 'chunks'));
+      const task = identity.taskId
+        ? eligible.find((t) => t.id === identity.taskId)
+        : identity.materialId
+          ? eligible.find((t) => t.materialId === identity.materialId)
+          : eligible.length === 1
+            ? eligible[0]
+            : undefined;
+      if (task) {
+        if (kind === 'learn' && task.id.endsWith(':reading')) {
+          const proof = events.value.filter(e => e.data?.taskId === task.id && e.data?.materialId === task.materialId);
+          if (!proof.some(e => e.type === 'READING_RESPONSE' && typeof e.data?.response === 'string' && !!e.data.response.trim()
+            && proof.some(retell => retell.type === 'READING_RETELL' && retell.sessionId === e.sessionId
+              && (typeof retell.data?.response === 'string' && !!retell.data.response.trim() || typeof retell.data?.audioId === 'string')))) return false;
+        }
+        if (kind === 'learn' && task.id.endsWith(':chunks')) {
+          const proof = events.value.filter(e => e.data?.taskId === task.id && e.data?.materialId === task.materialId);
+          if (!proof.some(e => e.type === 'WRITTEN_RESPONSE' && typeof e.data?.response === 'string' && !!e.data.response.trim())) return false;
+          const source = materials.value.find(m => m.id === task.materialId);
+          if (source?.chunks.length && !proof.some(e => e.type === 'CHUNK_RECALL' && e.chunkId
+            && chunks.value.some(chunk => chunk.id === e.chunkId && chunk.sourceIds.includes(source.id)))) return false;
+        }
+        task.done = true;
+        await db.plans.put(p);
+        return task;
       }
-      if (kind === 'learn' && task.id.endsWith(':chunks')) {
-        const proof = events.value.filter(e => e.data?.taskId === task.id && e.data?.materialId === task.materialId);
-        if (!proof.some(e => e.type === 'WRITTEN_RESPONSE' && typeof e.data?.response === 'string' && !!e.data.response.trim())) return false;
-        const source = materials.value.find(m => m.id === task.materialId);
-        if (source?.chunks.length && !proof.some(e => e.type === 'CHUNK_RECALL' && e.chunkId
-          && chunks.value.some(chunk => chunk.id === e.chunkId && chunk.sourceIds.includes(source.id)))) return false;
-      }
-      task.done = true;
-      await db.plans.put(p);
-      await evidence({
+      return null;
+    });
+    try {
+      if (committed) await appendEvidence({
         type: "TASK_COMPLETED",
         source: "objective",
-        id: "completed:" + task.id,
+        id: "completed:" + committed.id,
         data: {
-          kind: taskActivity(task) === 'reading' ? 'reading' : kind,
-          minutes: task.minutes,
-          taskId: task.id,
-          ...(task.materialId ? { materialId: task.materialId } : {}),
+          kind: taskActivity(committed) === 'reading' ? 'reading' : kind,
+          minutes: committed.minutes,
+          taskId: committed.id,
+          ...(committed.materialId ? { materialId: committed.materialId } : {}),
         },
       });
-      plans.value = await db.plans.toArray();
-      return true;
-    }
-    return false;
+    } finally { await refresh(); }
+    return Boolean(committed);
   }
   const localProvider = new OpenRouterProvider({
     getKey: async () => (await db.secrets.get("openrouter"))?.value ?? "",

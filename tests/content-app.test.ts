@@ -41,6 +41,60 @@ async function signIn() {
   await app.refresh(); state.cloud!.userId = 'owner-a'; await nextTick()
 }
 describe('Today automatic content coordination', () => {
+  it('a delayed route start cannot overwrite newer completed work and optional saved assignments', async () => {
+    await db.profiles.put({ ...defaultProfile(), onboarded: true, dailyMinutes: 45 }); await app.refresh()
+    const initial = structuredClone(JSON.parse(JSON.stringify(app.plan))), first = initial.tasks.find((task: { done: boolean; optional?: boolean }) => !task.done && !task.optional)!
+    await app.beginTask(first.id)
+    const latest = { ...initial, tasks: [...initial.tasks.map((task: { done: boolean }) => ({ ...task, done: true })),
+      { ...first, id: `${initial.date}:learn:other-device:reading`, kind: 'learn', title: 'Saved other-device response', optional: true, done: false, minutes: 9 }] }
+    await db.plans.put(latest)
+    // App state is intentionally stale, as when route hydration resumes after
+    // another tab/sync commit. The database transaction must win, not old refs.
+    await app.beginTask(first.id)
+    expect(await db.plans.get(initial.id)).toEqual(latest)
+    expect(app.plan.tasks.filter(task => !task.optional).every(task => task.done)).toBe(true)
+    expect(app.plan.tasks.find(task => task.optional)?.minutes).toBe(9)
+    expect(await db.events.where('id').equals(`started:${first.id}`).count()).toBe(1)
+  })
+  it('beginning a different task preserves a newer completion even before the store refreshes', async () => {
+    const initial = structuredClone(JSON.parse(JSON.stringify(app.plan))), [first, next] = initial.tasks
+    expect(next).toBeDefined()
+    const latest = { ...initial, tasks: initial.tasks.map((task: { id: string }) => task.id === first.id ? { ...task, done: true } : task) }
+    await db.plans.put(latest)
+    await app.beginTask(next.id)
+    expect((await db.plans.get(initial.id))?.tasks.find(task => task.id === first.id)?.done).toBe(true)
+    expect(await db.events.get(`started:${next.id}`)).toBeDefined()
+  })
+  it('finishing one assignment cannot revert a newer completion from another tab', async () => {
+    const initial = structuredClone(JSON.parse(JSON.stringify(app.plan))), first = initial.tasks.find((task: { kind: string }) => task.kind === 'listen')!
+    const other = initial.tasks.find((task: { id: string }) => task.id !== first.id)!
+    await db.plans.put({ ...initial, tasks: initial.tasks.map((task: { id: string }) => task.id === other.id ? { ...task, done: true } : task) })
+    expect(await app.completeTask('listen', { taskId: first.id, materialId: first.materialId })).toBe(true)
+    const stored = await db.plans.get(initial.id)
+    expect(stored?.tasks.find(task => task.id === first.id)?.done).toBe(true)
+    expect(stored?.tasks.find(task => task.id === other.id)?.done).toBe(true)
+  })
+  it('serializes two overlapping completions without losing either task or its evidence', async () => {
+    const initial = structuredClone(JSON.parse(JSON.stringify(app.plan)))
+    const tasks = initial.tasks.filter((task: { kind: string }) => ['listen', 'speak'].includes(task.kind))
+    expect(tasks).toHaveLength(2); await db.plans.put(initial)
+    expect(await Promise.all(tasks.map((task: { id: string; kind: string }) => app.completeTask(task.kind, { taskId: task.id })))).toEqual([true, true])
+    const stored = await db.plans.get(initial.id)
+    for (const task of tasks) {
+      expect(stored?.tasks.find(row => row.id === task.id)?.done).toBe(true)
+      expect(await db.events.get(`completed:${task.id}`)).toBeDefined()
+    }
+  })
+  it.each(['start', 'complete'])('a failed %s plan commit emits no completed/started evidence and leaves the prior plan intact', async action => {
+    const initial = structuredClone(JSON.parse(JSON.stringify(app.plan))), first = initial.tasks.find((task: { kind: string }) => task.kind === 'listen')!
+    await db.plans.put(initial)
+    const write = vi.spyOn(db.plans, 'put').mockRejectedValueOnce(new Error('fixture-plan-write-failed'))
+    try {
+      await expect(action === 'start' ? app.beginTask(first.id) : app.completeTask('listen', { taskId: first.id })).rejects.toThrow('fixture-plan-write-failed')
+    } finally { write.mockRestore() }
+    expect(await db.plans.get(initial.id)).toEqual(initial)
+    expect(await db.events.get(`${action === 'start' ? 'started' : 'completed'}:${first.id}`)).toBeUndefined()
+  })
   it('does not fetch before login and onboarding', async () => {
     await nextTick(); await app.loadContent()
     expect(services.refresh).not.toHaveBeenCalled(); expect(app.contentState).toBe('idle')
