@@ -33,7 +33,7 @@ export interface MaterialChunk { text: string; meaningEn: string; meaningZh: str
 export interface AuthenticPlayback {
   segmentId: string; audioSha256: string; startSeconds: number; endSeconds: number;
   sourceAudioSha256: string; sourceStartSeconds: number; sourceEndSeconds: number; clipOriginSeconds: number;
-  timingBasis: 'complete-container' | 'mpeg-frame-count-with-preroll' | 'pcm-sample-count';
+  timingBasis: 'complete-container' | 'mpeg-frame-count-with-preroll' | 'mpeg-frame-count-with-xing-v1' | 'pcm-sample-count';
   mimeType: string; byteLength: number; durationSeconds: number;
   sentenceRanges: { startSeconds: number; endSeconds: number }[];
 }

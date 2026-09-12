@@ -80,12 +80,14 @@ export const authenticPlaybackSchema = z.strictObject({
   segmentId: z.string().regex(/^authentic-[a-f0-9]{64}$/), audioSha256: z.string().regex(/^[a-f0-9]{64}$/),
   startSeconds: z.number().finite().min(0), endSeconds: z.number().finite().positive(),
   sourceAudioSha256: z.string().regex(/^[a-f0-9]{64}$/), sourceStartSeconds: z.number().finite().min(0), sourceEndSeconds: z.number().finite().positive(),
-  clipOriginSeconds: z.number().finite().min(0), timingBasis: z.enum(['complete-container', 'mpeg-frame-count-with-preroll', 'pcm-sample-count']),
+  clipOriginSeconds: z.number().finite().min(0), timingBasis: z.enum(['complete-container', 'mpeg-frame-count-with-preroll', 'mpeg-frame-count-with-xing-v1', 'pcm-sample-count']),
   mimeType: z.enum(['audio/mpeg', 'audio/wav', 'audio/ogg']), byteLength: z.number().int().min(1).max(10 * 1024 * 1024),
   durationSeconds: z.number().finite().positive().max(86400),
   sentenceRanges: z.array(z.strictObject({ startSeconds: z.number().finite().min(0), endSeconds: z.number().finite().positive() })).min(1).max(100),
 }).superRefine((p, ctx) => {
   const duration = p.endSeconds - p.startSeconds
+  if (p.timingBasis === 'mpeg-frame-count-with-xing-v1' && p.mimeType !== 'audio/mpeg')
+    ctx.addIssue({ code: 'custom', message: 'MP3 clip timing requires MPEG media', path: ['mimeType'] })
   if (duration < 30 || duration > 120.01 || p.endSeconds > p.durationSeconds + 0.05
     || Math.abs(p.sourceStartSeconds - p.clipOriginSeconds - p.startSeconds) > 0.05
     || Math.abs(p.sourceEndSeconds - p.clipOriginSeconds - p.endSeconds) > 0.05)

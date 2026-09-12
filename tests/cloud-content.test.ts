@@ -110,6 +110,15 @@ describe('automatic authenticated lesson delivery', () => {
       authenticPlayback: { startSeconds: 2, sourceStartSeconds: 102, sentenceRanges: [{ startSeconds: 0, endSeconds: 19 }, { startSeconds: 20, endSeconds: 40 }] } })
     expect(material.audioId).toBeUndefined(); expect(material.audioPath).toBeUndefined()
   })
+  it('retains versioned MP3 clip timing and rejects it on non-MPEG media', () => {
+    const row = lesson()
+    row.playback.timingBasis = 'mpeg-frame-count-with-xing-v1'
+    expect(() => materialFromContentLesson(row)).toThrow()
+    row.playback.mimeType = 'audio/mpeg'
+    expect(materialFromContentLesson(row).authenticPlayback).toMatchObject({
+      timingBasis: 'mpeg-frame-count-with-xing-v1', mimeType: 'audio/mpeg', audioSha256: sha,
+    })
+  })
   it.each(['synthetic', 'sentence-text', 'overlap', 'source-time', 'wrong-object', 'whole-episode', 'unapproved'])('rejects inconsistent %s metadata', kind => {
     const row = lesson()
     if (kind === 'synthetic') row.material.synthetic = true

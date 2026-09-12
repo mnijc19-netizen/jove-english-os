@@ -31,12 +31,23 @@ export interface ContentRightsRecord {
   thirdParty: 'none-detected' | 'separately-cleared' | 'uncertain'
   evidenceUrls: string[]
 }
+/** Exact bounded acquisition provenance, never a full-episode digest/duration.
+ * Source time is nominal MPEG sample time; encoder delay is not inferred. */
+export interface ContentMp3Coverage {
+  version: 'mpeg-prefix-v1'; networkKind: 'complete' | 'prefix'
+  receivedBytes: number; sourceBytes: number; sourceByteStart: number; sourceByteEndExclusive: number
+  startSeconds: 0; endSeconds: number; frameCount: number; sampleRate: number; samplesPerFrame: number
+  removedMetadataFrame: 'Xing' | 'Info' | 'VBRI' | null; discardedTrailingBytes: number
+  stopReason: 'duration-limit' | 'range-boundary' | 'complete'; gaplessAdjustment: 'not-applied'
+}
 export interface ContentAudioInput {
   requestId: string
   requestFingerprint: string
   segment: ContentSegment
-  /** Complete immutable stored episode. The adapter must decode and inspect the WHOLE requested interval. */
-  audio: { bytes: Uint8Array; sha256: string; mimeType: string; objectPath: string }
+  /** Immutable stored artifact; coverage is mandatory for a prepared prefix.
+   * Omission keeps the legacy complete-episode contract. The adapter must inspect
+   * the WHOLE requested interval, inside the actual artifact coverage. */
+  audio: { bytes: Uint8Array; sha256: string; mimeType: string; objectPath: string; coverage?: ContentMp3Coverage }
   interval: { startSeconds: number; endSeconds: number }
   sourcePolicy: ContentSource['rights']
   sourcePolicyHash: string
@@ -64,6 +75,7 @@ export interface ContentSttInput {
   audio: ContentAudioInput['audio']; sourcePolicy: ContentSource['rights']; sourcePolicyHash: string; signal: AbortSignal
 }
 export interface ContentSttResult {
+  /** Duration of the supplied artifact, not the full source when coverage exists. */
   audioSha256: string; requestFingerprint: string; audioDurationSeconds: number
   /** Official Podcasting 2.0 JSON format with numeric startTime AND endTime for every cue. */
   transcriptJson: string; provider: string; evidenceId: string; usage: ContentUsage
@@ -121,7 +133,7 @@ export interface ContentPlayback {
   sourceStartSeconds: number
   sourceEndSeconds: number
   clipOriginSeconds: number
-  timingBasis: 'complete-container' | 'mpeg-frame-count-with-preroll' | 'pcm-sample-count'
+  timingBasis: 'complete-container' | 'mpeg-frame-count-with-preroll' | 'mpeg-frame-count-with-xing-v1' | 'pcm-sample-count'
   mimeType: string
   byteLength: number
   durationSeconds: number

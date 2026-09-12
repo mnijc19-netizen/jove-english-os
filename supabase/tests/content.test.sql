@@ -61,6 +61,20 @@ begin
     'byteLength',960044,'mimeType','audio/wav','clipOriginSeconds',120,'sourceStartSeconds',120,'sourceEndSeconds',180,
     'startSeconds',0,'endSeconds',60,'durationSeconds',60,'timingBasis','pcm-sample-count');
   perform public.content_worker('clip',base_args||jsonb_build_object('clip',clip));
+  -- Forward container-version compatibility only; no decoder/acoustic approval.
+  begin
+    update public.content_segment_audio set timing_basis='mpeg-frame-count-with-xing-v1' where segment_id=segment_key;
+    raise exception 'Xing timing accepted non-MPEG media';
+  exception when check_violation then null; end;
+  update public.content_segment_audio set timing_basis='mpeg-frame-count-with-xing-v1',mime_type='audio/mpeg' where segment_id=segment_key;
+  if not exists(select 1 from public.content_segment_audio where segment_id=segment_key and timing_basis='mpeg-frame-count-with-xing-v1'
+    and sha256=repeat('f',64) and source_sha256=repeat('a',64) and state='preparing') then
+    raise exception 'Versioned container changed identity or availability'; end if;
+  begin
+    update public.content_segment_audio set timing_basis='unverified-guessed-duration' where segment_id=segment_key;
+    raise exception 'Unknown timing basis accepted';
+  exception when check_violation then null; end;
+  update public.content_segment_audio set timing_basis='pcm-sample-count',mime_type='audio/wav' where segment_id=segment_key;
   record:=record||jsonb_build_object('status','eligible','inspection','SYNTHETIC SQL TEST ONLY','artifact',jsonb_build_object('sha256',repeat('a',64)),
     'lesson',jsonb_build_object('test',true),'material',jsonb_build_object('approved',true),'clip',clip,
     'audioEvidence',jsonb_build_object('submittedAudioSha256',repeat('f',64)));

@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { ContentAudioAnalyzer, ContentTranscriber, ContentUsage } from './content-contracts'
+import type { ContentAudioAnalyzer, ContentAudioInput, ContentMp3Coverage, ContentTranscriber, ContentUsage } from './content-contracts'
 import type { Inspection, InspectionValues } from '../content/pipeline-types'
 import { contentEvidenceHash } from './content-rights'
 import { boundedBody, GatewayError, type ServerEnvironment } from './gateway'
@@ -55,13 +55,7 @@ function mp3Frame(bytes: Uint8Array, offset: number) {
 export interface ContentMp3Prefix {
   bytes: Uint8Array
   mimeType: 'audio/mpeg'
-  coverage: {
-    version: 'mpeg-prefix-v1'; networkKind: 'complete' | 'prefix'
-    receivedBytes: number; sourceBytes: number; sourceByteStart: number; sourceByteEndExclusive: number
-    startSeconds: 0; endSeconds: number; frameCount: number; sampleRate: number; samplesPerFrame: number
-    removedMetadataFrame: 'Xing' | 'Info' | 'VBRI' | null; discardedTrailingBytes: number
-    stopReason: 'duration-limit' | 'range-boundary' | 'complete'; gaplessAdjustment: 'not-applied'
-  }
+  coverage: ContentMp3Coverage
 }
 /** Produce a NEW bounded artifact from one verified byte-zero representation.
  * Only complete consecutive frames are retained; even discarded received bytes
@@ -209,7 +203,81 @@ export function contentAudioDuration(bytes: Uint8Array, mimeType: string,
   return duration
 }
 
-export interface ContentAudioWindow { bytes: Uint8Array; mimeType: string; originSeconds: number; endSeconds: number; originalDurationSeconds: number; timingBasis: 'complete-container' | 'mpeg-frame-count-with-preroll' | 'pcm-sample-count' }
+export interface ContentAudioWindow { bytes: Uint8Array; mimeType: string; originSeconds: number; endSeconds: number; originalDurationSeconds: number; timingBasis: 'complete-container' | 'mpeg-frame-count-with-preroll' | 'mpeg-frame-count-with-xing-v1' | 'pcm-sample-count' }
+
+/** A new playable container for a validated bounded artifact, not an original
+ * episode. A metadata-only MPEG frame gives decoders this clip's actual frame
+ * count/byte length and a seek table from observed frame boundaries. Original
+ * speech frames remain byte-identical; no encoder-delay/phoneme score is inferred.
+ * Kept separate from the legacy window contract until versioned persistence can
+ * identify the new clip/hash without replacing a previously analyzed artifact. */
+export function contentMp3PrefixWindow(prefix: ContentMp3Prefix, start: number, end: number): ContentAudioWindow {
+  const { bytes, coverage } = prefix
+  if (prefix.mimeType !== 'audio/mpeg' || !coverage || coverage.version !== 'mpeg-prefix-v1' || bytes.length > 8 * 1024 * 1024 ||
+      coverage.startSeconds !== 0 || !Number.isSafeInteger(coverage.sourceByteStart) || coverage.sourceByteStart < 0 ||
+      coverage.sourceByteEndExclusive - coverage.sourceByteStart !== bytes.length ||
+      !Number.isSafeInteger(coverage.receivedBytes) || coverage.receivedBytes > 8 * 1024 * 1024 || coverage.sourceByteEndExclusive > coverage.receivedBytes ||
+      !Number.isSafeInteger(coverage.sourceBytes) || coverage.sourceBytes < coverage.receivedBytes ||
+      (coverage.networkKind === 'complete' ? coverage.sourceBytes !== coverage.receivedBytes :
+        coverage.networkKind !== 'prefix' || coverage.sourceBytes <= coverage.receivedBytes) ||
+      coverage.discardedTrailingBytes !== coverage.receivedBytes - coverage.sourceByteEndExclusive ||
+      !['Xing', 'Info', 'VBRI', null].includes(coverage.removedMetadataFrame) || coverage.gaplessAdjustment !== 'not-applied' ||
+      !['duration-limit', 'range-boundary', 'complete'].includes(coverage.stopReason) ||
+      coverage.stopReason === 'complete' && coverage.networkKind !== 'complete' ||
+      coverage.stopReason === 'range-boundary' && coverage.networkKind !== 'prefix' ||
+      !Number.isFinite(coverage.endSeconds) || coverage.endSeconds <= 0 || coverage.endSeconds > 600)
+    return error('CONTENT_AUDIO_PREFIX_COVERAGE')
+  const format = mp3Frame(bytes, 0)
+  const side = 4 + format.crcBytes
+  if ((format.version === 3 ? bytes[side]! * 2 + (bytes[side + 1]! >> 7) : bytes[side]!) !== 0)
+    return error('CONTENT_AUDIO_PREFIX_RESERVOIR')
+  let frames = 0
+  const duration = contentAudioDuration(bytes, prefix.mimeType, offset => {
+    const current = mp3Frame(bytes, offset)
+    if (current.version !== format.version || current.rate !== format.rate || current.channels !== format.channels)
+      return error('CONTENT_AUDIO_PREFIX_COVERAGE')
+    const marker = ascii(bytes, offset + 4 + current.sideBytes, offset + 8 + current.sideBytes)
+    if (marker === 'Xing' || marker === 'Info' || ascii(bytes, offset + 36, offset + 40) === 'VBRI')
+      return error('CONTENT_AUDIO_PREFIX_COVERAGE')
+    frames++
+  })
+  if (frames !== coverage.frameCount || format.rate !== coverage.sampleRate || format.samples !== coverage.samplesPerFrame ||
+      Math.abs(duration - coverage.endSeconds) > 0.00000001) return error('CONTENT_AUDIO_PREFIX_COVERAGE')
+  const window = contentAudioWindow(bytes, prefix.mimeType, start, end)
+  // Use a sufficiently large legal metadata frame even for very low-bitrate
+  // source frames. CRC and padding are absent in this NEW zero-audio frame.
+  const header = window.bytes.slice(0, 4)
+  header[1] = header[1]! | 1
+  header[2] = 9 << 4 | header[2]! & 12
+  const metadata = mp3Frame(header, 0), marker = 4 + metadata.sideBytes
+  if (metadata.size < marker + 116) return error('CONTENT_AUDIO_CONTAINER')
+  const output = new Uint8Array(metadata.size + window.bytes.length), view = new DataView(output.buffer)
+  output.set(header); output.set(new TextEncoder().encode('Xing'), marker)
+  const boundaries: { offset: number; start: number }[] = []
+  const clipDuration = contentAudioDuration(window.bytes, 'audio/mpeg', (offset, _length, start) => boundaries.push({ offset, start }))
+  view.setUint32(marker + 4, 7) // frames, byte length, 100-entry TOC; no fabricated gapless/encoder fields.
+  view.setUint32(marker + 8, boundaries.length)
+  view.setUint32(marker + 12, output.length)
+  let index = 0
+  for (let percent = 1; percent < 100; percent++) {
+    const seconds = clipDuration * percent / 100
+    while (index + 1 < boundaries.length && boundaries[index + 1]!.start <= seconds) index++
+    output[marker + 16 + percent] = Math.min(255, Math.floor(256 * (metadata.size + boundaries[index]!.offset) / output.length))
+  }
+  output.set(window.bytes, metadata.size)
+  return { ...window, bytes: output, timingBasis: 'mpeg-frame-count-with-xing-v1' }
+}
+
+/** Explicit discriminator preserves existing analyzed clips and their hashes.
+ * Never infer partial acquisition from an extension, byte count or MP3 header. */
+export function contentStoredAudioWindow(audio: ContentAudioInput['audio'], start: number, end: number): ContentAudioWindow {
+  if (audio.coverage !== undefined) {
+    if (audio.mimeType !== 'audio/mpeg') return error('CONTENT_AUDIO_PREFIX_COVERAGE')
+    return contentMp3PrefixWindow({ bytes: audio.bytes, mimeType: audio.mimeType, coverage: audio.coverage }, start, end)
+  }
+  return contentAudioWindow(audio.bytes, audio.mimeType, start, end)
+}
+
 /** Real contiguous MPEG frames with two seconds of reservoir preroll, or exact PCM samples. Never proportional byte seeking.
  * MP3 encoder delay is decoder-dependent: retain preroll and independently check heard caption alignment before approval. */
 export function contentAudioWindow(bytes: Uint8Array, mimeType: string, start: number, end: number): ContentAudioWindow {
@@ -392,7 +460,7 @@ export function createContentAudioServices(input: { env: ServerEnvironment; fetc
     if (start < 0 || end > duration || end - start < 30 || end - start > 120) return error('CONTENT_AUDIO_INTERVAL')
     if (await contentEvidenceHash(request.audio.bytes) !== request.audio.sha256) return error('CONTENT_AUDIO_HASH')
     // Both providers inspect exactly the immutable bytes later persisted for phone playback.
-    const window = contentAudioWindow(request.audio.bytes, request.audio.mimeType, start, end)
+    const window = contentStoredAudioWindow(request.audio, start, end)
     if (window.bytes.length > 10 * 1024 * 1024 || window.endSeconds - window.originSeconds > end - start + 3) return error('CONTENT_CLIP_DECODER_REQUIRED')
     const prepared = { ...request.audio, bytes: window.bytes, mimeType: window.mimeType, sha256: await contentEvidenceHash(window.bytes) }
     const prompt = JSON.stringify({ task: 'Inspect only the entire requested interval. Output timestamps in ORIGINAL episode seconds: add attachedAudioOriginSeconds to timestamps within the attached audio. Transcribe heard speech independently; then compare the reference. Return facts, a short meaning question/answer and useful chunks. Reject music, advertisements, inserted shows/movie/voicemail clips or other third-party material unless independently cleared; a show-wide license does NOT clear them. Do not guess copyrights. Human speech means natural human voices, not synthetic narration. Accent is an audio-based estimate. Confidence is per fact; null for unobserved. Noise/music are fractions of the target interval. Safety means suitable learning content, coherence means a self-contained complete thought.',
@@ -434,7 +502,7 @@ export function createContentAudioServices(input: { env: ServerEnvironment; fetc
     const duration = contentAudioDuration(audio.bytes, audio.mimeType)
     // Bounded first-window recovery, not a purported complete long-episode transcript. The reference records this scope.
     const end = Math.min(duration, 600)
-    const window = routed ? contentAudioWindow(audio.bytes, audio.mimeType, 0, end) : null
+    const window = routed || audio.coverage !== undefined ? contentStoredAudioWindow(audio, 0, end) : null
     if (window && window.bytes.length > 10 * 1024 * 1024) return error('CONTENT_AUDIO_INPUT_BOUNDARY')
     return { duration, end, window }
   }

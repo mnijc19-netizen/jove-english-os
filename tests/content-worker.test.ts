@@ -7,7 +7,7 @@ import type { ContentSource, FeedEpisode, Inspection, ObservationEvidence, Timed
 import { createContentFetcher, fetchContentResource, isPublicContentAddress, type ContentFetcher } from '../src/server/content-network'
 import { parseRssFeed, parseOpenYapPreviewManifest, resolveEpisodeAudioUrl, validateSourceUrl } from '../src/content/pipeline'
 import { CONTENT_POLICY_EVIDENCE, extractContentPolicy, revalidateContentRights } from '../src/server/content-rights'
-import { contentAudioDuration, contentAudioWindow, createContentAudioServices, prepareContentMp3Prefix } from '../src/server/content-audio'
+import { contentAudioDuration, contentAudioWindow, contentMp3PrefixWindow, contentStoredAudioWindow, createContentAudioServices, prepareContentMp3Prefix } from '../src/server/content-audio'
 import { auditVoaLessonCandidates, type VoaCandidateAudit } from '../src/server/content-voa'
 import { contentPublicOrigin, contentSignedPlaybackUrl, createContentBudget, createContentHandler } from '../src/server/content'
 import { GatewayError, type OwnerContext } from '../src/server/gateway'
@@ -1040,6 +1040,13 @@ function pcmFixture(seconds = 60): Uint8Array {
   view.setUint32(28,16000,true); view.setUint16(32,2,true); view.setUint16(34,16,true); setText(36,'data'); view.setUint32(40,bytes.length-44,true)
   return bytes // Explicit silence fixture, never a human audio sample.
 }
+function mp3PrefixFixture(seconds = 90) {
+  // Header/transport fixture with zero data, NOT actual human speech.
+  const frames = Math.ceil(seconds * 44100 / 1152), bytes = new Uint8Array(frames * 417)
+  for (let i = 0; i < frames; i++) bytes.set([255, 251, 144, 0], i * 417)
+  return prepareContentMp3Prefix(bytes, 'audio/mpeg', { kind: 'prefix', start: 0,
+    endExclusive: bytes.length, totalBytes: bytes.length + 100000 })
+}
 describe.runIf(process.env.JOVE_CONTENT_PREFIX_DECODE_PROBE === '1')('actual bounded prefix browser decoding (no paid service or lesson approval)', () => {
   it.each(['jb-the-launch', 'jb-linux-unplugged', 'open-yap-sample'])('%s decodes and reaches ended in Chromium and WebKit', async id => {
     const source = ALLOWLISTED_CONTENT_SOURCES.find(row => row.id === id)!
@@ -1056,7 +1063,7 @@ describe.runIf(process.env.JOVE_CONTENT_PREFIX_DECODE_PROBE === '1')('actual bou
     const prefix = prepareContentMp3Prefix(response.body, response.contentType, response.byteCoverage, 90)
     expect(prefix.coverage.endSeconds).toBeGreaterThan(30)
     expect(prefix.coverage.sourceBytes).toBeGreaterThan(prefix.coverage.receivedBytes)
-    const clip = contentAudioWindow(prefix.bytes, prefix.mimeType, 5, 25)
+    const clip = contentMp3PrefixWindow(prefix, 5, 25)
     const { chromium, webkit } = await import('@playwright/test')
     for (const engine of [chromium, webkit]) {
       const browser = await engine.launch({ headless: true })
@@ -1141,6 +1148,102 @@ describe('bounded MP3 prefix frame preparation (not acoustic or decoder certific
     expect(result.bytes).not.toBe(bytes)
     expect(result.coverage.endSeconds).toBe(3456 / 44100)
     expect(result.coverage.networkKind).toBe('complete')
+  })
+  it.each([3, 2, 0])('creates a clip-specific Xing header and seek table without rewriting MPEG %i speech frames', version => {
+    const first = frame(version), bytes = join(...Array.from({ length: 3000 }, (_, i) => frame(version, i % 2 ? 9 : 5)))
+    const prefix = prepare(bytes), before = prefix.bytes.slice(), raw = contentAudioWindow(prefix.bytes, prefix.mimeType, 5, 25)
+    const clip = contentMp3PrefixWindow(prefix, 5, 25), head = frame(version)
+    const marker = 4 + (version === 3 ? 32 : 17), view = new DataView(clip.bytes.buffer)
+    expect(prefix.bytes).toEqual(before)
+    expect(Buffer.compare(Buffer.from(clip.bytes.subarray(head.length)), Buffer.from(raw.bytes))).toBe(0)
+    expect(new TextDecoder().decode(clip.bytes.subarray(marker, marker + 4))).toBe('Xing')
+    expect(view.getUint32(marker + 4)).toBe(7)
+    expect(view.getUint32(marker + 8)).toBe(Math.round((raw.endSeconds - raw.originSeconds) * prefix.coverage.sampleRate / prefix.coverage.samplesPerFrame))
+    expect(view.getUint32(marker + 12)).toBe(clip.bytes.length)
+    const toc = clip.bytes.subarray(marker + 16, marker + 116)
+    expect(toc.length).toBe(100); expect(toc[0]).toBe(0)
+    expect(Array.from(toc).every((entry, i) => !i || entry >= toc[i - 1]!)).toBe(true)
+    expect(toc[99]).toBeGreaterThan(240)
+    expect(clip.timingBasis).toBe('mpeg-frame-count-with-xing-v1')
+    expect(clip.originalDurationSeconds).toBeCloseTo(prefix.coverage.endSeconds, 8)
+    expect(clip.originSeconds).toBe(raw.originSeconds); expect(clip.endSeconds).toBe(raw.endSeconds)
+    expect(clip.bytes.length - raw.bytes.length).toBe(first.length)
+  })
+  it('uses a large enough metadata frame for very low bitrate mono and CRC speech without altering those frames', () => {
+    const first = frame(2, 1, true, true), prefix = prepare(join(...Array.from({ length: 1500 }, () => first)))
+    const raw = contentAudioWindow(prefix.bytes, prefix.mimeType, 0, 20), clip = contentMp3PrefixWindow(prefix, 0, 20)
+    const overhead = clip.bytes.length - raw.bytes.length
+    expect(overhead).toBeGreaterThan(4 + 9 + 116)
+    expect(clip.bytes[1]! & 1).toBe(1)
+    expect(clip.bytes[2]! >> 4).toBe(9)
+    expect(Buffer.compare(Buffer.from(clip.bytes.subarray(overhead)), Buffer.from(raw.bytes))).toBe(0)
+  })
+  it('builds the seek table from actual variable-bitrate frame offsets', () => {
+    const prefix = prepare(join(...Array.from({ length: 3000 }, (_, i) => frame(3, i < 1500 ? 5 : 14))))
+    const clip = contentMp3PrefixWindow(prefix, 0, prefix.coverage.endSeconds)
+    const marker = 36, metadataLength = frame().length
+    // Midpoint in time falls on frame 1500, not the midpoint of bytes.
+    expect(clip.bytes[marker + 16 + 50]).toBe(Math.floor(256 * (metadataLength + frame(3, 5).length * 1500) / clip.bytes.length))
+    expect(clip.bytes[marker + 16 + 50]).toBeLessThan(64)
+  })
+  it('rejects forged prefix time/frame/byte metadata before returning a playable clip', () => {
+    const prefix = prepare(join(...Array.from({ length: 1500 }, () => frame())))
+    for (const patch of [{ endSeconds: 500 }, { frameCount: 999 }, { sampleRate: 48000 }, { sourceByteStart: 1 },
+      { version: 'unknown' }, { samplesPerFrame: 576 }, { networkKind: 'complete' }, { gaplessAdjustment: 'invented' },
+      { discardedTrailingBytes: 100 }, { sourceByteStart: -1 }, { receivedBytes: 10 * 1024 * 1024 },
+      { stopReason: 'complete' }, { removedMetadataFrame: 'unknown' }]) expect(() => contentMp3PrefixWindow({ ...prefix,
+        coverage: { ...prefix.coverage, ...patch } } as typeof prefix, 5, 20)).toThrow()
+    expect(() => contentMp3PrefixWindow(prefix, 0, prefix.coverage.endSeconds + 1)).toThrow()
+    expect(() => contentMp3PrefixWindow(prefix, -1, 20)).toThrow()
+  })
+  it('selects the versioned stored artifact window without changing the legacy clip bytes', () => {
+    const prefix = prepare(join(...Array.from({ length: 3000 }, () => frame())))
+    const audio = { ...prefix, sha256: createHash('sha256').update(prefix.bytes).digest('hex'), objectPath: 'fixture' }
+    const bounded = contentStoredAudioWindow(audio, 5, 65), expected = contentMp3PrefixWindow(prefix, 5, 65)
+    expect({ ...bounded, bytes: undefined }).toEqual({ ...expected, bytes: undefined })
+    expect(Buffer.compare(Buffer.from(bounded.bytes), Buffer.from(expected.bytes))).toBe(0)
+    const legacy = { bytes: audio.bytes, mimeType: audio.mimeType, sha256: audio.sha256, objectPath: audio.objectPath }
+    const preserved = contentStoredAudioWindow(legacy, 5, 65), original = contentAudioWindow(legacy.bytes, legacy.mimeType, 5, 65)
+    expect({ ...preserved, bytes: undefined }).toEqual({ ...original, bytes: undefined })
+    expect(Buffer.compare(Buffer.from(preserved.bytes), Buffer.from(original.bytes))).toBe(0)
+  })
+  it('rechecks the source reservoir after restoring a prepared prefix', () => {
+    const prefix = mp3PrefixFixture()
+    prefix.bytes[4] = 1
+    expect(() => contentMp3PrefixWindow(prefix, 5, 65)).toThrowError(expect.objectContaining({ code: 'CONTENT_AUDIO_PREFIX_RESERVOIR' }))
+  })
+  it.each([false, true])('submits a self-contained prefix for STT, for routed provider=%s (synthetic transport)', async routed => {
+    const prefix = prepare(join(...Array.from({ length: 3000 }, () => frame())))
+    const hash = createHash('sha256').update(prefix.bytes).digest('hex')
+    const episode = parseRssFeed(rss(false), testSource(), { now }).episodes[0]!
+    const cues = phrases.map((body, i) => ({ startTime: i * 10, endTime: (i + 1) * 10, body }))
+    const requests: Record<string, unknown>[] = []
+    const network = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'google/gemini-2.5-flash',
+        architecture: { input_modalities: ['audio', 'text'] }, supported_parameters: ['structured_outputs'] }] }))
+      requests.push(JSON.parse(init!.body as string))
+      return new Response(JSON.stringify(routed ? { id: 'test-prefix-stt', model: 'google/gemini-2.5-flash',
+        choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ segments: cues }) } }], usage: { total_tokens: 100, cost: 0.001 } } :
+        { responseId: 'test-prefix-stt', modelVersion: 'gemini-2.5-flash', candidates: [{ finishReason: 'STOP',
+          content: { parts: [{ text: JSON.stringify({ segments: cues }) }] } }], usageMetadata: { totalTokenCount: 100 } }))
+    }) as typeof fetch
+    const services = createContentAudioServices({ env: key => key === (routed ? 'OPENROUTER_API_KEY' : 'GEMINI_API_KEY') ? 'synthetic-test-only' : undefined, fetcher: network })
+    const audio = { ...prefix, sha256: hash, objectPath: 'fixture' }
+    const request = { requestId: 'test-prefix', requestFingerprint: hash, episode, audio,
+      sourcePolicy: testSource().rights, sourcePolicyHash: hash, signal: new AbortController().signal }
+    const result = await services.transcribe(request)
+    expect(result.audioDurationSeconds).toBeCloseTo(prefix.coverage.endSeconds, 9)
+    expect(result.audioSha256).toBe(hash)
+    const submitted = routed ? (requests[0]!.messages as { content: { input_audio: { data: string } }[] }[])[1]!.content[0]!.input_audio.data :
+      (requests[0]!.contents as { parts: { inlineData: { data: string } }[] }[])[0]!.parts[0]!.inlineData.data
+    const expected = contentMp3PrefixWindow(prefix, 0, prefix.coverage.endSeconds)
+    expect(Buffer.compare(Buffer.from(submitted, 'base64'), Buffer.from(expected.bytes))).toBe(0)
+    expect(createHash('sha256').update(Buffer.from(submitted, 'base64')).digest('hex')).not.toBe(hash)
+    const calls = vi.mocked(network).mock.calls.length
+    await expect(services.transcribe({ ...request, audio: { ...audio, coverage: { ...audio.coverage, frameCount: 999 } } }))
+      .rejects.toMatchObject({ code: 'CONTENT_AUDIO_PREFIX_COVERAGE' })
+    expect(network).toHaveBeenCalledTimes(calls)
+    await services.dispose()
   })
   it('enforces the 600 second cap at a complete frame boundary, not a proportional byte position', () => {
     const one = frame(2, 1), bytes = join(...Array.from({ length: 23000 }, () => one)), result = prepare(bytes)
@@ -1339,8 +1442,11 @@ describe('real audio service contract (synthetic transport tests, not acoustic v
     await expect(services.transcribe({requestId:'test',requestFingerprint:hash,episode,audio:{bytes,sha256:hash,mimeType:'audio/wav',objectPath:'fixture'},sourcePolicy:testSource().rights,sourcePolicyHash:hash,signal:new AbortController().signal})).rejects.toMatchObject({code:'CONTENT_AUDIO_CREDENTIAL_REQUIRED'})
     expect(network).not.toHaveBeenCalled()
   })
-  it('uses the existing OpenRouter key with a live-capability-checked audio model, actual clipped bytes and reported costs', async () => {
-    const bytes=pcmFixture(90),hash=createHash('sha256').update(bytes).digest('hex')
+  it.each(['pcm', 'mpeg-prefix'])('validates capabilities, %s clip bytes and reported costs with synthetic OpenRouter transport', async format => {
+    const prefix = format === 'mpeg-prefix' ? mp3PrefixFixture() : null
+    const bytes=prefix?.bytes ?? pcmFixture(90),hash=createHash('sha256').update(bytes).digest('hex')
+    const audio = { bytes, sha256: hash, mimeType: prefix?.mimeType ?? 'audio/wav', objectPath: 'fixture',
+      ...(prefix ? { coverage: prefix.coverage } : {}) }
     const opts=options();await runContentRefresh(opts)
     const segment=[...opts.adminClient.records.values()][0]!.segment
     const calls:{url:string;body:unknown}[]=[]
@@ -1352,17 +1458,23 @@ describe('real audio service contract (synthetic transport tests, not acoustic v
       return new Response(JSON.stringify({id:'test-router-audio',model:'google/gemini-2.5-flash',choices:[{finish_reason:'stop',message:{content:JSON.stringify({inspectedStartSeconds:0,inspectedEndSeconds:60,wholeIntervalInspected:true,heard:phrases.map((body,i)=>({startTime:i*10,endTime:(i+1)*10,body})),facts:selected,thirdParty:'none-detected',lesson:{question:'What did they cook?',answer:'Dinner.',keywords:['dinner'],chunks:[{text:'come over',meaningEn:'visit',meaningZh:'来做客',example:'Come over tomorrow.'}]}})}}],usage:{total_tokens:1234,cost:0.008}}))
     }) as typeof fetch
     const services=createContentAudioServices({env:name=>name==='OPENROUTER_API_KEY'?'synthetic-router-credential':undefined,fetcher:network,now:()=>now})
-    const result=await services.analyzeAudio({requestId:'test',requestFingerprint:hash,segment,audio:{bytes,sha256:hash,mimeType:'audio/wav',objectPath:'fixture'},interval:{startSeconds:0,endSeconds:60},sourcePolicy:testSource().rights,sourcePolicyHash:hash,signal:new AbortController().signal})
+    const request = {requestId:'test',requestFingerprint:hash,segment,audio,interval:{startSeconds:0,endSeconds:60},sourcePolicy:testSource().rights,sourcePolicyHash:hash,signal:new AbortController().signal}
+    const result=await services.analyzeAudio(request)
     expect(calls.map(c=>c.url)).toEqual(['https://openrouter.ai/api/v1/models','https://openrouter.ai/api/v1/chat/completions'])
     const requestBody=calls[1]!.body as {messages:{content:unknown}[]}
     const audioPart=(requestBody.messages[1]!.content as {type:string;input_audio:{data:string;format:string}}[])[0]!
     expect(audioPart.type).toBe('input_audio')
     const submitted=new Uint8Array(Buffer.from(audioPart.input_audio.data,'base64'))
-    expect(contentAudioDuration(submitted,'audio/wav')).toBe(60)
-    expect(result.audioEvidence).toMatchObject({originalAudioSha256:hash,submittedStartSeconds:0,submittedEndSeconds:60,timingBasis:'pcm-sample-count'})
+    const expected = contentStoredAudioWindow(audio, 0, 60)
+    expect(Buffer.compare(Buffer.from(submitted), Buffer.from(expected.bytes))).toBe(0)
+    if (format === 'pcm') expect(contentAudioDuration(submitted,'audio/wav')).toBe(60)
+    expect(result.audioEvidence).toMatchObject({originalAudioSha256:hash,submittedStartSeconds:expected.originSeconds,submittedEndSeconds:expected.endSeconds,timingBasis:expected.timingBasis})
     expect(result.audioEvidence?.submittedAudioSha256).not.toBe(hash)
     expect(result.facts.transcriptAlignment).toMatchObject({status:'observed',value:1})
     expect(result.usage.costUsd).toBe(0.008)
+    await expect(services.analyzeAudio({ ...request, interval: { startSeconds: 61, endSeconds: 150 } }))
+      .rejects.toMatchObject({ code: 'CONTENT_AUDIO_INTERVAL' })
+    expect(calls).toHaveLength(2)
   })
 })
 
