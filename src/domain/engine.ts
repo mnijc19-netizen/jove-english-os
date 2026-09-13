@@ -1,6 +1,6 @@
 import { skillNames, type DailyPlan, type Material, type Profile, type ReviewCard, type Skill, type SkillName, type StudyEvent, type PlanTask } from './types'
 import { startedTaskIds, planLongitudinal } from './longitudinal'
-import { externalLessonCandidates } from '../content/external'
+import { externalLessonCandidates, externalCatalogFresh } from '../content/external'
 
 // Scores, strengths, confidence and fatigue use 0..1, matching the shared UI/provider contract.
 const day = 86_400_000
@@ -138,12 +138,13 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
     return interest - Math.abs(m.difficulty - targetDifficulty) * 4 - exposure * 0.5
   }
   const approved = materials.filter(m => m.approved)
-  const approachable = approved.filter(m => m.difficulty <= Math.min(1, targetDifficulty + 0.25))
+  const availableMaterials = approved.filter(m => externalCatalogFresh(m, now))
+  const approachable = availableMaterials.filter(m => m.difficulty <= Math.min(1, targetDifficulty + 0.25))
   // Screened, approachable human speech leads normal listening. A hard authentic
   // recording does not displace a comprehensible bridge simply for being human.
   const authentic = approachable.filter(m => m.authenticPlayback && !m.synthetic)
   const external = externalLessonCandidates(approachable, ordered, now)
-  const listeningPool = authentic.length ? authentic : external.length ? external : approachable.length ? approachable : approved
+  const listeningPool = authentic.length ? authentic : external.length ? external : approachable.length ? approachable : availableMaterials
   const boundMaterialId = today?.tasks.find(task => !task.done && !task.optional && task.kind === 'listen')?.materialId ?? today?.tasks.find(task => !task.done && !task.optional && task.materialId)?.materialId
   const material = approved.find(item => item.id === boundMaterialId) ?? [...listeningPool].sort((a, b) =>
     (approachable.length ? rank(b) - rank(a) : Math.abs(a.difficulty - targetDifficulty) - Math.abs(b.difficulty - targetDifficulty)) || order(a.id, b.id))[0]

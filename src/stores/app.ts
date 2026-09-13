@@ -27,7 +27,7 @@ import { OpenRouterProvider } from "../ai/provider";
 import { profileSchema, settingsSchema } from "../db/schema";
 import { useCloud } from "./cloud";
 import { CloudProvider, routeProvider } from "../ai/cloud-provider";
-import { flushContentHistory, prepareContentAudio, refreshContentLessons } from "../cloud/content";
+import { flushContentHistory, prepareContentAudio, refreshContentLessons, refreshExternalCourseCatalog } from "../cloud/content";
 
 export const useApp = defineStore("app", () => {
   const ready = ref(false),
@@ -167,7 +167,15 @@ export const useApp = defineStore("app", () => {
     contentIdentity = key; lastContentAttempt = Date.now(); contentState.value = 'loading';
     const current = () => !controller.signal.aborted && contentController === controller && cloud.userId === JSON.parse(key)[0];
     const job = (async () => {
+      let hasCatalog = false;
       try {
+        // Independent delivery: the legacy clip/history route may be unavailable.
+        try {
+          const catalog = await refreshExternalCourseCatalog(controller.signal);
+          if (!current()) return;
+          hasCatalog = catalog.length > 0;
+          if (hasCatalog) await refresh();
+        } catch { if (!current()) return; }
         await flushContentHistory(events.value, materials.value, controller.signal);
         const targetDifficulty = planLongitudinal({ profile: profile.value, skills: skills.value,
           cards: cards.value, events: events.value, materials: materials.value, now: Date.now() }).adjustments.targetDifficulty;
@@ -179,8 +187,8 @@ export const useApp = defineStore("app", () => {
         const selectedIds = new Set(plan.value.tasks.filter(t => !t.done && ['listen', 'shadow'].includes(t.kind)).map(t => t.materialId));
         for (const material of materials.value.filter(m => selectedIds.has(m.id) && m.authenticPlayback).slice(0, 2))
           await prepareContentAudio(material, controller.signal);
-        if (current()) contentState.value = selected.length || materials.value.some(m => m.authenticPlayback) ? 'ready' : 'empty';
-      } catch { if (current()) contentState.value = online.value ? 'error' : 'offline'; }
+        if (current()) contentState.value = hasCatalog || selected.length || materials.value.some(m => m.authenticPlayback) ? 'ready' : 'empty';
+      } catch { if (current()) contentState.value = hasCatalog ? 'ready' : online.value ? 'error' : 'offline'; }
       finally { if (contentController === controller) contentJob = undefined; }
     })();
     contentJob = job;

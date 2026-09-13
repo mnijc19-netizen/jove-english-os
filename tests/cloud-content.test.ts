@@ -3,7 +3,8 @@ import Dexie from 'dexie'
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db } from '../src/db/db'
-import { contentAudioIsTransient, materialFromContentLesson, prepareContentAudio, refreshContentLessons, flushContentHistory } from '../src/cloud/content'
+import { contentAudioIsTransient, materialFromContentLesson, prepareContentAudio, refreshContentLessons, refreshExternalCourseCatalog, flushContentHistory } from '../src/cloud/content'
+import { externalMaterials, externalLessonCandidates, EXTERNAL_CATALOG_MAX_AGE } from '../src/content/external'
 import { defaultProfile, defaultSettings, type StudyEvent } from '../src/domain/types'
 import { demoMaterials } from '../src/content/materials'
 import { makePlan } from '../src/domain/engine'
@@ -42,6 +43,12 @@ const json = (value: unknown, status = 200) => new Response(JSON.stringify(value
 const signed = () => ({ ...playback, segmentId: segment,
   url: `https://cloud.example.test/storage/v1/object/sign/jove-content-audio/${path}?token=fixture-signed-only`, expiresAt: Date.now() + 300_000 })
 const audio = () => new Response(bytes, { headers: { 'Content-Type': 'audio/wav', 'Content-Length': String(bytes.length) } })
+function externalCatalog() {
+  const legacy: Record<number, string> = { 1: 'external-voa-welcome', 3: 'external-voa-im-here', 10: 'external-voa-directions' }
+  return { version: 1, sourceId: 'voa-level1', language: 'en', checkedAt: Date.now(), revision: 'a'.repeat(64),
+    entries: Array.from({ length: 52 }, (_, i) => ({ position: i + 1,
+      url: externalMaterials.find(m => m.id === legacy[i + 1])?.sourceUrl ?? `https://learningenglish.voanews.com/a/lesson-${i + 1}/${9000000 + i}.html` })) }
+}
 let fetcher: ReturnType<typeof vi.fn>
 beforeEach(async () => {
   await db.delete(); await db.open()
@@ -59,6 +66,85 @@ beforeEach(async () => {
 afterEach(async () => { expect(auth.listeners.size).toBe(0); vi.restoreAllMocks(); vi.unstubAllGlobals(); await db.delete() })
 
 describe('automatic authenticated lesson delivery', () => {
+  it('delivers the complete external reserve idempotently without audio or skill evidence', async () => {
+    const retained = { ...structuredClone(externalMaterials[0]!), title: 'My retained title' }
+    await db.materials.add(retained)
+    fetcher.mockImplementation(async (_url, init) => {
+      expect(JSON.parse(String(init.body))).toEqual({ action: 'external-catalog' })
+      return json({ catalog: externalCatalog() })
+    })
+    expect(await refreshExternalCourseCatalog()).toHaveLength(52)
+    expect(await refreshExternalCourseCatalog()).toHaveLength(52)
+    expect(await db.materials.count()).toBe(52)
+    const saved = await db.materials.get(retained.id)
+    expect(saved!.externalStudy!.checkedAt).toBeGreaterThanOrEqual(retained.externalStudy!.checkedAt)
+    expect({ ...saved, externalStudy: retained.externalStudy }).toEqual(retained)
+    expect(await db.audio.count()).toBe(0); expect(await db.events.count()).toBe(0); expect(await db.cards.count()).toBe(0)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+  it.each(['stale', 'future', 'incomplete', 'unsafe-url', 'wrong-language'])('preserves saved materials when catalog is %s', async kind => {
+    const retained = structuredClone(externalMaterials[0]!), catalog = externalCatalog()
+    await db.materials.add(retained)
+    if (kind === 'stale') catalog.checkedAt -= 91 * 86_400_000
+    if (kind === 'future') catalog.checkedAt += 600000
+    if (kind === 'incomplete') catalog.entries.pop()
+    if (kind === 'unsafe-url') catalog.entries[1]!.url = 'https://evil.example/a/page/1.html'
+    if (kind === 'wrong-language') catalog.language = 'ja'
+    fetcher.mockResolvedValue(json({ catalog }))
+    await expect(refreshExternalCourseCatalog()).rejects.toBeDefined()
+    expect(await db.materials.toArray()).toEqual([retained])
+  })
+  it('keeps the external reserve when the server has no fresh snapshot', async () => {
+    await db.materials.bulkAdd(structuredClone(externalMaterials))
+    fetcher.mockResolvedValue(json({ catalog: null }))
+    expect(await refreshExternalCourseCatalog()).toEqual([])
+    expect(await db.materials.count()).toBe(externalMaterials.length)
+  })
+  it('expires catalog-only assignments while retaining work, and restores eligibility on a fresh snapshot', async () => {
+    const initial = externalCatalog(), later = initial.checkedAt + EXTERNAL_CATALOG_MAX_AGE + 1
+    fetcher.mockResolvedValueOnce(json({ catalog: initial }))
+    await refreshExternalCourseCatalog()
+    const id = 'external-voa-level1-2'
+    await db.materials.update(id, { title: 'My saved lesson', transcript: 'My own notes' })
+    const saved = (await db.materials.get(id))!
+    vi.spyOn(Date, 'now').mockReturnValue(later)
+    fetcher.mockResolvedValueOnce(json({ catalog: null }))
+    await refreshExternalCourseCatalog()
+    const expired = await db.materials.toArray()
+    expect(expired).toHaveLength(52)
+    expect(externalLessonCandidates([saved], [], later)).toEqual([])
+    const firstPlan = makePlan(defaultProfile(), [], [], [], [saved], undefined, initial.checkedAt)
+    const assigned = firstPlan.tasks.find(t => t.kind === 'listen')!
+    expect(assigned.materialId).toBe(id)
+    const freshPlan = makePlan(defaultProfile(), [], [], [], [saved], undefined, later)
+    expect(freshPlan.tasks.some(t => t.materialId === id)).toBe(false)
+    const retainedPlan = makePlan(defaultProfile(), [], [], [], expired, { ...firstPlan, date: freshPlan.date }, later)
+    expect(retainedPlan.tasks.find(t => t.id === assigned.id)?.materialId).toBe(id)
+    fetcher.mockResolvedValueOnce(json({ catalog: { ...initial, checkedAt: later } }))
+    await refreshExternalCourseCatalog()
+    const renewed = (await db.materials.get(id))!
+    expect({ ...renewed, externalStudy: saved.externalStudy }).toEqual(saved)
+    expect(externalLessonCandidates([renewed], [], later)).toEqual([renewed])
+  })
+  it('rejects late catalog responses after an account change', async () => {
+    fetcher.mockImplementation(async () => {
+      for (const listener of auth.listeners) listener('SIGNED_IN', { user: { id: 'content-owner-b' } } as Session)
+      return json({ catalog: externalCatalog() })
+    })
+    await expect(refreshExternalCourseCatalog()).rejects.toMatchObject({ code: 'ACCOUNT_REQUIRED' })
+    expect(await db.materials.count()).toBe(0)
+  })
+  it('rolls back all catalog inserts on an account change inside the last insert', async () => {
+    fetcher.mockResolvedValue(json({ catalog: externalCatalog() }))
+    const add = db.materials.add.bind(db.materials)
+    vi.spyOn(db.materials, 'add').mockImplementation(material => add(material).then(id => {
+      if (material.id === 'external-voa-level1-52') for (const listener of auth.listeners)
+        listener('SIGNED_IN', { user: { id: 'content-owner-b' } } as Session)
+      return id
+    }))
+    await expect(refreshExternalCourseCatalog()).rejects.toMatchObject({ code: 'ACCOUNT_REQUIRED' })
+    expect(await db.materials.count()).toBe(0)
+  })
   it('releases the auth subscription on cancellation even while a later database transaction is still pending', async () => {
     let release!: () => void, entered!: () => void
     const started = new Promise<void>(resolve => { entered = resolve })

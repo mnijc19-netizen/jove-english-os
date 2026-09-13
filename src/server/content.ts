@@ -3,6 +3,8 @@ import { z } from 'zod'
 import { authenticatedOwner, boundedBody, corsHeaders, digestRequest, GatewayError, jsonResponse, reserve, safeFailure, settle,
   type OwnerContext, type ServerEnvironment } from './gateway'
 import { createContentAudioServices, inspectContentProviderAccess } from './content-audio'
+import { readExternalCatalog, refreshExternalCatalog } from './external-catalog'
+import type { ContentFetcher } from './content-network'
 import { validateSourceUrl } from '../content/pipeline'
 import { recordContentLearningUse, runContentRefresh, selectAndPersistContentLessons, type ContentBudget, type ContentRefreshOptions, type PersistedContentSegment } from './content-worker'
 
@@ -14,13 +16,16 @@ const profileSchema = z.object({ targetDifficulty: z.number().min(0).max(1), fat
 const segmentId = z.string().regex(/^authentic-[a-f0-9]{64}$/u)
 const providerStatusPayload = z.object({ action: z.literal('provider-status') }).strict()
 // Job authority cannot select arbitrary owner actions, even if added later.
-const jobPayload = z.union([z.object({}).strict().transform(() => ({ action: 'refresh' as const })), providerStatusPayload])
+const catalogRefreshPayload = z.object({ action: z.literal('catalog-refresh') }).strict()
+const jobPayload = z.union([z.object({}).strict().transform(() => ({ action: 'refresh' as const })), providerStatusPayload, catalogRefreshPayload])
 const payload = z.discriminatedUnion('action', [
   z.object({ action: z.literal('lessons'), profile: profileSchema, limit: z.number().int().min(1).max(10).optional(), requestId: z.string().min(1).max(80).optional() }).strict(),
   z.object({ action: z.literal('audio'), segmentId }).strict(),
   z.object({ action: z.literal('history'), segmentId, eventId: z.string().min(1).max(100), event: z.enum(['started','completed','skipped']) }).strict(),
   z.object({ action: z.literal('status') }).strict(),
   providerStatusPayload,
+  z.object({ action: z.literal('external-catalog') }).strict(),
+  catalogRefreshPayload,
   z.object({ action: z.literal('refresh') }).strict(),
 ])
 export function createContentBudget(context: OwnerContext): ContentBudget {
@@ -96,6 +101,7 @@ export function createContentHandler(env: ServerEnvironment, dependencies: {
   authenticateJob?: typeof scheduledOwner
   workerOptions?: (context: OwnerContext) => Partial<ContentRefreshOptions>
   providerFetch?: typeof fetch
+  catalogFetcher?: ContentFetcher
   now?: () => number
 } = {}): (request: Request) => Promise<Response> {
   const now = dependencies.now ?? Date.now
@@ -115,6 +121,9 @@ export function createContentHandler(env: ServerEnvironment, dependencies: {
       const parsed = (scheduled ? jobPayload : payload).safeParse(raw)
       if (!parsed.success) throw new GatewayError(400, scheduled ? 'CONTENT_JOB_REQUEST' : 'CONTENT_REQUEST', 'Invalid content request.')
       const body = parsed.data
+      if (body.action === 'external-catalog') return jsonResponse(await readExternalCatalog(context.admin), headers)
+      if (body.action === 'catalog-refresh') return jsonResponse(await refreshExternalCatalog(context.admin,
+        { fetcher: dependencies.catalogFetcher, now, signal: request.signal }), headers)
       if (body.action === 'provider-status') return jsonResponse(await inspectContentProviderAccess({
         env, fetcher: dependencies.providerFetch, now, signal: request.signal,
       }), headers)

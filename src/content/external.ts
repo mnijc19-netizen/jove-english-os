@@ -34,9 +34,24 @@ export function externalPracticeReady(draft: { listened: boolean; answer: string
   return draft.listened && !!draft.answer.trim() && !!draft.expression.trim() && !!draft.example.trim() && !!draft.audioId
 }
 
+function voaCoursePosition(material: Material): number | undefined {
+  const legacy: Record<string, number> = { 'external-voa-welcome': 1, 'external-voa-im-here': 3, 'external-voa-directions': 10 }
+  return legacy[material.id] ?? (/^external-voa-level1-([1-9]|[1-4][0-9]|5[0-2])$/u.exec(material.id)?.[1]
+    ? Number(material.id.slice('external-voa-level1-'.length)) : undefined)
+}
+
+export const EXTERNAL_CATALOG_MAX_AGE = 90 * 86_400_000
+/** Catalog-only links expire for new assignments, not for saved work or static seeds. */
+export function externalCatalogFresh(material: Material, now: number): boolean {
+  if (!/^external-voa-level1-([1-9]|[1-4][0-9]|5[0-2])$/u.test(material.id)) return true
+  const checkedAt = material.externalStudy?.checkedAt
+  return typeof checkedAt === 'number' && Number.isFinite(checkedAt)
+    && checkedAt <= now + 300_000 && now - checkedAt < EXTERNAL_CATALOG_MAX_AGE
+}
+
 /** Participation history selects new input; it never awards mastery or changes FSRS. */
 export function externalLessonCandidates(materials: Material[], events: StudyEvent[], now: number): Material[] {
-  const eligible = materials.filter(m => m.approved && m.externalStudy && !m.synthetic)
+  const eligible = materials.filter(m => m.approved && m.externalStudy && !m.synthetic && externalCatalogFresh(m, now))
   const ids = new Set(eligible.map(m => m.id))
   const lastPractice = new Map<string, number>()
   for (const event of events) {
@@ -49,7 +64,13 @@ export function externalLessonCandidates(materials: Material[], events: StudyEve
     lastPractice.set(data.materialId, Math.max(lastPractice.get(data.materialId) ?? 0, event.timestamp))
   }
   const unseen = eligible.filter(m => !lastPractice.has(m.id))
-  if (unseen.length) return unseen
+  if (unseen.length) {
+    const positions = unseen.map(voaCoursePosition).filter((n): n is number => n !== undefined)
+    const next = positions.length ? Math.min(...positions) : undefined
+    // Editorial sequence within this beginner course, not alphabetical ID order
+    // or a claim that submitting the previous lesson proves mastery.
+    return unseen.filter(m => voaCoursePosition(m) === undefined || voaCoursePosition(m) === next)
+  }
   // Once the eligible reserve is exhausted, revisit the least recently practised
   // lesson. No new-content, verified-comprehension or proficiency claim is made.
   let oldest = Infinity

@@ -5,6 +5,8 @@ import { authenticPlaybackSchema, materialSchema } from '../db/schema'
 import type { AuthenticPlayback, Material, StudyEvent } from '../domain/types'
 import { abortable, checkAbort, readBytes, readJson, withDeadline } from '../ai/transport'
 import { ProviderError } from '../ai/errors'
+import { externalCatalogSchema, materialFromExternalCatalog } from '../content/external-catalog'
+import { EXTERNAL_CATALOG_MAX_AGE } from '../content/external'
 
 const segmentIdSchema = z.string().regex(/^authentic-[a-f0-9]{64}$/u)
 const playbackWireSchema = z.object({ ...authenticPlaybackSchema.shape,
@@ -119,6 +121,37 @@ export async function refreshContentLessons(profile: ContentProfile, signal?: Ab
     })
     context.assertLive(); checkAbort(scoped)
     return materials
+    } finally { context.dispose() }
+  })
+}
+
+/** Separate page-only delivery; failed acoustic selection cannot block this catalog. */
+export async function refreshExternalCourseCatalog(signal?: AbortSignal): Promise<Material[]> {
+  return withDeadline(signal, 25_000, async scoped => {
+    const context = await access(scoped)
+    try {
+      scoped = AbortSignal.any([scoped, context.signal])
+      const response = z.strictObject({ catalog: externalCatalogSchema.nullable() })
+        .parse(await request(context, { action: 'external-catalog' }, scoped))
+      if (!response.catalog) return []
+      if (response.catalog.checkedAt > Date.now() + 300_000 || response.catalog.checkedAt <= Date.now() - EXTERNAL_CATALOG_MAX_AGE) throw invalid()
+      const materials = materialFromExternalCatalog(response.catalog).map(m => materialSchema.parse(m))
+      await context.assertCurrent(); context.assertLive(); checkAbort(scoped)
+      await db.transaction('rw', [db.materials, db.syncMeta], async () => {
+        if ((await db.syncMeta.get('owner'))?.value !== context.ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
+        for (const material of materials) {
+          const previous = await db.materials.get(material.id)
+          // Existing user edits, transcripts, drafts and source identities are never overwritten.
+          if (previous) {
+            if (previous.sourceUrl !== material.sourceUrl || !previous.externalStudy) throw invalid()
+            // Only source freshness advances; all learner-authored fields and creation time stay intact.
+            await db.materials.update(previous.id, { 'externalStudy.checkedAt': Math.max(previous.externalStudy.checkedAt, response.catalog!.checkedAt) })
+          } else await db.materials.add(material)
+          context.assertLive(); checkAbort(scoped)
+        }
+      })
+      context.assertLive(); checkAbort(scoped)
+      return materials
     } finally { context.dispose() }
   })
 }

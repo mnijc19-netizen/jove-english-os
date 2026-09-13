@@ -54,14 +54,14 @@ try {
   const expected = readdirSync(resolve(root, 'supabase/migrations')).filter(file => /^\d+_.+\.sql$/u.test(file)).map(file => file.split('_')[0]).sort()
   const actual = sql('select version from supabase_migrations.schema_migrations order by version;', 'migration readback').trim().split(/\r?\n/u)
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('Local migration readback does not match the current source set')
-  for (const name of ['sync', 'services', 'content', 'speech']) {
+  for (const name of ['sync', 'services', 'content', 'speech', 'external-catalog']) {
     const body = readFileSync(resolve(root, `supabase/tests/${name}.test.sql`), 'utf8')
     if (/^\s*commit\b/imu.test(body)) throw new Error('A local verification fixture may not commit')
     const statements = body.replace(/^\s*(?:begin|rollback);\s*$/gimu, '')
     sql(`BEGIN;\n${statements}\nROLLBACK;`, `${name} transactional assertions`)
     process.stdout.write(`Local ${name} SQL assertions passed; fixture transaction rolled back.\n`)
   }
-  process.stdout.write(`Dedicated Jove local backend verified: ${expected.length} migrations, four SQL suites. This is not production acceptance.\n`)
+  process.stdout.write(`Dedicated Jove local backend verified: ${expected.length} migrations, five SQL suites. This is not production acceptance.\n`)
 } catch (error) {
   // Only locally authored error messages are emitted; parse errors are sanitized.
   process.stderr.write(error instanceof Error && /^(?:Dedicated|Refusing|Local|A local)/u.test(error.message)

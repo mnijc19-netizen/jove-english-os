@@ -7,10 +7,11 @@ import { useApp } from '../src/stores/app'
 import { defaultProfile } from '../src/domain/types'
 import { demoMaterials } from '../src/content/materials'
 import { makePlan } from '../src/domain/engine'
+import { externalMaterials } from '../src/content/external'
 
-const services = vi.hoisted(() => ({ refresh: vi.fn(), audio: vi.fn(), history: vi.fn() }))
+const services = vi.hoisted(() => ({ refresh: vi.fn(), catalog: vi.fn(), audio: vi.fn(), history: vi.fn() }))
 const state = vi.hoisted(() => ({ cloud: null as null | { configured: boolean; userId: string; start: () => Promise<void> } }))
-vi.mock('../src/cloud/content', () => ({ refreshContentLessons: services.refresh, prepareContentAudio: services.audio, flushContentHistory: services.history }))
+vi.mock('../src/cloud/content', () => ({ refreshContentLessons: services.refresh, refreshExternalCourseCatalog: services.catalog, prepareContentAudio: services.audio, flushContentHistory: services.history }))
 vi.mock('../src/stores/cloud', () => ({ useCloud: () => state.cloud }))
 vi.mock('../src/cloud/client', () => ({ cloudClient: null, publicCloudConfig: { url: '', publishableKey: '' } }))
 const segmentId = `authentic-${'a'.repeat(64)}`
@@ -29,6 +30,7 @@ beforeEach(async () => {
   vi.stubGlobal('navigator', { onLine: true })
   vi.stubGlobal('matchMedia', () => ({ matches: false }))
   services.history.mockReset().mockResolvedValue(undefined)
+  services.catalog.mockReset().mockResolvedValue([])
   services.audio.mockReset().mockResolvedValue(new Blob(['transport fixture']))
   services.refresh.mockReset().mockImplementation(async () => { await db.materials.put(structuredClone(material)); return [material] })
   app = useApp()
@@ -41,6 +43,22 @@ async function signIn() {
   await app.refresh(); state.cloud!.userId = 'owner-a'; await nextTick()
 }
 describe('Today automatic content coordination', () => {
+  it('delivers page-only courses even when legacy audio-history synchronization fails', async () => {
+    const added = { ...structuredClone(externalMaterials[0]!), id: 'external-voa-level1-2',
+      title: 'New catalog course', sourceUrl: 'https://learningenglish.voanews.com/a/lesson-two/12345.html' }
+    services.catalog.mockImplementation(async () => { await db.materials.add(added); return [added] })
+    services.history.mockRejectedValue(new Error('legacy history unavailable'))
+    await signIn(); await vi.waitFor(() => expect(app.contentState).toBe('ready'))
+    expect(app.materials.some(m => m.id === added.id)).toBe(true)
+    expect(services.refresh).not.toHaveBeenCalled(); expect(services.audio).not.toHaveBeenCalled()
+    expect(await db.events.count()).toBe(0)
+  })
+  it('keeps legacy lesson delivery when the catalog endpoint is unavailable', async () => {
+    services.catalog.mockRejectedValue(new Error('catalog unavailable'))
+    await signIn(); await vi.waitFor(() => expect(app.contentState).toBe('ready'))
+    expect(app.materials.some(m => m.id === segmentId)).toBe(true)
+    expect(services.refresh).toHaveBeenCalledOnce()
+  })
   it('a delayed route start cannot overwrite newer completed work and optional saved assignments', async () => {
     await db.profiles.put({ ...defaultProfile(), onboarded: true, dailyMinutes: 45 }); await app.refresh()
     const initial = structuredClone(JSON.parse(JSON.stringify(app.plan))), first = initial.tasks.find((task: { done: boolean; optional?: boolean }) => !task.done && !task.optional)!

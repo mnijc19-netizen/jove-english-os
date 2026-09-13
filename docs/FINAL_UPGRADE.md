@@ -4,7 +4,7 @@
 
 在不推翻现有 Vue、页面和整体 UI 的前提下，将网站升级为个人英语＋日语学习系统 Jove Language OS。先补齐英语长期外链课程供给，再实现语言隔离，最后建设和验收完整日语路径。共用账号、同步、录音和学习工具；两种语言的能力、课程、词汇、错题、复习和进度独立。课程以筛选后的真人原站材料为主，不批量搬运音视频。系统按能力、兴趣、时间和精力自动排课，保留输入、主动回忆、输出、针对性纠错、间隔复习和新场景检验。AI 用于辅助解释、对话和语言纠错，不能成为基础排课、保存和复习的单点故障；不要求自动声学发音/韵律评分。日语专门处理假名、汉字读音、词语切分、长音/促音/拨音、音高意识、助词、活用和语体。保留原网址、英语数据及离线能力，验证安卓、苹果和电脑的数据连续性，分阶段审查、测试、上线。遇到缺权限、外部服务限制或同类失败两次且没有新证据时，及时报告具体障碍、影响和替代路线，不盲目消耗额度；不把局部交付说成全部完成。
 
-This owner-approved objective supersedes incompatible historical English-only/acoustic/bulk-hosting requirements and the stale paused Codex goal-card text. Project documentation does not itself edit or resume that UI goal; the current tool surface can read the card or mark terminal status, not replace its objective. Never mark the unfinished old goal complete merely to create a replacement.
+This owner-approved objective supersedes incompatible historical English-only/acoustic/bulk-hosting requirements. The current Codex goal-card readback now confirms this multilingual objective and active status; the earlier paused-card limitation is historical. Never mark this unfinished goal complete merely to replace it.
 
 ### Ordered implementation and acceptance
 
