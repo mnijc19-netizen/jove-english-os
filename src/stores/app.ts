@@ -36,6 +36,7 @@ export const useApp = defineStore("app", () => {
     keySet = ref(false);
   const providerMode = ref<'account' | 'byok'>('account');
   const contentState = ref<'idle' | 'loading' | 'ready' | 'empty' | 'offline' | 'error'>('idle');
+  const catalogState = ref<'idle' | 'loading' | 'ready' | 'empty' | 'offline' | 'error'>('idle');
   let contentJob: Promise<void> | undefined, contentController: AbortController | undefined;
   let contentIdentity = '', lastContentAttempt = 0;
   const profile = ref<Profile>(defaultProfile()),
@@ -156,15 +157,15 @@ export const useApp = defineStore("app", () => {
   }
   async function loadContent(force = false): Promise<void> {
     const cloud = useCloud();
-    if (!ready.value || !profile.value.onboarded || !cloud.configured || !cloud.userId) {
-      contentController?.abort(); contentIdentity = ''; contentState.value = 'idle'; return;
+    if (!ready.value || !cloud.configured || !cloud.userId) {
+      contentController?.abort(); contentIdentity = ''; contentState.value = 'idle'; catalogState.value = 'idle'; return;
     }
-    if (!online.value) { contentState.value = 'offline'; return; }
-    const key = JSON.stringify([cloud.userId, today.value, profile.value.fatigue, profile.value.interests]);
+    if (!online.value) { contentState.value = 'offline'; catalogState.value = 'offline'; return; }
+    const key = JSON.stringify([cloud.userId, today.value, profile.value.fatigue, profile.value.interests, profile.value.onboarded]);
     if (key === contentIdentity && (contentJob || (!force && Date.now() - lastContentAttempt < 900_000))) return contentJob;
     contentController?.abort();
     const controller = new AbortController(); contentController = controller;
-    contentIdentity = key; lastContentAttempt = Date.now(); contentState.value = 'loading';
+    contentIdentity = key; lastContentAttempt = Date.now(); contentState.value = 'loading'; catalogState.value = 'loading';
     const current = () => !controller.signal.aborted && contentController === controller && cloud.userId === JSON.parse(key)[0];
     const job = (async () => {
       let hasCatalog = false;
@@ -175,7 +176,12 @@ export const useApp = defineStore("app", () => {
           if (!current()) return;
           hasCatalog = catalog.length > 0;
           if (hasCatalog) await refresh();
-        } catch { if (!current()) return; }
+          if (!current()) return;
+          catalogState.value = hasCatalog ? 'ready' : 'empty';
+        } catch { if (!current()) return; catalogState.value = online.value ? 'error' : 'offline'; }
+        // The shared page-only directory needs no learner diagnosis. Personalized
+        // legacy selection still waits for setup; never mark setup done for access.
+        if (!profile.value.onboarded) { contentState.value = catalogState.value; return; }
         await flushContentHistory(events.value, materials.value, controller.signal);
         const targetDifficulty = planLongitudinal({ profile: profile.value, skills: skills.value,
           cards: cards.value, events: events.value, materials: materials.value, now: Date.now() }).adjustments.targetDifficulty;
@@ -461,6 +467,7 @@ export const useApp = defineStore("app", () => {
     provider,
     generatedSpeech,
     contentState,
+    catalogState,
     loadContent,
   };
 });

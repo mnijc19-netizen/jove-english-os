@@ -1,5 +1,67 @@
 import { test, expect, records } from './browser-fixtures'
 import type { StudyEvent, StudySession } from '../../src/domain/types'
+import { externalMaterials } from '../../src/content/external'
+
+test.describe('catalog delivery', () => {
+// Route interception must not be shadowed by a service worker. Real PWA/offline
+// lifecycle is covered separately, without this option or mocked cloud routes.
+test.use({ serviceWorkers: 'block' })
+test('signed-in Library loads and retries the directory before initial learning setup', async ({ page }) => {
+  // Only cloud transport/auth are fixtures; use the real store, IndexedDB and UI.
+  // No owner's session, cloud write, publisher media or paid provider is used.
+  const owner = '10000000-0000-4000-8000-000000000001', expires = Math.floor(Date.now() / 1000) + 3600
+  const user = { id: owner, aud: 'authenticated', role: 'authenticated', email: 'catalog@example.invalid',
+    app_metadata: {}, user_metadata: {}, created_at: new Date().toISOString() }
+  const token = [ { alg: 'HS256', typ: 'JWT' }, { sub: owner, exp: expires, aud: 'authenticated' } ]
+    .map(part => Buffer.from(JSON.stringify(part)).toString('base64url')).join('.') + '.fixture-only'
+  await page.addInitScript(session => {
+    localStorage.setItem('jove-auth-session-v1', JSON.stringify(session))
+  }, { access_token: token, refresh_token: 'fixture-only', expires_at: expires, expires_in: 3600, token_type: 'bearer', user })
+  const legacy: Record<number, string> = { 1: 'external-voa-welcome', 3: 'external-voa-im-here', 10: 'external-voa-directions' }
+  const catalog = { version: 1, sourceId: 'voa-level1', language: 'en', checkedAt: Date.now(), revision: 'a'.repeat(64),
+    entries: Array.from({ length: 52 }, (_, i) => ({ position: i + 1,
+      url: externalMaterials.find(m => m.id === legacy[i + 1])?.sourceUrl ?? `https://learningenglish.voanews.com/a/lesson-${i + 1}/${9000000 + i}.html` })) }
+  let attempts = 0, cursor = 0
+  const unexpected: string[] = []
+  await page.route('https://*.supabase.co/**', async route => {
+    const request = route.request(), path = new URL(request.url()).pathname
+    const headers = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info, x-supabase-api-version' }
+    if (request.method() === 'OPTIONS') return route.fulfill({ status: 204, headers })
+    const json = (value: unknown, status = 200) => route.fulfill({ status, headers, contentType: 'application/json', body: JSON.stringify(value) })
+    if (path === '/auth/v1/user') return json(user)
+    if (path === '/rest/v1/app_members') return json([{ user_id: owner }])
+    if (path === '/rest/v1/service_preferences') return json([{ recording_retention: 'minimal' }])
+    if (path === '/rest/v1/sync_operations' || path === '/rest/v1/recording_manifest') return json([])
+    if (path === '/rest/v1/rpc/append_sync_operations') return json(request.postDataJSON().operations.map((op: { id: string }) =>
+      ({ id: op.id, cursor: ++cursor, received_at: new Date().toISOString() })))
+    if (path === '/functions/v1/content' && request.postDataJSON().action === 'external-catalog') {
+      attempts++
+      return attempts === 1 ? json({ error: 'fixture-unavailable' }, 503) : json({ catalog })
+    }
+    unexpected.push(path); return json({ error: 'unexpected-fixture-request' }, 500)
+  })
+  await page.goto('#/library')
+  const status = page.getByRole('status', { name: 'Course directory status' })
+  await expect(status).toContainText('The course directory could not load.')
+  expect((await records(page, 'profiles'))[0]).toMatchObject({ onboarded: false })
+  await page.getByRole('textbox', { name: 'Search materials' }).fill('Everyday English · Lesson 2')
+  await expect(page.getByRole('heading', { name: 'Everyday English · Lesson 2', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Retry course directory' }).click()
+  await expect(status).toContainText('Course directory loaded.')
+  await expect(page.getByRole('heading', { name: 'Everyday English · Lesson 2', exact: true })).toBeVisible()
+  expect((await records(page, 'materials')).filter(m => String(m.id).startsWith('external-voa-'))).toHaveLength(52)
+  await page.reload()
+  await expect(status).toContainText('Course directory loaded.')
+  expect((await records(page, 'profiles'))[0]).toMatchObject({ onboarded: false })
+  expect(await records(page, 'events')).toEqual([])
+  expect(unexpected).toEqual([])
+  await page.getByRole('textbox', { name: 'Search materials' }).fill('Everyday English · Lesson 2')
+  await expect(page.getByRole('heading', { name: 'Everyday English · Lesson 2', exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: test.info().outputPath('catalog-before-setup.png') })
+})
+})
 
 test('external lesson saves a guided draft without media downloads or invented ability', async ({ page }) => {
   const externalRequests: string[] = [], assessments: string[] = []

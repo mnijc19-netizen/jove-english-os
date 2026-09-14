@@ -43,6 +43,59 @@ async function signIn() {
   await app.refresh(); state.cloud!.userId = 'owner-a'; await nextTick()
 }
 describe('Today automatic content coordination', () => {
+  it('loads the course directory after login even while initial learning setup is unfinished', async () => {
+    const added = { ...structuredClone(externalMaterials[0]!), id: 'external-voa-level1-2',
+      title: 'Everyday English · Lesson 2', sourceUrl: 'https://learningenglish.voanews.com/a/lesson-two/12345.html' }
+    services.catalog.mockImplementation(async () => { await db.materials.add(added); return [added] })
+    await db.syncMeta.put({ id: 'owner', value: 'owner-a' })
+    state.cloud!.userId = 'owner-a'; await nextTick(); await app.loadContent()
+    expect(services.catalog).toHaveBeenCalledOnce()
+    expect(app.catalogState).toBe('ready')
+    expect(app.materials.some(m => m.id === added.id)).toBe(true)
+    expect(app.profile.onboarded).toBe(false)
+    expect(services.history).not.toHaveBeenCalled()
+    expect(services.refresh).not.toHaveBeenCalled()
+    expect(services.audio).not.toHaveBeenCalled()
+    expect(await db.events.count()).toBe(0)
+  })
+  it('starts personalized selection when setup finishes inside the catalog refresh window', async () => {
+    await db.syncMeta.put({ id: 'owner', value: 'owner-a' })
+    state.cloud!.userId = 'owner-a'; await nextTick(); await app.loadContent()
+    expect(services.catalog).toHaveBeenCalledOnce()
+    expect(services.refresh).not.toHaveBeenCalled()
+    await db.profiles.put({ ...defaultProfile(), onboarded: true }); await app.refresh(); await nextTick(); await app.loadContent()
+    expect(services.refresh).toHaveBeenCalledOnce()
+    expect(app.contentState).toBe('ready')
+  })
+  it('shows a catalog failure separately from successful legacy lessons and recovers on explicit retry', async () => {
+    services.catalog.mockRejectedValueOnce(new Error('catalog unavailable')).mockResolvedValueOnce([externalMaterials[0]!])
+    await signIn(); await vi.waitFor(() => expect(app.contentState).toBe('ready'))
+    expect(app.catalogState).toBe('error')
+    await app.loadContent(true)
+    expect(app.catalogState).toBe('ready')
+    expect(services.catalog).toHaveBeenCalledTimes(2)
+  })
+  it('keeps the background check loading after catalog failure until legacy work settles', async () => {
+    let release!: () => void
+    services.catalog.mockRejectedValueOnce(new Error('catalog unavailable'))
+    services.history.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve }))
+    await signIn(); await vi.waitFor(() => expect(services.history).toHaveBeenCalledOnce())
+    expect(app.catalogState).toBe('error'); expect(app.contentState).toBe('loading')
+    release(); await app.loadContent()
+    expect(app.contentState).toBe('ready')
+  })
+  it('does not publish a stale catalog state when setup changes during loading', async () => {
+    let release!: () => void
+    services.catalog.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve([]) }))
+      .mockResolvedValueOnce([externalMaterials[0]!])
+    await db.syncMeta.put({ id: 'owner', value: 'owner-a' })
+    state.cloud!.userId = 'owner-a'; await nextTick()
+    await vi.waitFor(() => expect(services.catalog).toHaveBeenCalledOnce())
+    await db.profiles.put({ ...defaultProfile(), onboarded: true }); await app.refresh()
+    await vi.waitFor(() => expect(app.catalogState).toBe('ready'))
+    release(); await app.loadContent()
+    expect(app.catalogState).toBe('ready'); expect(services.refresh).toHaveBeenCalledOnce()
+  })
   it('delivers page-only courses even when legacy audio-history synchronization fails', async () => {
     const added = { ...structuredClone(externalMaterials[0]!), id: 'external-voa-level1-2',
       title: 'New catalog course', sourceUrl: 'https://learningenglish.voanews.com/a/lesson-two/12345.html' }
@@ -116,6 +169,7 @@ describe('Today automatic content coordination', () => {
   it('does not fetch before login and onboarding', async () => {
     await nextTick(); await app.loadContent()
     expect(services.refresh).not.toHaveBeenCalled(); expect(app.contentState).toBe('idle')
+    expect(services.catalog).not.toHaveBeenCalled(); expect(app.catalogState).toBe('idle')
   })
   it('selects and preloads the planned human lesson after login without a Library action', async () => {
     await signIn()
@@ -165,5 +219,6 @@ describe('Today automatic content coordination', () => {
     await signIn(); await vi.waitFor(() => expect(services.refresh).toHaveBeenCalledOnce())
     state.cloud!.userId = ''; await nextTick(); release(); await nextTick()
     expect(app.contentState).toBe('idle')
+    expect(app.catalogState).toBe('idle')
   })
 })

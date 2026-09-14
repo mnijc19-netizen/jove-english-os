@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, watch } from "vue";
 import { useApp } from "../stores/app";
+import { useCloud } from "../stores/cloud";
 import { db } from "../db/db";
 import type { Material } from "../domain/types";
 import { useRequest } from "../composables/useRequest";
@@ -20,6 +21,7 @@ const app = useApp(),
   discoveries = ref<{ title: string; url: string; description: string }[]>([]),
   file = ref<File>(),
   fileAudioId = ref("");
+const cloud = useCloud();
 const { busy, error, run, cancel } = useRequest();
 const loaded = ref(false);
 const pending = computed(() => app.materials.filter((m) => !m.approved));
@@ -414,6 +416,17 @@ async function discover() {
         Paste the text instead
       </button>
     </section>
+    <p v-if="cloud.configured" class="help-text" role="status" aria-label="Course directory status">
+      <template v-if="app.catalogState === 'loading'">Loading the course directory. Your saved lessons stay available.</template>
+      <template v-else-if="app.catalogState === 'ready'">Course directory loaded. Videos open on the publisher’s website; your practice stays here.</template>
+      <template v-else-if="app.catalogState === 'offline'">Offline: saved lessons remain available. The course directory will retry when you reconnect.</template>
+      <template v-else-if="!cloud.userId"><RouterLink to="/settings">Sign in to your learning account</RouterLink> to load the course directory. Initial learning setup is not required to browse.</template>
+      <template v-else-if="app.catalogState === 'error' || app.catalogState === 'empty'">
+        {{ app.catalogState === 'error' ? 'The course directory could not load.' : 'The course directory is not available yet.' }} Your saved work is unchanged.
+        <button class="text-button" :disabled="app.contentState === 'loading'" @click="app.loadContent(true)">{{ app.contentState === 'loading' ? 'Finishing background check…' : 'Retry course directory' }}</button>
+      </template>
+      <template v-else>Preparing the course directory.</template>
+    </p>
     <div class="library-filters">
       <label class="search-input"
         ><Icon name="library" :size="18" /><input

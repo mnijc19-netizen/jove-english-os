@@ -30,13 +30,13 @@ export const test = base.extend<{
 }>({
   captureMode: ["native", { option: true }],
   storageMode: ["regular", { option: true }],
-  context: async ({ context, playwright, browserName, storageMode }, use) => {
+  context: async ({ context, playwright, browserName, storageMode, serviceWorkers }, use) => {
     if (browserName !== "webkit" || storageMode === "private") { await use(context); return; }
     // WebKit 2359 private contexts reject even a native 100-byte Blob IDB put;
     // an independent regular profile does not. Never change Blob/IDB semantics.
     // Empty userDataDir asks Playwright for a disposable, isolated directory.
     // The runner inherits project device/baseURL/CSP options for this context.
-    const regular = await playwright.webkit.launchPersistentContext("");
+    const regular = await playwright.webkit.launchPersistentContext("", { serviceWorkers });
     try { await use(regular); }
     finally { await regular.close(); }
   },
