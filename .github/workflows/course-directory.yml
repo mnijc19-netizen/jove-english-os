@@ -1,0 +1,30 @@
+name: Refresh course directory
+
+on:
+  schedule:
+    - cron: '37 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: course-directory
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.repository == 'mnijc19-netizen/jove-english-os' && github.ref == 'refs/heads/main' && vars.JOVE_CATALOG_SCHEDULE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+      - name: Refresh allowlisted lesson metadata only
+        env:
+          JOVE_CATALOG_JOB_TOKEN: ${{ secrets.JOVE_CATALOG_JOB_TOKEN }}
+        run: node scripts/refresh-course-directory.mjs

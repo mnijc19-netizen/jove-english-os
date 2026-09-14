@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { authenticatedOwner, boundedBody, corsHeaders, digestRequest, GatewayError, jsonResponse, reserve, safeFailure, settle,
   type OwnerContext, type ServerEnvironment } from './gateway'
 import { createContentAudioServices, inspectContentProviderAccess } from './content-audio'
-import { readExternalCatalog, refreshExternalCatalog } from './external-catalog'
+import { readOrRefreshExternalCatalog, refreshExternalCatalog } from './external-catalog'
 import type { ContentFetcher } from './content-network'
 import { validateSourceUrl } from '../content/pipeline'
 import { recordContentLearningUse, runContentRefresh, selectAndPersistContentLessons, type ContentBudget, type ContentRefreshOptions, type PersistedContentSegment } from './content-worker'
@@ -17,6 +17,7 @@ const segmentId = z.string().regex(/^authentic-[a-f0-9]{64}$/u)
 const providerStatusPayload = z.object({ action: z.literal('provider-status') }).strict()
 // Job authority cannot select arbitrary owner actions, even if added later.
 const catalogRefreshPayload = z.object({ action: z.literal('catalog-refresh') }).strict()
+const catalogJobHeader = 'X-Jove-Catalog-Job'
 const jobPayload = z.union([z.object({}).strict().transform(() => ({ action: 'refresh' as const })), providerStatusPayload, catalogRefreshPayload])
 const payload = z.discriminatedUnion('action', [
   z.object({ action: z.literal('lessons'), profile: profileSchema, limit: z.number().int().min(1).max(10).optional(), requestId: z.string().min(1).max(80).optional() }).strict(),
@@ -94,11 +95,24 @@ async function scheduledOwner(request: Request, env: ServerEnvironment): Promise
   return { ownerId: result.data.ownerId as string, admin, user: admin }
 }
 
+/** A separate directory-only capability, never an owner session or paid-worker key. */
+export async function catalogJobAdmin(request: Request, env: ServerEnvironment) {
+  const supplied = request.headers.get(catalogJobHeader) ?? '', expected = env('JOVE_CATALOG_JOB_TOKEN') ?? ''
+  if (!/^[a-f0-9]{64}$/u.test(expected) || !/^[a-f0-9]{64}$/u.test(supplied)
+    || await digestRequest(supplied) !== await digestRequest(expected)) {
+    throw new GatewayError(401, 'CATALOG_JOB_AUTH', 'The course directory job is not authorized.')
+  }
+  const url = env('SUPABASE_URL'), key = env('SUPABASE_SERVICE_ROLE_KEY')
+  if (!url || !key) throw new GatewayError(503, 'CONFIGURATION', 'The directory backend is not configured.')
+  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } })
+}
+
 /** Bundle as Deno.serve(createContentHandler(env)). No provider/service credential is sent to the browser.
  * Browser POST uses authenticatedOwner; cron POST uses the separate Vault job token. Test seams are server-owned only. */
 export function createContentHandler(env: ServerEnvironment, dependencies: {
   authenticate?: typeof authenticatedOwner
   authenticateJob?: typeof scheduledOwner
+  authenticateCatalogJob?: typeof catalogJobAdmin
   workerOptions?: (context: OwnerContext) => Partial<ContentRefreshOptions>
   providerFetch?: typeof fetch
   catalogFetcher?: ContentFetcher
@@ -111,6 +125,16 @@ export function createContentHandler(env: ServerEnvironment, dependencies: {
       headers = corsHeaders(request, env)
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers })
       if (request.method !== 'POST') throw new GatewayError(405, 'METHOD', 'Use POST.')
+      if (request.headers.has(catalogJobHeader)) {
+        if (request.headers.has('Origin') || request.headers.has('Authorization') || request.headers.has('X-Jove-Content-Job'))
+          throw new GatewayError(403, 'CATALOG_JOB_AUTHORITY', 'The directory job cannot mix browser or other job authority.')
+        const admin = await (dependencies.authenticateCatalogJob ?? catalogJobAdmin)(request, env)
+        const bytes = await boundedBody(request, 256)
+        let raw: unknown
+        try { raw = JSON.parse(new TextDecoder().decode(bytes)) } catch { throw new GatewayError(400, 'CATALOG_JOB_REQUEST', 'Invalid directory request.') }
+        if (!catalogRefreshPayload.safeParse(raw).success) throw new GatewayError(400, 'CATALOG_JOB_REQUEST', 'Invalid directory request.')
+        return jsonResponse(await refreshExternalCatalog(admin, { fetcher: dependencies.catalogFetcher, now, signal: request.signal }), headers)
+      }
       const scheduled = request.headers.has('X-Jove-Content-Job')
       if (scheduled && request.headers.has('Origin')) throw new GatewayError(403, 'CONTENT_JOB_ORIGIN', 'Browser requests cannot act as the scheduler.')
       const context = scheduled ? await (dependencies.authenticateJob ?? scheduledOwner)(request, env) :
@@ -121,7 +145,8 @@ export function createContentHandler(env: ServerEnvironment, dependencies: {
       const parsed = (scheduled ? jobPayload : payload).safeParse(raw)
       if (!parsed.success) throw new GatewayError(400, scheduled ? 'CONTENT_JOB_REQUEST' : 'CONTENT_REQUEST', 'Invalid content request.')
       const body = parsed.data
-      if (body.action === 'external-catalog') return jsonResponse(await readExternalCatalog(context.admin), headers)
+      if (body.action === 'external-catalog') return jsonResponse(await readOrRefreshExternalCatalog(context.admin,
+        { fetcher: dependencies.catalogFetcher, now, signal: request.signal }), headers)
       if (body.action === 'catalog-refresh') return jsonResponse(await refreshExternalCatalog(context.admin,
         { fetcher: dependencies.catalogFetcher, now, signal: request.signal }), headers)
       if (body.action === 'provider-status') return jsonResponse(await inspectContentProviderAccess({

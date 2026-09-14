@@ -3,8 +3,8 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { EXTERNAL_CATALOG_LIMIT, EXTERNAL_CATALOG_URL, externalCatalogSchema, materialFromExternalCatalog, parseExternalCatalogPage } from '../src/content/external-catalog'
 import { externalLessonCandidates, externalMaterials } from '../src/content/external'
 import { materialSchema } from '../src/db/schema'
-import { refreshExternalCatalog } from '../src/server/external-catalog'
-import { createContentHandler } from '../src/server/content'
+import { readOrRefreshExternalCatalog, refreshExternalCatalog } from '../src/server/external-catalog'
+import { catalogJobAdmin, createContentHandler } from '../src/server/content'
 import { createContentFetcher, type ContentFetcher } from '../src/server/content-network'
 
 const now = Date.UTC(2026, 8, 13, 8)
@@ -116,6 +116,66 @@ describe('independent no-model catalog worker', () => {
       headers: { 'X-Jove-Content-Job': 'test-only-job', 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'catalog-refresh' }) }))
     expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ lessons: 52 })
     expect(providerFetch).not.toHaveBeenCalled(); expect(db.calls).toEqual(['claim', 'commit'])
+  })
+  it('serves a fresh directory without contacting its publisher', async () => {
+    const db = persistence(); db.state.catalog = catalog
+    const fetcher = vi.fn(async () => fetched())
+    expect(await readOrRefreshExternalCatalog(db.admin, { fetcher, now: () => now })).toEqual({ catalog })
+    expect(db.calls).toEqual(['read']); expect(fetcher).not.toHaveBeenCalled()
+  })
+  it('repairs an old directory on use without relying on the scheduler', async () => {
+    const db = persistence(); db.state.catalog = catalog
+    const later = now + 6 * 3600_000
+    const result = await readOrRefreshExternalCatalog(db.admin, { fetcher: async () => fetched(), now: () => later })
+    expect(result.catalog?.checkedAt).toBe(later)
+    expect(db.calls).toEqual(['read', 'claim', 'commit', 'read'])
+  })
+  it('retains a readable reserve on publisher failure instead of deleting courses', async () => {
+    const db = persistence(); db.state.catalog = catalog
+    expect(await readOrRefreshExternalCatalog(db.admin, { fetcher: async () => fetched('incomplete'), now: () => now + 7 * 3600_000 }))
+      .toEqual({ catalog })
+    expect(db.calls).toEqual(['read', 'claim', 'fail'])
+  })
+  it('does not hide a failed initial refresh behind an empty success', async () => {
+    const db = persistence()
+    await expect(readOrRefreshExternalCatalog(db.admin, { fetcher: async () => fetched('incomplete') }))
+      .rejects.toMatchObject({ code: 'EXTERNAL_CATALOG_REFRESH' })
+  })
+  it('honors cancellation before even reading the directory', async () => {
+    const db = persistence(), controller = new AbortController(); controller.abort()
+    await expect(readOrRefreshExternalCatalog(db.admin, { signal: controller.signal })).rejects.toBeDefined()
+    expect(db.calls).toEqual([])
+  })
+  it('uses separate directory authority without looking up an owner or invoking paid work', async () => {
+    const db = persistence(), denied = vi.fn(() => { throw new Error('Unrelated authority must not run') })
+    const handler = createContentHandler(() => undefined, { authenticate: denied, authenticateJob: denied,
+      authenticateCatalogJob: async () => db.admin, catalogFetcher: async () => fetched(), providerFetch: denied, now: () => now })
+    const response = await handler(new Request('https://project.example/content', { method: 'POST',
+      headers: { 'X-Jove-Catalog-Job': 'fixture-only' }, body: '{"action":"catalog-refresh"}' }))
+    expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ lessons: 52 })
+    expect(db.calls).toEqual(['claim', 'commit']); expect(denied).not.toHaveBeenCalled()
+  })
+  it.each(['{}', '{"action":"refresh"}', '{"action":"provider-status"}', '{"action":"lessons"}',
+    '{"action":"external-catalog"}', '{"action":"catalog-refresh","ownerId":"another-owner"}'])('rejects action escalation with directory authority: %s', body => {
+    const db = persistence()
+    const handler = createContentHandler(() => undefined, { authenticateCatalogJob: async () => db.admin })
+    return handler(new Request('https://project.example/content', { method: 'POST', headers: { 'X-Jove-Catalog-Job': 'fixture-only' }, body }))
+      .then(response => { expect(response.status).toBe(400); expect(db.calls).toEqual([]) })
+  })
+  it.each(['Origin', 'Authorization', 'X-Jove-Content-Job'])('rejects mixed authority: %s', async header => {
+    const auth = vi.fn(), handler = createContentHandler(() => undefined, { authenticateCatalogJob: auth })
+    const response = await handler(new Request('https://project.example/content', { method: 'POST',
+      headers: { 'X-Jove-Catalog-Job': 'fixture-only', [header]: header === 'Origin' ? 'https://mnijc19-netizen.github.io' : 'fixture-only' }, body: '{"action":"catalog-refresh"}' }))
+    expect(response.status).toBe(403); expect(auth).not.toHaveBeenCalled()
+  })
+  it('checks the real directory credential before constructing an elevated client', async () => {
+    const seen: string[] = [], credential = 'd'.repeat(64)
+    const env = (name: string) => { seen.push(name); return ({ JOVE_CATALOG_JOB_TOKEN: credential,
+      SUPABASE_URL: 'https://project.example', SUPABASE_SERVICE_ROLE_KEY: 'fixture-server-key' } as Record<string, string>)[name] }
+    await expect(catalogJobAdmin(new Request('https://project.example/content', { headers: { 'X-Jove-Catalog-Job': 'e'.repeat(64) } }), env))
+      .rejects.toMatchObject({ code: 'CATALOG_JOB_AUTH' })
+    expect(seen).toEqual(['JOVE_CATALOG_JOB_TOKEN'])
+    await expect(catalogJobAdmin(new Request('https://project.example/content', { headers: { 'X-Jove-Catalog-Job': credential } }), env)).resolves.toBeDefined()
   })
   it.runIf(process.env.LIVE_EXTERNAL_CATALOG === '1')('reads the actual pinned publisher directory without media or AI', async () => {
     const db = persistence()

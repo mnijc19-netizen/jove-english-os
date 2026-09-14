@@ -1,5 +1,15 @@
 # Authentic content pipeline
 
+## Page-only catalog refresh — September14 candidate
+
+The admitted VOA Level1 directory contains52 numbered publisher links with original in-site practice prompts, not copied video/audio/transcripts. `src/server/external-catalog.ts` maintains its validated snapshot and independent lease/backoff. Authenticated directory reads use an existing fresh snapshot or attempt one due refresh; a failed replacement retains the previous readable reserve. Source limits, complete-directory validation and legacy identities remain enforced.
+
+`.github/workflows/course-directory.yml` schedules the fixed directory endpoint at minute37 every six hours and permits an operator dispatch, only on this repository's main branch and with `JOVE_CATALOG_SCHEDULE_ENABLED=true`. A distinct64-hex `JOVE_CATALOG_JOB_TOKEN` belongs in GitHub Actions Secrets and Supabase Edge Function Secrets only. Never reuse the broader legacy job credential or put a credential in SQL/URLs/source/builds/logs. The new `X-Jove-Catalog-Job` authority accepts only `catalog-refresh`; browser/Authorization/legacy-job combinations are rejected. It cannot call a model, read learner records or obtain private audio.
+
+Activation order: independent review/tests → verified dedicated runtime → provision the new capability at both secret stores → enable the explicit workflow variable → inspect actual scheduled execution, stored freshness and delivery into a new eligible Today assignment. The workflow script logs only bounded outcome messages and does not retry automatically. A skipped workflow is not a refresh. [GitHub may delay/drop scheduled jobs and disable them after60days of public-repository inactivity](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule), so on-use repair is part of continuity, not an optional manual Library chore. Existing SQL scheduler installers are historical and must not be activated on the verified readable-queue configuration.
+
+This candidate has not yet been activated.52 beginner lessons remain a finite course sequence; broader graded sources, link-level alternatives and Japanese-specific courses are still required. `STATUS.md` records actual release and scheduling evidence.
+
 ## Current delivery amendment — 2026-09-13
 
 The owner now prefers publisher-hosted playback and explicitly requests publishing the completed subset before further pipeline work. `src/content/external.ts` adds four metadata-only starter lessons; normal Listen guides recall, expression use and a recorded retell after opening the publisher page. No iframe, automatic media download, copied transcript or publisher exercise is included. This is a finite editorial selection, not yet recurring automatic discovery. Earlier hosted-pipeline implementation and limitations below are historical and no longer mandatory release gates.

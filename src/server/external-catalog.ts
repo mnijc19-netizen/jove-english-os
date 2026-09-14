@@ -26,6 +26,24 @@ export async function readExternalCatalog(admin: SupabaseClient) {
   const value = await rpc(admin, 'read')
   return { catalog: value ? externalCatalogSchema.parse(value) : null }
 }
+/** On-use repair also works when an external scheduler is delayed or disabled. */
+export async function readOrRefreshExternalCatalog(admin: SupabaseClient, options: { fetcher?: ContentFetcher; now?: () => number; signal?: AbortSignal } = {}) {
+  options.signal?.throwIfAborted()
+  const previous = await readExternalCatalog(admin)
+  options.signal?.throwIfAborted()
+  if (previous.catalog && (options.now ?? Date.now)() - previous.catalog.checkedAt < 6 * 3600_000) return previous
+  try {
+    await refreshExternalCatalog(admin, options)
+    options.signal?.throwIfAborted()
+    const current = await readExternalCatalog(admin)
+    options.signal?.throwIfAborted()
+    return current
+  } catch (error) {
+    options.signal?.throwIfAborted()
+    if (previous.catalog) return previous
+    throw error
+  }
+}
 export async function refreshExternalCatalog(admin: SupabaseClient, options: { fetcher?: ContentFetcher; now?: () => number; signal?: AbortSignal } = {}) {
   options.signal?.throwIfAborted()
   const claim = await rpc(admin, 'claim')
