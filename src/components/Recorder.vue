@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import { useApp } from "../stores/app";
-import { db } from "../db/db";
+import { db as englishDatabase, type JoveDatabase } from "../db/db";
 import { updateAudioMetadata } from "../db/audio";
 import type { AudioAsset } from "../domain/types";
 import { AudioError, startRecording } from "../audio/recorder";
@@ -11,22 +11,31 @@ import { registerRecorderShortcut } from "../audio/shortcuts";
 import { useRequest } from "../composables/useRequest";
 import { useRecordingUrl } from "../composables/useRecordingUrl";
 import Icon from "./Icon.vue";
-const props = defineProps<{ label?: string; savedAudioId?: string; disabled?: boolean }>();
+const props = defineProps<{ label?: string; savedAudioId?: string; disabled?: boolean; workspace?: {
+  database: JoveDatabase; audio: () => AudioAsset[]; refresh: () => Promise<void>;
+  assertCurrent: () => Promise<void>; transcribe?: (blob: Blob, signal: AbortSignal) => Promise<string>;
+  attach?: (data: { audioId: string; duration: number }) => Promise<void>;
+} }>();
 const emit = defineEmits<{
   recorded: [data: { audioId: string; duration: number }];
   transcribed: [text: string];
   active: [value: boolean];
 }>();
 const app = useApp();
+// Bind at mount. Changing language must mount a new recorder, never redirect a
+// pending microphone save into the newly selected workspace.
+const workspace = props.workspace, db = workspace?.database ?? englishDatabase;
+const refresh = () => workspace ? workspace.refresh() : app.refresh();
+const canTranscribe = computed(() => !!(workspace ? workspace.transcribe : app.keySet));
 const root = ref<HTMLElement>(), recording = ref(false), starting = ref(false), saving = ref(false);
 const audioId = ref(""), seconds = ref(0), statusError = ref(""), transcript = ref("");
 const savedAsset = shallowRef<AudioAsset>();
 const transcribing = ref(false);
 const { busy, error, run, cancel } = useRequest();
 // A draft survives a component remount on this route, including a failed background save.
-const scope = (typeof location === "undefined" ? "" : location.hash) + "|" + (props.label || "Speaking practice");
+const scope = db.name + "|" + (typeof location === "undefined" ? "" : location.hash) + "|" + (props.label || "Speaking practice");
 const pending = computed(() => [...recordingDrafts.values()].find(draft => draft.scope === scope));
-const existing = computed(() => savedAsset.value?.id === audioId.value ? savedAsset.value : app.audio.find(asset => asset.id === audioId.value));
+const existing = computed(() => savedAsset.value?.id === audioId.value ? savedAsset.value : (workspace ? workspace.audio() : app.audio).find(asset => asset.id === audioId.value));
 const playable = computed(() => pending.value?.asset ?? existing.value);
 const playback = useRecordingUrl(playable);
 const active = computed(() => starting.value || recording.value || saving.value || Boolean(pending.value) || transcribing.value);
@@ -61,19 +70,23 @@ async function savePending(): Promise<boolean> {
   saving.value = true;
   statusError.value = "";
   try {
+    await workspace?.assertCurrent();
     await saveRecording(draft, asset => db.transaction("rw", db.audio, async () => {
       // Count persisted recordings, imports and generated audio in the same write transaction.
       // Overlapping saves cannot both spend the same remaining capacity.
       checkCapacity(await db.audio.toArray(), asset.blob.size, asset.id);
       return db.audio.put(asset);
     }));
+    // A language-specific parent can durably attach before this recoverable
+    // draft is released, including forced unmount during microphone shutdown.
+    await workspace?.attach?.({ audioId: draft.asset.id, duration: draft.asset.duration });
     if (!disposed && recordingDrafts.has(draft.asset.id)) {
       savedAsset.value = draft.asset;
       audioId.value = draft.asset.id;
       emit("recorded", { audioId: draft.asset.id, duration: draft.asset.duration });
       attachRecording(draft);
     }
-    try { await app.refresh(); }
+    try { await refresh(); }
     catch { statusError.value = "Recording saved. The library could not refresh yet; your audio remains available."; }
     return true;
   } catch (failure) {
@@ -89,6 +102,7 @@ async function start(): Promise<void> {
   statusError.value = "";
   try {
     try {
+      await workspace?.assertCurrent();
       // Recording size is unknown until capture ends; require some room before opening the mic.
       checkCapacity(await db.audio.toArray(), 1);
     } catch (failure) {
@@ -135,7 +149,7 @@ function stop(): Promise<void> {
 }
 
 async function transcribe(): Promise<void> {
-  if (locked.value || recording.value || !existing.value || disposed) return;
+  if (locked.value || recording.value || !existing.value || disposed || !canTranscribe.value) return;
   const id = existing.value.id;
   transcribing.value = true;
   try {
@@ -144,12 +158,13 @@ async function transcribe(): Promise<void> {
       const stored = await db.audio.get(id);
       if (!stored) throw new Error("Save this recording successfully before transcribing it.");
       if (signal.aborted || props.disabled) return undefined;
-      return app.provider.transcribe(stored.blob, signal);
+      await workspace?.assertCurrent();
+      return workspace ? workspace.transcribe?.(stored.blob, signal) : app.provider.transcribe(stored.blob, signal);
     });
     if (result === undefined || disposed || id !== audioId.value) return;
     transcript.value = result;
     emit("transcribed", result);
-    try { await updateAudioMetadata(db, id, { processed: true }); await app.refresh(); }
+    try { await updateAudioMetadata(db, id, { processed: true }); await refresh(); }
     catch { statusError.value = "The transcript is ready below. Its recording status could not be updated; your original audio is still retained."; }
   } finally { transcribing.value = false; }
 }
@@ -201,12 +216,12 @@ defineExpose({ toggle });
     <div v-if="existing && !pending" class="row wrap">
       <span v-if="saving" class="muted" role="status">Recording saved; finishing local updates…</span>
       <span v-else class="pill"><Icon name="check" :size="14" />Saved on this device</span>
-      <button class="text-button" :disabled="locked || recording || !app.keySet || !app.online" @click="transcribe">{{ transcribing ? "Transcribing…" : "Transcribe recording" }}</button>
+      <button v-if="canTranscribe" class="text-button" :disabled="locked || recording || !app.online" @click="transcribe">{{ transcribing ? "Transcribing…" : "Transcribe recording" }}</button>
       <button v-if="busy" class="text-button" @click="cancel">Cancel</button>
     </div>
-    <p v-if="existing && !app.keySet" class="help-text">Your recording is saved. <RouterLink to="/settings">Connect AI in Settings</RouterLink> for transcription and feedback, or type your response.</p>
+    <p v-if="existing && !workspace && !app.keySet" class="help-text">Your recording is saved. <RouterLink to="/settings">Connect AI in Settings</RouterLink> for transcription and feedback, or type your response.</p>
     <p v-if="transcript" class="help-text" aria-live="polite">Transcript: {{ transcript }}</p>
     <p v-if="statusError || error" class="error" role="alert">{{ statusError || error }}</p>
-    <button v-if="error && !busy && !pending" class="text-button" :disabled="locked || recording || !app.keySet || !app.online" @click="transcribe">Retry transcription</button>
+    <button v-if="error && !busy && !pending && canTranscribe" class="text-button" :disabled="locked || recording || !app.online" @click="transcribe">Retry transcription</button>
   </div>
 </template>

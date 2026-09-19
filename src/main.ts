@@ -7,6 +7,9 @@ import "./styles.css";
 const router = createRouter({
   history: createWebHashHistory(import.meta.env.BASE_URL),
   routes: [
+    // Kept out of production navigation until language sync and practice gates
+    // are complete. Local development can exercise the real Japanese pages.
+    ...(import.meta.env.DEV ? [{ path: '/ja', component: () => import('./pages/Japanese.vue') }] : []),
     { path: "/", redirect: "/today" },
     { path: "/today", component: () => import("./pages/Today.vue") },
     { path: "/onboarding", component: () => import("./pages/Onboarding.vue") },

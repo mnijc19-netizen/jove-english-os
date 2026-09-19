@@ -6,6 +6,7 @@ import { useApp } from "./stores/app";
 import Icon from "./components/Icon.vue";
 import { useCloud } from "./stores/cloud";
 const cloud = useCloud();
+const japanesePreview = import.meta.env.DEV;
 const app = useApp(),
   route = useRoute(),
   menu = ref(false),
@@ -137,6 +138,7 @@ function focusPractice() {
         ></RouterLink
       >
       <p class="nav-label">YOUR WORKSPACE</p>
+      <RouterLink v-if="japanesePreview" to="/ja" class="nav-item">日语 · 开发预览</RouterLink>
       <nav aria-label="Main navigation">
         <RouterLink
           v-for="item in nav"
