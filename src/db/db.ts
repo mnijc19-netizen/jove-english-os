@@ -5,8 +5,9 @@ import { aggregateSkills } from '../domain/engine'
 import { eventSchema, modalities, reviewCardSchema } from './schema'
 import { projectChunks, projectErrors } from './projections'
 import type { StoredOperation, EntityType, RecordValue } from '../sync/protocol'
+import { assertLearningLanguage, languageDatabases, type LearningLanguage } from '../domain/language'
 
-export const DB_NAME = 'jove-english-os'
+export const DB_NAME = languageDatabases.en
 export const DB_VERSION = 3
 // Sync journals are device/account state, not portable learning backup data.
 export const BACKUP_SCHEMA_VERSION = 2
@@ -38,8 +39,11 @@ export class JoveDatabase extends Dexie {
   syncMeta!: Table<{ id: string; value: unknown }, string>
   syncSnapshots!: Table<{ id: string; entityType: EntityType; entityId: string; record: RecordValue }, string>
 
-  constructor(name = DB_NAME) {
+  constructor(name = DB_NAME, readonly language: LearningLanguage = 'en') {
     super(name)
+    assertLearningLanguage(language)
+    if (Object.entries(languageDatabases).some(([key, value]) => name === value && key !== language))
+      throw new Error('Database belongs to another learning language')
     this.version(1).stores(version1Stores)
     this.version(2).stores({
       ...version1Stores,
@@ -70,7 +74,25 @@ export class JoveDatabase extends Dexie {
       syncOperations: 'id,cursor,[entityType+entityId]',
       syncMeta: 'id', syncSnapshots: 'id,entityType,entityId',
     })
+    // A sticky ready fence runs before any queued query on every reopen. Legacy
+    // unlabelled data stays English; never relabel an existing workspace as Japanese.
+    this.on('ready', () => this.transaction('rw', this.tables, async () => {
+      const binding = await this.syncMeta.get('learningLanguage')
+      if (binding) {
+        if (binding.value !== this.language) throw new Error('Database language binding mismatch')
+        return
+      }
+      if (this.language !== 'en') {
+        for (const table of this.tables) if (await table.count()) throw new Error('Unlabelled existing data belongs to English')
+      }
+      await this.syncMeta.put({ id: 'learningLanguage', value: this.language })
+    }), true)
   }
+}
+
+export function createLanguageDatabase(language: LearningLanguage): JoveDatabase {
+  assertLearningLanguage(language)
+  return new JoveDatabase(languageDatabases[language], language)
 }
 
 export const db = new JoveDatabase()

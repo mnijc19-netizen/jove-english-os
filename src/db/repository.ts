@@ -1,7 +1,7 @@
 import { createEmptyCard, fsrs, Rating } from 'ts-fsrs'
 import { aggregateSkills, evidenceWeight } from '../domain/engine'
 import { defaultProfile, defaultSettings, type AudioAsset, type Chunk, type ErrorPattern, type Evaluation, type Material, type MaterialChunk, type ReviewCard, type StudyEvent } from '../domain/types'
-import { db, BACKUP_SCHEMA_VERSION } from './db'
+import { db, BACKUP_SCHEMA_VERSION, type JoveDatabase } from './db'
 import { audioMetadataSchema, backupTables, eventSchema, evaluationErrorSchema, materialChunkSchema, materialSchema, modalities, parseBackup, reviewCardSchema, reviewOptionsSchema, repairAttemptOptionsSchema, type Backup, type ReviewOptions, type RepairAttemptOptions } from './schema'
 import { projectChunks, projectErrors } from './projections'
 import { resolveCardAlias, resolveEventAliases } from '../sync/journal'
@@ -15,14 +15,14 @@ export type { ReviewOptions, RepairAttemptOptions } from './schema'
 export const REPAIR_RETEST_DELAY = 10 * 60_000
 export const REPAIR_TRANSFER_DELAY = 2 * 86_400_000
 
-async function rebuildProjections(): Promise<void> {
-  const events = await db.events.toArray()
-  const chunks = projectChunks(await db.chunks.toArray(), events)
-  const errors = projectErrors(await db.errors.toArray(), events, await db.cards.toArray())
-  await db.skills.clear()
-  await db.skills.bulkPut(aggregateSkills(events))
-  if (chunks.length) await db.chunks.bulkPut(chunks)
-  if (errors.length) await db.errors.bulkPut(errors)
+async function rebuildProjections(database = db): Promise<void> {
+  const events = await database.events.toArray()
+  const chunks = projectChunks(await database.chunks.toArray(), events)
+  const errors = projectErrors(await database.errors.toArray(), events, await database.cards.toArray())
+  await database.skills.clear()
+  await database.skills.bulkPut(aggregateSkills(events))
+  if (chunks.length) await database.chunks.bulkPut(chunks)
+  if (errors.length) await database.errors.bulkPut(errors)
 }
 
 async function ensureCards(chunk: Chunk, now: number): Promise<void> {
@@ -250,7 +250,7 @@ export async function saveError(error: Evaluation['errors'][number]): Promise<Er
 }
 
 export async function rebuildSkills(): Promise<void> {
-  await db.transaction('rw', projectionTables, rebuildProjections)
+  await db.transaction('rw', projectionTables, () => rebuildProjections())
 }
 
 function audioMetadata(asset: AudioAsset) {
@@ -258,11 +258,12 @@ function audioMetadata(asset: AudioAsset) {
   return audioMetadataSchema.parse({ id: asset.id, mimeType: asset.mimeType, createdAt: asset.createdAt, duration: asset.duration, kind: asset.kind, processed: asset.processed, label: asset.label })
 }
 
-export async function exportBackup(): Promise<string> {
-  return db.transaction('r', backupTables.map(name => db.table(name)), async () => {
+export async function exportBackup(database: JoveDatabase = db): Promise<string> {
+  return database.transaction('r', backupTables.map(name => database.table(name)), async () => {
     const tables: Record<string, unknown[]> = {}
-    for (const name of backupTables) tables[name] = name === 'audio' ? (await db.audio.toArray()).map(audioMetadata) : await db.table(name).toArray()
-    const backup = parseBackup({ format: 'jove-english-os', version: 1, schemaVersion: BACKUP_SCHEMA_VERSION, exportedAt: Date.now(), audioPolicy: 'blobs-omitted', tables })
+    for (const name of backupTables) tables[name] = name === 'audio' ? (await database.audio.toArray()).map(audioMetadata) : await database.table(name).toArray()
+    const backup = parseBackup({ format: 'jove-english-os', version: 1, schemaVersion: database.language === 'en' ? BACKUP_SCHEMA_VERSION : 3,
+      ...(database.language === 'ja' ? { learningLanguage: 'ja' } : {}), exportedAt: Date.now(), audioPolicy: 'blobs-omitted', tables })
     return JSON.stringify(backup)
   })
 }
@@ -293,13 +294,14 @@ function markMissingAudio(tables: Backup['tables'], available: Set<string>): voi
   }
 }
 
-export async function restoreBackup(text: string): Promise<void> {
+export async function restoreBackup(text: string, database: JoveDatabase = db): Promise<void> {
   if (typeof text !== 'string' || text.length > 50_000_000) throw new Error('Backup exceeds 50 MB text limit')
   let raw: unknown
   try { raw = JSON.parse(text) } catch { throw new Error('Backup is not valid JSON') }
   const backup = parseBackup(raw)
-  await db.transaction('rw', backupTables.map(name => db.table(name)), async () => {
-    const localAudio = await db.audio.toArray()
+  if (database.language !== (backup.schemaVersion === 3 ? backup.learningLanguage : 'en')) throw new Error('Backup belongs to another learning language')
+  await database.transaction('rw', backupTables.map(name => database.table(name)), async () => {
+    const localAudio = await database.audio.toArray()
     const metadata = new Map(backup.tables.audio.map(a => [a.id, a]))
     const available = new Set(localAudio.filter(a => {
       const expected = metadata.get(a.id)
@@ -309,10 +311,10 @@ export async function restoreBackup(text: string): Promise<void> {
     // Secrets and local audio are never cleared: unprocessed recordings survive restores.
     for (const name of backupTables) {
       if (name === 'audio') continue
-      await db.table(name).clear()
-      if (backup.tables[name].length) await db.table(name).bulkAdd(backup.tables[name])
+      await database.table(name).clear()
+      if (backup.tables[name].length) await database.table(name).bulkAdd(backup.tables[name])
     }
     // Do not trust imported, potentially inflated derived mastery values.
-    await rebuildProjections()
+    await rebuildProjections(database)
   })
 }

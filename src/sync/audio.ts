@@ -4,9 +4,11 @@ import type { AudioAsset } from '../domain/types'
 import { accountRequest, type SyncAccess } from './access'
 import { SyncJournal } from './journal'
 import { isPrivateAudio } from './protocol'
+import { assertLearningLanguage, type LearningLanguage } from '../domain/language'
 
 export type RecordingRetention = 'minimal' | 'assessment-only' | 'more-history'
 export interface AudioManifest {
+  learning_language?: 'ja'
   user_id: string; audio_id: string; object_path: string; sha256: string; bytes: number; mime_type: string;
   purpose: 'assessment' | 'pronunciation' | 'draft' | 'history' | 'import'; created_at: string; expires_at: string | null;
 }
@@ -44,7 +46,16 @@ export async function readRecordingRetention(access: SyncAccess): Promise<Record
   if (!['minimal', 'assessment-only', 'more-history'].includes(policy)) throw new Error('Invalid account recording preferences')
   return policy
 }
-function validateManifest(row: AudioManifest, owner: string): void {
+const manifestTable = (language: LearningLanguage) => language === 'en' ? 'recording_manifest' : 'language_recording_manifest'
+function recordingPath(owner: string, id: string, hash: string, language: LearningLanguage): string {
+  if (language === 'ja' && (/[%/\\]/u.test(id) || [...id].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)))
+    throw new Error('Unsafe recording identity; local original retained')
+  return owner + (language === 'ja' ? '/ja/' : '/') + encodeURIComponent(id) + '-' + hash
+}
+function validateManifest(row: AudioManifest, owner: string, language: LearningLanguage = 'en'): void {
+  assertLearningLanguage(language)
+  if (language === 'ja' ? row.learning_language !== 'ja' || row.object_path !== recordingPath(owner, row.audio_id, row.sha256, language)
+    : row.learning_language !== undefined || row.object_path?.startsWith(owner + '/ja/')) throw new Error('Recording belongs to another learning language')
   if (row.user_id !== owner || typeof row.audio_id !== 'string' || !row.audio_id || row.audio_id.length > 1000
     || typeof row.object_path !== 'string' || !row.object_path.startsWith(owner + '/') || row.object_path.split('/').some(part => part === '..' || part === '.')
     || !/^[a-f0-9]{64}$/.test(row.sha256) || !Number.isSafeInteger(row.bytes) || row.bytes < 1 || row.bytes > maxBytes
@@ -55,19 +66,20 @@ function validateManifest(row: AudioManifest, owner: string): void {
 }
 /** Requires a JWT-pinned access, never the mutable application SDK client. */
 export async function uploadRecording(access: SyncAccess, asset: AudioAsset,
-  decision: NonNullable<ReturnType<typeof retentionDecision>>): Promise<AudioManifest> {
+  decision: NonNullable<ReturnType<typeof retentionDecision>>, language: LearningLanguage = 'en'): Promise<AudioManifest> {
+  assertLearningLanguage(language)
   await access.assertCurrent()
   if (!isPrivateAudio(asset.kind)) throw new Error('Only private recordings and imports belong in recording sync')
   const { blob, ...metadata } = asset
   audioMetadataSchema.parse(metadata)
   if (!blob.size || blob.size > maxBytes) throw new Error('This recording exceeds the cloud audio limit. Your original stays on this device.')
   const sha256 = await audioHash(blob), owner = access.ownerId
-  const path = owner + '/' + encodeURIComponent(asset.id) + '-' + sha256
-  const lookup = () => access.client.from('recording_manifest').select('*').eq('user_id', owner).eq('audio_id', asset.id).maybeSingle()
+  const path = recordingPath(owner, asset.id, sha256, language)
+  const lookup = () => access.client.from(manifestTable(language)).select('*').eq('user_id', owner).eq('audio_id', asset.id).maybeSingle()
   const { data: existing, error: lookupError } = await accountRequest(access, lookup)
   if (lookupError) throw new Error('Could not check recording sync status')
   if (existing) {
-    validateManifest(existing as AudioManifest, owner)
+    validateManifest(existing as AudioManifest, owner, language)
     if (existing.sha256 !== sha256 || existing.bytes !== blob.size) throw new Error('A different original uses this recording ID. Neither copy was overwritten.')
     return existing as AudioManifest
   }
@@ -78,19 +90,20 @@ export async function uploadRecording(access: SyncAccess, asset: AudioAsset,
   }
   // New originals are protected until a complete metadata view reconciles retention.
   const manifest: AudioManifest = { user_id: owner, audio_id: asset.id, object_path: path, sha256, bytes: blob.size,
+    ...(language === 'ja' ? { learning_language: 'ja' } : {}),
     mime_type: asset.mimeType, purpose: decision.purpose, created_at: new Date(asset.createdAt).toISOString(), expires_at: null }
-  const saved = await accountRequest(access, () => access.client.from('recording_manifest').upsert(manifest, { onConflict: 'user_id,audio_id', ignoreDuplicates: true }))
+  const saved = await accountRequest(access, () => access.client.from(manifestTable(language)).upsert(manifest, { onConflict: 'user_id,audio_id', ignoreDuplicates: true }))
   if (saved.error) throw new Error('Recording is uploaded but confirmation needs retry. The local original is safe.')
   const verified = await accountRequest(access, lookup)
   if (verified.error || !verified.data) throw new Error('Recording confirmation needs retry; original retained')
-  validateManifest(verified.data as AudioManifest, owner)
+  validateManifest(verified.data as AudioManifest, owner, language)
   if (verified.data.sha256 !== sha256 || verified.data.bytes !== blob.size || verified.data.object_path !== path)
     throw new Error('Recording confirmation mismatch; original retained')
   return verified.data as AudioManifest
 }
 export async function downloadRecording(access: SyncAccess, manifest: AudioManifest,
-  metadata: Omit<AudioAsset, 'blob'>): Promise<AudioAsset> {
-  validateManifest(manifest, access.ownerId)
+  metadata: Omit<AudioAsset, 'blob'>, language: LearningLanguage = 'en'): Promise<AudioAsset> {
+  validateManifest(manifest, access.ownerId, language)
   if (!isPrivateAudio(metadata.kind)) throw new Error('Public audio caches do not belong in recording sync')
   if (metadata.id !== manifest.audio_id) throw new Error('Recording identity mismatch')
   const { data, error } = await accountRequest(access, () => access.client.storage.from(bucket).download(manifest.object_path))
@@ -101,6 +114,7 @@ export async function downloadRecording(access: SyncAccess, manifest: AudioManif
 }
 
 export async function synchronizeAudio(database: JoveDatabase, access: SyncAccess, policy: RecordingRetention): Promise<AudioSyncResult> {
+  const language = database.language
   const result: AudioSyncResult = { uploaded: 0, downloaded: 0, hasMore: true, blocked: 0, retentionPending: false }
   const journal = new SyncJournal(database), owner = access.ownerId, journalCursor = await journal.cursor()
   if (await journal.owner() !== owner) throw new Error('Sync owner changed')
@@ -120,16 +134,16 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
   }, now)
   for (const asset of assets) {
     const decision = decisionFor(metadata.get(asset.id) ?? asset)
-    if (decision && (decision.expiresAt === null || decision.expiresAt > now)) { await uploadRecording(access, asset, decision); result.uploaded++ }
+    if (decision && (decision.expiresAt === null || decision.expiresAt > now)) { await uploadRecording(access, asset, decision, language); result.uploaded++ }
   }
   const manifests: AudioManifest[] = []
   let after = ''
   for (;;) {
-    const response = await accountRequest(access, () => access.client.from('recording_manifest').select('*').eq('user_id', owner)
+    const response = await accountRequest(access, () => access.client.from(manifestTable(language)).select('*').eq('user_id', owner)
       .gt('audio_id', after).order('audio_id', { ascending: true }).limit(500))
     if (response.error || !Array.isArray(response.data)) throw new Error('Could not synchronize recording history')
     if (!response.data.length) { result.hasMore = false; break }
-    for (const row of response.data as AudioManifest[]) { validateManifest(row, owner); if (row.audio_id <= after) throw new Error('Invalid recording page order'); after = row.audio_id; manifests.push(row) }
+    for (const row of response.data as AudioManifest[]) { validateManifest(row, owner, language); if (row.audio_id <= after) throw new Error('Invalid recording page order'); after = row.audio_id; manifests.push(row) }
   }
   for (const row of manifests) {
     const meta = metadata.get(row.audio_id)
@@ -139,7 +153,7 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
     if (local) {
       if (local.blob.size !== row.bytes || await audioHash(local.blob) !== row.sha256) { result.blocked++; continue }
     } else if (!row.expires_at || Date.parse(row.expires_at) > now) {
-      const asset = await downloadRecording(access, row, meta)
+      const asset = await downloadRecording(access, row, meta, language)
       await access.assertCurrent()
       const added = await database.transaction('rw', database.audio, database.settings, database.syncMeta, async () => {
         if ((await database.syncMeta.get('owner'))?.value !== owner) throw new Error('Sync owner changed')
@@ -161,7 +175,8 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
     const expiry = decision ? decision.expiresAt : Date.parse(row.created_at) + 7 * day
     const expiresAt = expiry === null ? null : new Date(expiry).toISOString()
     if (row.purpose === purpose && (row.expires_at === null ? expiresAt === null : expiresAt !== null && Date.parse(row.expires_at) === expiry)) continue
-    const updated = await accountRequest(access, () => access.client.rpc('reconcile_recording_retention', {
+    const updated = await accountRequest(access, () => access.client.rpc(language === 'en' ? 'reconcile_recording_retention' : 'reconcile_language_recording_retention', {
+      ...(language === 'ja' ? { learning_language: 'ja' } : {}),
       recording_id: row.audio_id, expected_cursor: journalCursor, retention_purpose: purpose, retention_expires_at: expiresAt,
       expected_policy: policy,
     }))

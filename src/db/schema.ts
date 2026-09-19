@@ -148,7 +148,7 @@ export const audioMetadataSchema = z.strictObject({
 export const usageSchema = z.strictObject({ id, timestamp: timestampSchema, model: short, purpose: short, tokens: count.nullable(), cost: z.number().min(0).max(1_000_000).nullable() })
 
 export const backupTables = ['settings', 'profiles', 'skills', 'events', 'chunks', 'cards', 'errors', 'materials', 'sessions', 'plans', 'conversations', 'assessments', 'audio', 'usage'] as const
-export const backupSchema = z.strictObject({
+const englishBackupSchema = z.strictObject({
   format: z.literal('jove-english-os'), version: z.literal(1), schemaVersion: z.literal(2), exportedAt: timestampSchema,
   audioPolicy: z.literal('blobs-omitted'),
   tables: z.strictObject({
@@ -160,6 +160,9 @@ export const backupSchema = z.strictObject({
     audio: z.array(audioMetadataSchema).max(100_000), usage: z.array(usageSchema).max(500_000),
   }),
 })
+// Old clients fail closed on this envelope instead of importing Japanese as English.
+export const backupSchema = z.union([englishBackupSchema,
+  englishBackupSchema.extend({ schemaVersion: z.literal(3), learningLanguage: z.literal('ja') })])
 export type Backup = z.infer<typeof backupSchema>
 
 /** Validate relationships against the incoming snapshot, never against records about to be replaced. */

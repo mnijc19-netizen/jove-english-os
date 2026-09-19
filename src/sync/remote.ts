@@ -2,13 +2,16 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { SyncJournal } from './journal'
 import { parseOperation, type StoredOperation, type SyncOperation } from './protocol'
 import { accountRequest, type SyncAccess } from './access'
+import { assertLearningLanguage, type LearningLanguage } from '../domain/language'
 
 export interface SyncRemote {
+  readonly language?: LearningLanguage
   upload(operations: SyncOperation[], owner: string): Promise<{ id: string; cursor: number; receivedAt: number }[]>
   download(cursor: number, owner: string): Promise<StoredOperation[]>
 }
 export class SupabaseSyncRemote implements SyncRemote {
-  constructor(private client: SupabaseClient, private access?: SyncAccess) {
+  constructor(private client: SupabaseClient, private access?: SyncAccess, readonly language: LearningLanguage = 'en') {
+    assertLearningLanguage(language)
     // Even a caller accidentally passing the mutable SDK alongside an access
     // cannot bypass that access's fixed Authorization/transport guards.
     if (access) this.client = access.client
@@ -34,7 +37,9 @@ export class SupabaseSyncRemote implements SyncRemote {
     const token = this.access ? undefined : await this.token(owner)
     // The SDK may switch/refresh its session between construction and fetch. Its
     // fetchWithAuth preserves an explicitly set header, binding this request to A.
-    const query = () => this.client.rpc('append_sync_operations', { operations })
+    const query = () => this.language === 'en'
+      ? this.client.rpc('append_sync_operations', { operations })
+      : this.client.rpc('append_language_sync_operations', { learning_language: this.language, operations })
     const { data, error } = this.access ? await accountRequest(this.access, query) : await query().setHeader('Authorization', `Bearer ${token}`)
     if (token) { await this.unchanged(token); await this.validatePrincipal(owner, token) }
     if (error || !Array.isArray(data)) throw new Error('Could not upload learning records. Your local work is safe.')
@@ -43,12 +48,16 @@ export class SupabaseSyncRemote implements SyncRemote {
   async download(cursor: number, owner: string): Promise<StoredOperation[]> {
     if (this.access && this.access.ownerId !== owner) throw new Error('Sync owner changed')
     const token = this.access ? undefined : await this.token(owner)
-    const query = () => this.client.from('sync_operations')
-      .select('id,device_id,logical_clock,entity_type,entity_id,kind,payload,schema_version,cursor,received_at')
-      .gt('cursor', cursor).order('cursor', { ascending: true }).limit(500)
-    const { data, error } = this.access ? await accountRequest(this.access, query) : await query().setHeader('Authorization', `Bearer ${token}`)
+    const columns = 'id,device_id,logical_clock,entity_type,entity_id,kind,payload,schema_version,cursor,received_at'
+    const query = () => {
+      const request = this.language === 'en' ? this.client.from('sync_operations').select(columns)
+        : this.client.from('language_sync_operations').select('id,device_id,logical_clock,entity_type,entity_id,kind,payload,schema_version,cursor,received_at,learning_language').eq('learning_language', this.language)
+      return request.gt('cursor', cursor).order('cursor', { ascending: true }).limit(500)
+    }
+    const { data, error } = this.access ? await accountRequest<{ data: unknown; error: unknown }>(this.access, query) : await query().setHeader('Authorization', `Bearer ${token}`)
     if (token) { await this.unchanged(token); await this.validatePrincipal(owner, token) }
     if (error || !Array.isArray(data)) throw new Error('Could not download learning records. Your local work is safe.')
+    if (this.language !== 'en' && data.some(row => row.learning_language !== this.language)) throw new Error('Downloaded records belong to another language')
     return data.map(row => ({ ...parseOperation({ id: row.id, deviceId: row.device_id, logicalClock: Number(row.logical_clock),
       entityType: row.entity_type, entityId: row.entity_id, kind: row.kind, payload: row.payload, schemaVersion: row.schema_version }),
       cursor: Number(row.cursor), receivedAt: Date.parse(row.received_at) }))
@@ -85,6 +94,7 @@ export function uploadBatch(pending: SyncOperation[]): SyncOperation[] {
 
 /** Bounded batches are durable checkpoints; a failed request never discards pending work. */
 export async function synchronize(journal: SyncJournal, remote: SyncRemote): Promise<{ pending: number; downloaded: number; hasMore: boolean; deferred: number; conflicts: number }> {
+  if (journal.database.language !== (remote.language ?? 'en')) throw new Error('Sync language does not match this workspace')
   await journal.capture()
   const owner = await journal.owner()
   let downloaded = 0

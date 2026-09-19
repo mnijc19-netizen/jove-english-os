@@ -38,7 +38,7 @@ export function createCloudState(database: JoveDatabase = db, client: SupabaseCl
           check(generation, id)
           if (await journal.owner() !== id) throw new Error('Sync owner changed')
         })
-        const result = await synchronize(journal, new SupabaseSyncRemote(access.client, access))
+        const result = await synchronize(journal, new SupabaseSyncRemote(access.client, access, database.language))
         check(generation, id)
         refresh = result.downloaded > 0
         pending.value = result.pending; hasMore.value = result.hasMore; deferred.value = result.deferred; conflicts.value = result.conflicts
