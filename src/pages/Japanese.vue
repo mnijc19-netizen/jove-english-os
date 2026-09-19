@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { db as english, createLanguageDatabase } from '../db/db'
-import { createJapaneseWorkspace, japanesePracticeDraft, type JapanesePracticeStep } from '../db/japanese'
+import { createJapaneseWorkspace, japanesePracticeDraft, type JapanesePracticeStep, type JapanesePracticeDraft } from '../db/japanese'
 import { japanesePlacement, japanesePlacementItems, kanaMorae } from '../domain/japanese'
 import { japaneseStarterLessons, japaneseSource } from '../content/japanese'
 import { readLanguageDay } from '../db/language-day'
@@ -19,7 +19,7 @@ const assessment = shallowRef<Assessment>(), plan = shallowRef<DailyPlan | null>
 const audio = shallowRef<AudioAsset[]>([]), unfinished = shallowRef<StudySession[]>([])
 const allowance = shallowRef<Awaited<ReturnType<typeof readLanguageDay>>>(null)
 const responses = reactive<Record<string, string>>({})
-const draft = reactive({ taskId: '', revision: 0, listened: false, response: '', expression: '', example: '', audioId: '', retryAudioId: '', comparison: '' })
+const draft = reactive<JapanesePracticeDraft>({ taskId: '', revision: 0, listened: false, response: '', expression: '', example: '', audioId: '', retryAudioId: '', comparison: '' })
 const step = ref<JapanesePracticeStep>('listen'), showReading = ref(false), dirty = ref(false)
 let timer: ReturnType<typeof setTimeout> | undefined, disposed = false
 let navigationGeneration = 0, allowedNavigation = ''
@@ -36,7 +36,9 @@ const nextEnabled = computed(() => step.value === 'listen' ? draft.listened && !
 
 async function refreshAudio() { audio.value = await database.audio.toArray() }
 function restore(saved: StudySession) {
-  session.value = saved; Object.assign(draft, japanesePracticeDraft.parse(saved.draft))
+  session.value = saved
+  delete draft.audioUnavailable; delete draft.missingAudioIds
+  Object.assign(draft, japanesePracticeDraft.parse(saved.draft))
   step.value = (saved.completedAt ? 'compare' : saved.stage) as JapanesePracticeStep
   dirty.value = false
 }
@@ -202,6 +204,7 @@ onBeforeUnmount(() => {
         <RouterLink to="/ja" class="button primary">返回日语今日安排</RouterLink>
       </section>
       <section v-else-if="lesson" class="panel ja-panel">
+        <p v-if="draft.audioUnavailable" class="help-text" role="status">这个备份不含部分录音文件，文字回答和对照笔记仍保留。未完成的练习可重新录音继续；不会把缺失录音算作已验证的口语表现。</p>
         <p class="eyebrow">{{ { listen: '1 / 4 · 先听懂意思', notice: '2 / 4 · 留意表达', speak: '3 / 4 · 换个情境说', compare: '4 / 4 · 对照后重说' }[step] }}</p>
         <h2>{{ lesson.title }}</h2><p>{{ lesson.canDo }}</p>
         <a :href="sourceUrl" target="_blank" rel="noopener noreferrer" class="button">打开原站真人音频 ↗</a>

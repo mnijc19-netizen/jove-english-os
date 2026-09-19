@@ -8,7 +8,8 @@ const responseSchema = z.strictObject({ response: z.string().max(10_000), audioI
 const itemSchema = responseSchema.extend({ cardId: z.string(), reps: z.number().int().nonnegative(),
   revealed: z.boolean(), hintUsed: z.boolean(), rating: z.number().int().min(1).max(4).optional(), skipped: z.literal('schedule-changed').optional() })
 export const japaneseReviewDraft = z.strictObject({ taskId: z.string(), minutes: z.number().int().positive(),
-  revision: z.number().int().nonnegative(), items: z.array(itemSchema).min(1).max(5) })
+  revision: z.number().int().nonnegative(), items: z.array(itemSchema).min(1).max(5),
+  audioUnavailable: z.boolean().optional(), missingAudioIds: z.array(z.string()).optional() })
 export type JapaneseReviewResponse = z.infer<typeof responseSchema>
 
 /** Same FSRS/evidence implementation, immutable Japanese database and owner.
@@ -101,9 +102,13 @@ export function createJapaneseReview(database: JoveDatabase, checkOwner: () => P
       const { session, draft } = await read(id), item = draft.items.find(item => !item.rating && !item.skipped)
       if (session.completedAt) return session
       if (!item || !item.revealed || draft.revision !== revision) throw new Error('请先保存首答并对照，再选择记忆情况。')
-      await repository.reviewCard(item.cardId, rating, { expectedReps: item.reps, source: 'self-report', prompted: item.hintUsed,
+      const card = await database.cards.get(item.cardId)
+      const audio = item.audioId ? await database.audio.get(item.audioId) : undefined
+      const savedAudio = audio?.kind === 'recording' && audio.blob.size > 0
+      const missingOral = (card?.modality === 'speaking' || card?.modality === 'transfer') && !savedAudio
+      await repository.reviewCard(item.cardId, rating, { expectedReps: item.reps, source: 'self-report', prompted: item.hintUsed || missingOral,
         eventId: `${id}:rating:${item.cardId}`, responseEventId: `${id}:response:${item.cardId}`, sessionId: id,
-        ...(item.audioId ? { audioId: item.audioId } : {}) })
+        ...(savedAudio ? { audioId: item.audioId } : {}) })
       item.rating = rating; draft.revision++
       return persist(session, draft, now)
     })

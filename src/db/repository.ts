@@ -279,15 +279,20 @@ function markMissingAudio(tables: Backup['tables'], available: Set<string>): voi
   for (const material of tables.materials) if (material.audioId && !available.has(material.audioId)) delete material.audioId
   for (const conversation of tables.conversations) for (const message of conversation.messages) if (message.audioId && !available.has(message.audioId)) delete message.audioId
   for (const event of tables.events) {
-    const audioId = event.data?.audioId
-    if (typeof audioId === 'string' && !available.has(audioId)) event.data = { ...event.data, audioAvailable: false }
+    for (const audioId of [event.data?.audioId, event.data?.retryAudioId]) {
+      if (typeof audioId === 'string' && audioId && !available.has(audioId)) event.data = { ...event.data, audioAvailable: false }
+    }
   }
   // Drafts are intentionally extensible JSON. Mark missing audio without discarding saved text.
   const visit = (value: unknown, missing: Set<string>) => {
     if (!value || typeof value !== 'object') return
     if (Array.isArray(value)) { for (const child of value) visit(child, missing); return }
     const record = value as Record<string, unknown>
-    if (typeof record.audioId === 'string' && !available.has(record.audioId)) { missing.add(record.audioId); delete record.audioId }
+    for (const field of ['audioId', 'retryAudioId']) {
+      if (typeof record[field] === 'string' && record[field] && !available.has(record[field])) {
+        missing.add(record[field]); delete record[field]
+      }
+    }
     if (Array.isArray(record.audioIds)) record.audioIds = record.audioIds.filter(audioId => {
       if (typeof audioId === 'string' && !available.has(audioId)) { missing.add(audioId); return false }
       return true
@@ -298,6 +303,15 @@ function markMissingAudio(tables: Backup['tables'], available: Set<string>): voi
     const missing = new Set<string>()
     visit(session.draft, missing)
     if (missing.size) { session.draft.audioUnavailable = true; session.draft.missingAudioIds = [...missing] }
+    // Japanese drafts have a strict resumable shape. Preserve text/first-answer
+    // locks, but never leave an absent file masquerading as a saved recording.
+    if (session.kind === 'japanese-practice') {
+      session.draft.audioId ??= ''; session.draft.retryAudioId ??= ''
+      if (!session.completedAt && session.stage === 'compare' && !session.draft.audioId) session.stage = 'speak'
+    }
+    if (session.kind === 'japanese-review' && Array.isArray(session.draft.items)) {
+      for (const item of session.draft.items as Record<string, unknown>[]) item.audioId ??= ''
+    }
   }
 }
 

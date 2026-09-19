@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
 
 // Explicit development-only acceptance; production intentionally has no /ja
 // route until sync/review/AI integration is ready. No live owner/provider calls.
@@ -182,4 +183,54 @@ test('Japanese review keeps the first answer when another device advances the ca
   }, id)
   expect(saved.item).toMatchObject({ response: '首答：おはようございます。', skipped: 'schedule-changed' })
   expect(saved.completed).toBe(0)
+})
+
+test('Japanese Settings exports isolated backup and restores missing-recording practice on a fresh device', async ({ page, browser }) => {
+  await page.goto('#/ja')
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  const sessionId = await page.evaluate(async () => {
+    const paths = ['/jove-english-os/src/db/db.ts', '/jove-english-os/src/db/japanese.ts', '/jove-english-os/src/domain/japanese.ts']
+    const [{ db, createLanguageDatabase }, { createJapaneseWorkspace }, { japanesePlacementItems }] = await Promise.all(paths.map(path => import(path)))
+    const database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, db)
+    await learning.open(); await learning.saveDiagnostic(Object.fromEntries(japanesePlacementItems.map((item: { id: string }) => [item.id, '跳过'])), true)
+    const plan = await learning.today(), session = await learning.start(plan.tasks[0].id)
+    await database.audio.bulkPut(['first', 'retry'].map(id => ({ id, blob: new Blob(['fixture-recording']), mimeType: 'audio/wav', createdAt: Date.now(), duration: 1, kind: 'recording', processed: false, label: 'Fixture' })))
+    await learning.save(session.id, { ...session.draft, listened: true, response: '见到同事打招呼', expression: 'おはようございます', example: 'おはようございます。', audioId: 'first', retryAudioId: 'retry', comparison: '保留对照笔记' }, 'compare')
+    database.close(); return session.id
+  })
+  await page.goto('#/settings')
+  await page.getByLabel('备份、恢复及清理缓存的语言').selectOption('ja')
+  const downloading = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export backup', exact: true }).click()
+  const downloaded = await downloading, bytes = await readFile((await downloaded.path())!)
+  expect(downloaded.suggestedFilename()).toContain('jove-japanese-backup')
+  expect(JSON.parse(bytes.toString())).toMatchObject({ schemaVersion: 3, learningLanguage: 'ja' })
+  expect(bytes.toString()).not.toContain('fixture-recording')
+  await page.getByLabel('备份、恢复及清理缓存的语言').selectOption('en')
+  await page.locator('#restore-file').setInputFiles({ name: 'ja.json', mimeType: 'application/json', buffer: bytes })
+  await page.getByRole('button', { name: 'Validate & merge backup', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('another learning language')
+
+  const device = await browser.newContext({ baseURL: process.env.PLAYWRIGHT_BASE_URL, serviceWorkers: 'block', permissions: ['microphone'],
+    viewport: test.info().project.use.viewport, isMobile: test.info().project.use.isMobile, hasTouch: test.info().project.use.hasTouch })
+  try {
+    const target = await device.newPage()
+    await target.goto('#/ja')
+    await expect(target.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+    await target.goto('#/settings')
+    await target.getByLabel('备份、恢复及清理缓存的语言').selectOption('ja')
+    await target.locator('#restore-file').setInputFiles({ name: 'ja.json', mimeType: 'application/json', buffer: bytes })
+    await target.getByRole('button', { name: 'Validate & merge backup', exact: true }).click()
+    await expect(target.getByRole('status').filter({ hasText: 'Backup merged with retained learning history' })).toBeVisible()
+    await target.goto('#/ja?session=' + encodeURIComponent(sessionId))
+    await expect(target.getByText('这个备份不含部分录音文件', { exact: false })).toBeVisible()
+    await expect(target.getByText('3 / 4 · 换个情境说', { exact: true })).toBeVisible()
+    await target.getByRole('button', { name: 'Record response', exact: true }).click()
+    await expect(target.getByRole('status').filter({ hasText: '1s / 180s' })).toBeVisible()
+    await target.getByRole('button', { name: 'Stop & save', exact: true }).click()
+    await expect(target.getByText('Saved on this device', { exact: true })).toBeVisible()
+    await target.getByRole('button', { name: '保存并继续' }).click()
+    await expect(target.getByLabel('这次准备调整什么？')).toHaveValue('保留对照笔记')
+    expect(await target.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  } finally { await device.close() }
 })

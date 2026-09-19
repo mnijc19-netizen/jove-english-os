@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import Dexie from "dexie";
 import { useApp } from "../stores/app";
 import { db } from "../db/db";
 import { exportBackup, restoreBackup } from "../db/repository";
@@ -10,8 +11,16 @@ import Icon from "../components/Icon.vue";
 import CloudAccount from "../components/CloudAccount.vue";
 import AccountUsage from "../components/AccountUsage.vue";
 import { useCloud } from "../stores/cloud";
+import { useJapaneseSpace } from "../stores/japanese-space";
 import { resetDeviceCacheAndKey } from "../sync/local-change";
 const cloud = useCloud();
+const japanese = useJapaneseSpace();
+const japaneseEnabled = import.meta.env.DEV;
+const dataLanguage = ref<'en' | 'ja'>('en');
+const dataLabel = computed(() => dataLanguage.value === 'ja' ? '日语' : '英语');
+const importedLanguage = ref<'en' | 'ja'>('en');
+const fileInput = ref<HTMLInputElement>();
+const japaneseAudioMB = ref<number>();
 const advancedAi = ref(false);
 const app = useApp(),
   key = ref(""),
@@ -22,6 +31,18 @@ const app = useApp(),
   importText = ref(""),
   importName = ref("");
 const { busy, error, run, cancel } = useRequest();
+function clearImport() {
+  importText.value = ''; importName.value = '';
+  if (fileInput.value) fileInput.value.value = '';
+}
+watch(dataLanguage, () => { clearImport(); message.value = ''; error.value = ''; });
+async function dataContext(language: 'en' | 'ja') {
+  if (language === 'en') return { database: db, account: cloud };
+  if (!japaneseEnabled || !(await Dexie.getDatabaseNames()).includes(japanese.database.name))
+    throw new Error('请先打开日语学习区；这里不会为了备份而创建空的学习记录。');
+  await japanese.ensure();
+  return { database: japanese.database, account: japanese };
+}
 const textModels = computed(() =>
   models.value.filter((m) => m.outputModalities.includes("text")),
 );
@@ -84,14 +105,17 @@ async function preference(field: keyof Settings, event: Event) {
   if (!saved) input.value = String(app.settings[field]);
 }
 async function backup() {
-  await run(async () => {
-    const content = await exportBackup();
+  const language = dataLanguage.value;
+  await run(async (signal) => {
+    const { database } = await dataContext(language);
+    const content = await exportBackup(database);
+    signal.throwIfAborted();
     const url = URL.createObjectURL(
       new Blob([content], { type: "application/json" }),
     );
     const a = document.createElement("a");
     a.href = url;
-    a.download = `jove-english-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `jove-${language === 'ja' ? 'japanese' : 'english'}-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     message.value =
@@ -99,28 +123,41 @@ async function backup() {
   });
 }
 async function loadFile(event: Event) {
+  if (busy.value) return;
   const file = (event.target as HTMLInputElement).files?.[0];
   if (!file) return;
+  clearImport();
   if (file.size > 25 * 1024 * 1024) {
     message.value = "Backup must be smaller than 25 MB.";
     return;
   }
-  importText.value = await file.text();
-  importName.value = file.name;
+  const language = dataLanguage.value;
+  const content = await run(async (signal) => {
+    const text = await file.text();
+    signal.throwIfAborted();
+    return text;
+  });
+  if (content !== undefined && language === dataLanguage.value) {
+    importText.value = content; importName.value = file.name; importedLanguage.value = language;
+  }
 }
 async function restore() {
+  const language = dataLanguage.value, text = importText.value;
   const result = await run(async (signal) => {
-    await cloud.withLocalDataChange(async () => {
+    if (!text || importedLanguage.value !== language) throw new Error('请重新选择此语言的备份文件。');
+    const { database, account } = await dataContext(language);
+    signal.throwIfAborted();
+    await account.withLocalDataChange(async () => {
       signal.throwIfAborted();
-      await restoreBackup(importText.value);
+      await restoreBackup(text, database);
       signal.throwIfAborted();
     });
     await app.refresh();
+    await storageStatus();
     return true;
   });
   if (result) {
-    importText.value = "";
-    importName.value = "";
+    clearImport();
     message.value =
       "Backup merged with retained learning history. Existing recordings and account sync history are safe. Audio files are separate from this backup.";
   }
@@ -136,17 +173,27 @@ async function storageStatus() {
   const estimate = await navigator.storage?.estimate?.();
   const persistent = await navigator.storage?.persisted?.();
   storage.value = `${((estimate?.usage || 0) / 1024 / 1024).toFixed(1)} MB used · ${persistent ? "persistent storage" : "standard browser storage"}`;
+  japaneseAudioMB.value = undefined;
+  if (japaneseEnabled && (await Dexie.getDatabaseNames()).includes(japanese.database.name)
+      && (await japanese.database.syncMeta.get('owner'))?.value === (await db.syncMeta.get('owner'))?.value) {
+    japaneseAudioMB.value = (await japanese.database.audio.toArray()).reduce((sum, asset) => sum + asset.blob.size, 0) / 1024 / 1024;
+  }
 }
 async function clearCache() {
-  const result = await run(async () => {
-    await cloud.withLocalDataChange(async () => {
-      await db.audio.filter((asset) => asset.kind === "generated" || asset.kind === "content-cache").delete();
+  const language = dataLanguage.value;
+  const result = await run(async (signal) => {
+    const { database, account } = await dataContext(language);
+    signal.throwIfAborted();
+    await account.withLocalDataChange(async () => {
+      signal.throwIfAborted();
+      await database.audio.filter((asset) => asset.kind === "generated" || asset.kind === "content-cache").delete();
+      signal.throwIfAborted();
     });
     await app.refresh();
     await storageStatus();
     return true;
   });
-  if (result) message.value = "Downloadable and generated audio caches cleared. Your recordings and imported audio are retained.";
+  if (result) message.value = `${language === 'ja' ? '日语' : '英语'}可重新下载的音频缓存已清理。录音原件、导入音频和另一语言的数据均保留。`;
 }
 async function reset() {
   if (resetText.value !== "RESET") return;
@@ -472,6 +519,13 @@ onMounted(storageStatus);
       </div>
       <div class="panel settings-panel">
         <h3>Backup & restore</h3>
+        <template v-if="japaneseEnabled">
+          <label for="data-language">备份、恢复及清理缓存的语言</label>
+          <select id="data-language" v-model="dataLanguage" :disabled="busy">
+            <option value="en">英语</option><option value="ja">日语</option>
+          </select>
+          <p class="help-text">当前操作只针对{{ dataLabel }}。两种语言分别备份，系统会拒绝导入错误语言的文件，不会改写另一语言的学习记录。</p>
+        </template>
         <p v-if="cloud.configured" class="help-text">Cloud recording preferences are managed with your account usage above. Unfinished originals remain protected.</p>
         <p>
           Back up your learning, review schedules and preferences. Keys and
@@ -482,6 +536,8 @@ onMounted(storageStatus);
         ><label for="restore-file">Restore an exported backup</label
         ><input
           id="restore-file"
+          ref="fileInput"
+          :disabled="busy"
           type="file"
           accept=".json,application/json"
           @change="loadFile"
@@ -496,10 +552,8 @@ onMounted(storageStatus);
             Validate & merge backup</button
           ><button
             class="text-button"
-            @click="
-              importText = '';
-              importName = '';
-            "
+            :disabled="busy"
+            @click="clearImport"
           >
             Cancel
           </button>
@@ -507,7 +561,8 @@ onMounted(storageStatus);
         <hr />
         <h3>Device storage</h3>
         <p>{{ storage }}</p>
-        <p class="muted">{{ audioMB.toFixed(1) }} MB of saved audio</p>
+        <p class="muted">{{ audioMB.toFixed(1) }} MB of saved English audio</p>
+        <p v-if="japaneseAudioMB !== undefined" class="muted">日语音频 {{ japaneseAudioMB.toFixed(1) }} MB · 两种语言合计 {{ (audioMB + japaneseAudioMB).toFixed(1) }} MB。浏览器总占用还包括页面缓存和学习记录。</p>
         <div class="row wrap">
           <button class="text-button" @click="persistent">
             Request persistent storage</button
@@ -527,6 +582,7 @@ onMounted(storageStatus);
         />
         <details class="danger-zone">
           <summary>Reset local key and audio caches</summary>
+          <p v-if="japaneseEnabled" class="help-text">下方重置只清理英语端的可选 API Key 和可再下载缓存，不随上方语言选择改变。日语缓存请使用上面的清理按钮。任何操作都不会删除录音原件。</p>
           <p>
             This clears the optional API key and reusable audio caches on this device.
             Learning, drafts, original recordings, preferences and the account's sync history are kept.

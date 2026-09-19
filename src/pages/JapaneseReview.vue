@@ -130,6 +130,8 @@ onBeforeUnmount(() => {
       <RouterLink to="/ja" class="button primary">继续今日安排</RouterLink>
     </section>
     <section v-else-if="card && chunk && item" class="panel ja-review-panel">
+      <p v-if="draft?.audioUnavailable" class="help-text" role="status">备份中的部分录音没有恢复，文字首答仍保留。已看过参考的首答不会解锁重写；缺失口语录音时将较早安排再练，不按本次自评延长间隔。</p>
+      <p v-else-if="oral && item.revealed && !playback" class="help-text" role="status">这次首答的录音暂时不在本机，可以等同步后再回放。若现在继续，系统会较早安排再练，不将缺失原件当作已验证的口语表现。</p>
       <p class="eyebrow">{{ modalityLabels[card.modality] }} · {{ draft!.items.filter(item => item.rating || item.skipped).length + 1 }} / {{ draft!.items.length }}</p>
       <h2 :lang="card.modality === 'recognition' ? 'ja' : 'zh'">{{ prompt }}</h2>
       <template v-if="card.modality === 'listening'">

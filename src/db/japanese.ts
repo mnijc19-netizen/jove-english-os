@@ -19,6 +19,7 @@ const text = z.string().max(10_000)
 export const japanesePracticeDraft = z.strictObject({
   taskId: text, revision: z.number().int().nonnegative(), listened: z.boolean(), response: text,
   expression: text, example: text, audioId: text, retryAudioId: text, comparison: text,
+  audioUnavailable: z.boolean().optional(), missingAudioIds: z.array(text).optional(),
 })
 export type JapanesePracticeDraft = z.infer<typeof japanesePracticeDraft>
 const diagnosticId = 'ja-initial-diagnostic'

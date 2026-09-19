@@ -5,8 +5,11 @@ import { createClient } from '@supabase/supabase-js'
 import { JoveDatabase, version1Stores, DB_NAME, createLanguageDatabase } from '../src/db/db'
 import { defaultProfile, type AudioAsset, type StudyEvent } from '../src/domain/types'
 import { type LearningLanguage } from '../src/domain/language'
-import { exportBackup, restoreBackup } from '../src/db/repository'
+import { createLearningRepository, exportBackup, restoreBackup } from '../src/db/repository'
+import { japaneseStarterMaterials } from '../src/content/japanese'
 import { parseBackup } from '../src/db/schema'
+import { japanesePracticeDraft } from '../src/db/japanese'
+import { japaneseReviewDraft } from '../src/db/japanese-review'
 import { SyncJournal } from '../src/sync/journal'
 import { SupabaseSyncRemote, synchronize, type SyncRemote } from '../src/sync/remote'
 import { type StoredOperation, type SyncOperation } from '../src/sync/protocol'
@@ -104,6 +107,30 @@ describe('immutable local learning-language partitions', () => {
     await restoreBackup(japanese, restored)
     expect(await restored.events.get('same-event')).toEqual(event(0.4))
     expect((await restored.profiles.get('main'))?.goal).toBe('Japanese only')
+  })
+  it('restores unfinished Japanese drafts without missing originals blocking the next recording', async () => {
+    const ja = database('ja'), restored = database('ja'), now = 1789819200000
+    const material = japaneseStarterMaterials()[0]!
+    await ja.materials.put(material); await createLearningRepository(ja).addChunk(material.chunks[0]!, material.id)
+    const cardId = (await ja.cards.toArray())[0]!.id
+    const recording: AudioAsset = { id: 'first', blob: new Blob(['first recording']), mimeType: 'audio/wav', createdAt: now, duration: 1, kind: 'recording', processed: false, label: '原件' }
+    await ja.audio.bulkPut([recording, { ...recording, id: 'retry' }])
+    await ja.sessions.bulkPut([
+      { id: 'practice', kind: 'japanese-practice', startedAt: now, stage: 'compare', draft: { taskId: 'ja-task', revision: 2, listened: true,
+        response: '听懂的意思', expression: 'こんにちは', example: '自己的例句', audioId: 'first', retryAudioId: 'retry', comparison: '只调整一个地方' } },
+      { id: 'review', kind: 'japanese-review', startedAt: now, stage: 'recall', draft: { taskId: 'ja-review', minutes: 1, revision: 1,
+        items: [{ cardId, reps: 0, response: '冻结的首答', audioId: 'first', heard: false, revealed: true, hintUsed: false }] } },
+    ])
+    const backup = await exportBackup(ja)
+    await restoreBackup(backup, restored)
+    const practice = (await restored.sessions.get('practice'))!, review = (await restored.sessions.get('review'))!
+    expect(practice.stage).toBe('speak')
+    expect(japanesePracticeDraft.parse(practice.draft)).toMatchObject({ response: '听懂的意思', comparison: '只调整一个地方', audioId: '', retryAudioId: '', audioUnavailable: true })
+    expect(japaneseReviewDraft.parse(review.draft)).toMatchObject({ audioUnavailable: true, items: [{ response: '冻结的首答', audioId: '', revealed: true }] })
+    expect(await restored.audio.count()).toBe(0)
+    await restoreBackup(backup, ja)
+    expect((await ja.sessions.get('practice'))?.stage).toBe('compare')
+    expect(japanesePracticeDraft.parse((await ja.sessions.get('practice'))!.draft)).toMatchObject({ audioId: 'first', retryAudioId: 'retry' })
   })
 })
 

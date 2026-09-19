@@ -71,6 +71,22 @@ describe('Japanese delayed review with separate recall evidence', () => {
     const review = (await ja.events.toArray()).find(event => event.type === 'review')!
     expect(review.prompted).toBe(true); expect(review.data?.scheduledRating).toBe(1)
   })
+  it.each(['json-backup', 'still-referenced'])('keeps oral first answers frozen and schedules a conservative retry when audio is absent (%s)', async mode => {
+    const { learning, session, ja } = await setup('speaking')
+    await ja.audio.put({ id: 'spoken', blob: new Blob(['test-only-recording']), kind: 'recording', processed: false,
+      mimeType: 'audio/wav', createdAt: now, duration: 2, label: 'Japanese response' })
+    await learning.review.save(session.id, 0, { response: '原始首答', audioId: 'spoken', heard: false }, true, now)
+    const backup = await learning.repository.exportBackup()
+    // Isolated fixture represents restoring a JSON-only backup on a new device.
+    await ja.audio.clear()
+    if (mode === 'json-backup') await learning.repository.restoreBackup(backup)
+    expect((await learning.review.read(session.id)).draft.items[0]).toMatchObject({ response: '原始首答', audioId: mode === 'json-backup' ? '' : 'spoken', revealed: true })
+    await expect(learning.review.save(session.id, 1, { response: '看过答案后', audioId: '', heard: false })).rejects.toThrow('首答已锁定')
+    await learning.review.rate(session.id, 1, 4, now)
+    const rating = (await ja.events.toArray()).find(event => event.type === 'review')!
+    expect(rating.prompted).toBe(true); expect(rating.data?.scheduledRating).toBe(1)
+    expect((await ja.skills.toArray()).every(skill => skill.evidenceCount === 0)).toBe(true)
+  })
   it('does not turn typed Japanese into independent speaking or a publisher click into hearing evidence', async () => {
     const { learning, session, ja } = await setup('speaking')
     const saved = await learning.review.save(session.id, 0, { response: 'おはようございます', audioId: '', heard: false }, true, now)
