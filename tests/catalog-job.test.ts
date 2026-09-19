@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { refreshCourseDirectories, refreshCourseDirectory } from '../scripts/refresh-course-directory.mjs'
+import { directoryJobDiagnostics, refreshCourseDirectories, refreshCourseDirectory } from '../scripts/refresh-course-directory.mjs'
 
 const token = 'd'.repeat(64) // Fixture only, not a deployed credential.
 describe('directory-only scheduler client', () => {
@@ -52,5 +52,21 @@ describe('directory-only scheduler client', () => {
   })
   it('bounds response bytes', async () => {
     await expect(refreshCourseDirectory(token, async () => new Response('x'.repeat(4097)))).rejects.toThrow('exceeds its limit')
+  })
+  it('reports a fixed HTTP status and successful sibling without logging sensitive response or credential text', async () => {
+    let failure: unknown
+    try { await refreshCourseDirectories(token, async (_url: string | URL | Request, init?: RequestInit) =>
+      JSON.parse(String(init?.body)).sourceId === 'voa-level2' ? Response.json({ refreshed: false, reason: 'not-due-or-running' })
+        : new Response(`sensitive-response-${token}`, { status: 401 })) } catch (error) { failure = error }
+    expect(directoryJobDiagnostics(failure)).toEqual([{ sourceId: 'voa-level1', code: 'HTTP', status: 401 }, { sourceId: 'voa-level2', code: 'SUCCESS_OR_NOT_DUE' }])
+    expect(JSON.stringify(directoryJobDiagnostics(failure))).not.toContain(token)
+  })
+  it('categorizes credential and transport errors without using arbitrary error messages or attached diagnostics', async () => {
+    for (const [credential, code] of [['', 'CREDENTIAL'], [token, 'TRANSPORT']]) {
+      let failure: unknown
+      try { await refreshCourseDirectory(credential, async () => { throw Object.assign(new Error(`upstream-${token}`), { diagnostics: token }) }) } catch (error) { failure = error }
+      expect(directoryJobDiagnostics(failure)).toEqual([{ sourceId: 'voa-level1', code }])
+    }
+    expect(directoryJobDiagnostics(Object.assign(new Error(token), { diagnostics: token }))).toEqual([{ code: 'UNCLASSIFIED' }])
   })
 })
