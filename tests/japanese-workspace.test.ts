@@ -90,7 +90,7 @@ describe('Japanese usable practice persistence', () => {
     await ja.materials.update('ja-irodori-starter-1', { title: 'My retained title' })
     await learning.open()
     expect((await ja.materials.get('ja-irodori-starter-1'))?.title).toBe('My retained title')
-    expect(await ja.materials.count()).toBe(54)
+    expect(await ja.materials.count()).toBe(72)
     await learning.saveDiagnostic(skipped, true, now)
     const session = await learning.start((await learning.today(now))!.tasks[0]!.id, now)
     await ja.audio.bulkAdd([recording('original'), recording('retry')])

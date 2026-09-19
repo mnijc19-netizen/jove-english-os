@@ -52,7 +52,7 @@ async function refresh() {
   if (assessment.value) Object.assign(responses, assessment.value.responses)
   plan.value = await learning.today()
   allowance.value = await readLanguageDay(english, Date.now(), database)
-  unfinished.value = await database.sessions.filter(session => ['japanese-practice', 'japanese-review', 'japanese-dialogue'].includes(session.kind) && !session.completedAt).toArray()
+  unfinished.value = await database.sessions.filter(session => ['japanese-practice', 'japanese-review', 'japanese-dialogue', 'japanese-reading'].includes(session.kind) && !session.completedAt).toArray()
   await refreshAudio()
 }
 async function loadSession(id: unknown, generation = navigationGeneration) {
@@ -117,9 +117,12 @@ async function start() {
   if (!task.value) return
   const saved = await learning.start(task.value.id)
   if (disposed) return
-  const destination = { path: saved.kind === 'japanese-review' ? '/ja/review' : saved.kind === 'japanese-dialogue' ? '/ja/talk' : '/ja', query: { session: saved.id } }
+  const destination = { path: sessionPath(saved), query: { session: saved.id } }
   allowedNavigation = router.resolve(destination).fullPath
   try { await router.push(destination) } finally { allowedNavigation = '' }
+}
+function sessionPath(saved: StudySession) {
+  return saved.kind === 'japanese-review' ? '/ja/review' : saved.kind === 'japanese-dialogue' ? '/ja/talk' : saved.kind === 'japanese-reading' ? '/ja/read' : '/ja'
 }
 async function move(next: JapanesePracticeStep) {
   if (captureActive.value || !session.value) return
@@ -216,7 +219,7 @@ onBeforeUnmount(() => {
           <button v-if="task" class="button primary" :disabled="busy || navigating" @click="act(start)">开始学习 · 约 {{ task.minutes }} 分钟</button>
           <p class="help-text">听力、口语仍待实际练习观察；认字不等于会说。{{ placement?.kanaSupport ? '需要时会显示假名读法和拍数提示。' : '读法提示默认收起，需要时可以展开。' }}</p>
         </section>
-        <section v-if="unfinished.length" class="section"><h2>接着上次的练习</h2><p v-for="saved in unfinished" :key="saved.id"><RouterLink :to="{ path: saved.kind === 'japanese-review' ? '/ja/review' : saved.kind === 'japanese-dialogue' ? '/ja/talk' : '/ja', query: { session: saved.id } }">{{ saved.kind === 'japanese-review' ? '日语延迟复习' : saved.kind === 'japanese-dialogue' ? '日语三轮对话' : japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title }} · 继续草稿</RouterLink></p></section>
+        <section v-if="unfinished.length" class="section"><h2>接着上次的练习</h2><p v-for="saved in unfinished" :key="saved.id"><RouterLink :to="{ path: sessionPath(saved), query: { session: saved.id } }">{{ saved.kind === 'japanese-review' ? '日语延迟复习' : saved.kind === 'japanese-dialogue' ? '日语三轮对话' : saved.kind === 'japanese-reading' ? '日语短篇阅读' : japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title }} · 继续草稿</RouterLink></p></section>
       </template>
       <section v-else-if="session.completedAt" class="panel ja-panel">
         <h2>这次练习已保存</h2><p>回答、原始录音和重说录音都已保留。参考词块已加入日语间隔复习；完成练习不等于已掌握。</p>

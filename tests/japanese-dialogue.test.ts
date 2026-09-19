@@ -147,7 +147,7 @@ describe('durable bounded Japanese multi-turn interaction', () => {
       data: { materialId: `ja-irodori-starter-${index}`, response: '过去的练习', expression: 'お願いします', example: 'お願いします。', audioId: 'past-audio', listened: true, playbackObserved: false, comprehensionVerified: false } })
     const plan = (await learning.today())!, talk = plan.tasks.find(task => task.kind === 'speak')!
     expect(talk.minutes).toBe(5); expect(plan.minutes).toBeLessThanOrEqual(23)
-    expect(plan.tasks.find(task => task.kind === 'listen')!.minutes + talk.minutes).toBe(plan.minutes)
+    expect(plan.tasks.find(task => task.kind === 'listen')!.minutes + talk.minutes + (plan.tasks.find(task => task.kind === 'learn')?.minutes ?? 0)).toBe(plan.minutes)
     expect((await learning.start(talk.id)).kind).toBe('japanese-dialogue')
     expect((await learning.today())!.tasks.filter(task => task.kind === 'speak')).toHaveLength(1)
   })

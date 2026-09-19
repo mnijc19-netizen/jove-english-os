@@ -6,6 +6,70 @@ import { readFile } from 'node:fs/promises'
 test.skip(process.env.JOVE_JAPANESE_PREVIEW !== '1', 'Japanese workspace is a local development candidate')
 test.use({ serviceWorkers: 'block' })
 
+test('Japanese original reading locks independent evidence, resumes help and schedules a separate text revisit', async ({ page }, testInfo) => {
+  await page.goto('#/ja')
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  const sessionId = await page.evaluate(async () => {
+    const paths = ['/jove-english-os/src/db/db.ts', '/jove-english-os/src/db/japanese.ts']
+    const [{ db: en, createLanguageDatabase }, { createJapaneseWorkspace }] = await Promise.all(paths.map(path => import(/* @vite-ignore */ path)))
+    const ja = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(ja, en)
+    await learning.open()
+    const saved = await learning.reading.start({ id: 'browser-reading', kind: 'learn', title: '早餐留言', reason: 'Browser fixture', minutes: 5, materialId: 'ja-reading-0-1', done: false })
+    ja.close(); return saved.id as string
+  })
+  await page.goto(`#/ja/read?session=${encodeURIComponent(sessionId)}`)
+  await expect(page.getByRole('heading', { name: '先读懂，再试着读出来。' })).toBeVisible()
+  await page.getByRole('radio', { name: '早餐在哪里', exact: true }).check()
+  await page.getByRole('textbox', { name: '牛乳 的假名读法' }).fill('ぎゅうにゅう')
+  await expect(page.getByRole('status').filter({ hasText: '首答与笔记已保存在本机' })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('radio', { name: '早餐在哪里', exact: true })).toBeChecked()
+  await expect(page.getByRole('textbox', { name: '牛乳 的假名读法' })).toHaveValue('ぎゅうにゅう')
+  await page.getByRole('button', { name: '需要帮助：展开中文与假名' }).click()
+  await expect(page.getByText('借助提示学习很正常；这次不会记录为独立答对。')).toBeVisible()
+  await page.reload()
+  await expect(page.getByText('借助提示学习很正常；这次不会记录为独立答对。')).toBeVisible()
+  await page.getByRole('radio', { name: '七点', exact: true }).check()
+  await page.getByRole('textbox', { name: '七時 的假名读法' }).fill('しちじ')
+  await page.getByRole('button', { name: '保存首答，再看解析' }).click()
+  await expect(page.getByRole('heading', { name: '理解和读法分开看' })).toBeVisible()
+  await expect(page.getByText('本篇理解参考匹配 2/2 · 假名参考匹配 2/2（使用过帮助）')).toBeVisible()
+  await expect(page.getByRole('radio')).toHaveCount(0)
+  await page.getByRole('textbox', { name: '换一个情境用一用（也可先用中文记下调整）' }).fill('パンはかばんの中です。')
+  await expect(page.getByRole('status').filter({ hasText: '首答与笔记已保存在本机' })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('textbox')).toHaveValue('パンはかばんの中です。')
+  await page.screenshot({ path: `test-results/ja-reading-${testInfo.project.name}.png`, fullPage: true })
+  await page.getByRole('button', { name: '保存阅读，安排下次回顾' }).click()
+  await expect(page.getByRole('heading', { name: '这次阅读已保存' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '打开推荐原版' })).toHaveAttribute('href', 'https://tadoku.org/japanese/book/6447/')
+  await page.reload()
+  await expect(page.getByRole('heading', { name: '这次阅读已保存' })).toBeVisible()
+  const evidence = await page.evaluate(async id => {
+    const path = '/jove-english-os/src/db/db.ts', { db: en, createLanguageDatabase } = await import(/* @vite-ignore */ path)
+    const ja = createLanguageDatabase('ja'), session = await ja.sessions.get(id), events = await ja.events.toArray()
+    const result = { completed: !!session.completedAt, help: session.draft.helped, due: session.draft.dueAt - session.completedAt,
+      checks: events.filter((event: { type: string }) => event.type === 'JAPANESE_READING_CHECK').length,
+      skillEvidence: events.filter((event: { skill?: string }) => event.skill).length, englishSessions: await en.sessions.count(),
+      overflow: document.documentElement.scrollWidth > innerWidth + 1 }
+    ja.close(); return result
+  }, sessionId)
+  expect(evidence).toEqual({ completed: true, help: true, due: 86400000, checks: 1, skillEvidence: 0, englishSessions: 0, overflow: false })
+  // The projector's actual incremental conflict merge is covered by the DB
+  // regression. Here verify the projected copy is discoverable in the UI.
+  await page.evaluate(async id => {
+    const path = '/jove-english-os/src/db/db.ts', { createLanguageDatabase } = await import(/* @vite-ignore */ path)
+    const ja = createLanguageDatabase('ja'), saved = await ja.sessions.get(id), conflictId = `${id}:fixture-conflict`
+    await ja.sessions.put({ ...saved, id: conflictId, kind: 'japanese-reading-conflict', draft: { ...saved.draft, note: '另一台设备尚未提交的笔记。' } })
+    await ja.sessions.put({ ...saved, draft: { ...saved.draft, syncReadingConflicts: [conflictId] } }); ja.close()
+  }, sessionId)
+  await page.reload()
+  await expect(page.getByRole('heading', { name: '另一台设备的回答也保留了' })).toBeVisible()
+  await page.getByText('查看保留的答案与笔记', { exact: true }).click()
+  await expect(page.locator('pre')).toContainText('另一台设备尚未提交的笔记。')
+  await expect(page.getByRole('heading', { name: '这次阅读已保存' })).toBeVisible()
+})
+
 test('Japanese diagnosis resumes after refresh and leaves English setup untouched', async ({ page }) => {
   await page.goto('#/ja')
   await page.getByRole('radio', { name: 'neko', exact: true }).check()

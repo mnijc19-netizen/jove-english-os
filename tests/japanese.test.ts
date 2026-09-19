@@ -128,7 +128,7 @@ describe('Japanese-specific source and practice support', () => {
     const ja = database('ja'), en = database('en')
     await expect(initializeJapanese(en)).rejects.toThrow('own workspace')
     await initializeJapanese(ja)
-    expect(await ja.materials.count()).toBe(54); expect((await ja.profiles.get('main'))?.onboarded).toBe(false)
+    expect(await ja.materials.count()).toBe(72); expect((await ja.profiles.get('main'))?.onboarded).toBe(false)
     expect(await ja.events.count()).toBe(0)
     await ja.profiles.update('main', { goal: 'Preserve my own goal' }); await initializeJapanese(ja)
     expect((await ja.profiles.get('main'))?.goal).toBe('Preserve my own goal')
