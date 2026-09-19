@@ -115,6 +115,7 @@ export class SyncJournal {
     const rows: RecordValue[] = await this.database.table(localTable(type)).toArray()
     const cacheIds = new Set((await this.database.audio.toArray()).filter(row => !isPrivateAudio(row.kind)).map(row => row.id))
     return rows.filter(row => type !== 'audioMetadata' || isPrivateAudio(row.kind)).map(source => {
+      if (type === 'materials' && (source.language ?? 'en') !== this.database.language) throw new Error('Material belongs to another learning language')
       const row = withoutCacheAudioReferences(source, cacheIds)
       return type === 'settings'
       ? { ...row, value: Object.fromEntries(Object.entries(row.value as Record<string, unknown>).filter(([key]) => key !== 'recordingRetention')) }
@@ -210,6 +211,7 @@ export class SyncJournal {
       }
       const operations = await this.activeOperations()
       const projection = await Dexie.waitFor(projectOperations(operations))
+      if (projection.records.materials.some(material => (material.language ?? 'en') !== this.database.language)) throw new Error('Downloaded material belongs to another learning language')
       // These rows are materialized aliases, not the immutable source operations.
       // Include old-client aliases when upgrading a journal without this metadata.
       const managedEvents = new Set([

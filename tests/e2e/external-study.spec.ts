@@ -152,6 +152,47 @@ test('an unavailable external lesson gets an automatic alternative without compl
   await expect(page.locator('#external-summary')).toHaveValue('Keep this unfinished thought even if the publisher page fails.')
 })
 
+test('English Today shares the daily allowance with an independently saved Japanese workspace', async ({ page }) => {
+  await page.goto('#/')
+  await expect(page.getByRole('button', { name: 'Start today’s practice', exact: true })).toBeVisible()
+  await page.evaluate(async () => {
+    const open = (name: string, version?: number) => new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(name, version)
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error)
+    })
+    const english = await open('jove-english-os')
+    const japanese = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('jove-english-os-ja', english.version)
+      request.onupgradeneeded = () => {
+        const transaction = english.transaction([...english.objectStoreNames], 'readonly')
+        for (const name of english.objectStoreNames) {
+          const source = transaction.objectStore(name), target = request.result.createObjectStore(name, { keyPath: source.keyPath, autoIncrement: source.autoIncrement })
+          for (const index of source.indexNames) { const definition = source.index(index); target.createIndex(index, definition.keyPath, { unique: definition.unique, multiEntry: definition.multiEntry }) }
+        }
+      }
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error)
+    })
+    const read = (store: string, key: string) => new Promise<unknown>((resolve, reject) => {
+      const request = english.transaction(store).objectStore(store).get(key)
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error)
+    })
+    const profile = await read('profiles', 'main') as Record<string, unknown>, owner = await read('syncMeta', 'owner')
+    await new Promise<void>((resolve, reject) => {
+      const transaction = japanese.transaction(['profiles', 'syncMeta', 'events'], 'readwrite')
+      transaction.objectStore('profiles').put({ ...profile, dailyMinutes: 150, onboarded: true })
+      transaction.objectStore('syncMeta').put({ id: 'learningLanguage', value: 'ja' })
+      if (owner) transaction.objectStore('syncMeta').put(owner)
+      transaction.objectStore('events').put({ id: 'ja-browser-completion', type: 'TASK_COMPLETED', source: 'objective', timestamp: Date.now(), data: { taskId: 'ja-task', minutes: 40 } })
+      transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error)
+    })
+    english.close(); japanese.close()
+  })
+  await page.reload()
+  await expect(page.getByText(/两种语言共用今天的 45 分钟/u)).toBeVisible()
+  await expect(page.getByText(/英语还可安排 5 分钟，日语 0 分钟/u)).toBeVisible()
+  await expect(page.getByText('5 min planned', { exact: true })).toBeVisible()
+})
+
 test.describe('external spoken retell',()=>{
   test.use({captureMode:'synthetic'})
   // Windows WebKit has no audio APIs; Linux CI validates its real PCM recorder.

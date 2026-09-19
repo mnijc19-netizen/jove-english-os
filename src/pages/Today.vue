@@ -46,9 +46,7 @@ async function start(task: PlanTask) {
   starting.value = true; startError.value = '';
   try {
     if (!task.done) {
-      await app.beginTask(task.id);
-      await app.evidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
-        data: { taskId: task.id, kind: task.id.endsWith(':reading') ? 'reading' : task.kind } });
+      if (!await app.beginTask(task.id)) { startError.value = 'Today’s plan changed. Your saved work is safe; choose the next available task.'; return; }
     }
     await router.push(path(task));
   } catch { startError.value = 'Could not save your place. Please try starting again.'; }
@@ -114,6 +112,7 @@ async function start(task: PlanTask) {
           Ease back in with {{ app.plan.minutes }} minutes today. Shorter input and a small review selection;
           your load returns gradually as you practise again.
         </p>
+        <p v-if="app.sharedDay" class="help-text">两种语言共用今天的 {{ app.sharedDay.totalMinutes }} 分钟；英语还可安排 {{ app.sharedDay.allowances.en.remaining }} 分钟，日语 {{ app.sharedDay.allowances.ja.remaining }} 分钟。切换语言不会增加任务量。</p>
         <div class="time-options" aria-label="Practice duration">
           <button
             v-for="minutes in [45, 90, 150]"

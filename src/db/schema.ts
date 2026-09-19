@@ -99,6 +99,7 @@ export const authenticPlaybackSchema = z.strictObject({
   })
 })
 export const materialSchema = z.strictObject({
+  language: z.enum(['en', 'ja']).optional(),
   externalStudy: z.strictObject({ publisher: short, level: z.enum(['beginner', 'intermediate', 'advanced']),
     mission: z.string().min(1).max(1000), checkedAt: timestampSchema }).optional(),
   authenticPlayback: authenticPlaybackSchema.optional(),
@@ -110,8 +111,9 @@ export const materialSchema = z.strictObject({
 }).refine(m => !m.externalStudy || (!m.authenticPlayback && !m.audioPath && !m.audioId && !m.synthetic &&
   !m.transcript && !m.sentences.length && !!m.sourceUrl && (() => {
     try { const url = new URL(m.sourceUrl!); return url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash &&
-      (url.hostname === 'learningenglish.voanews.com' && /^\/a\/[a-z0-9-]+\/\d+\.html$/u.test(url.pathname) ||
-      url.hostname === 'www.esl-lab.com' && /^\/(?:easy|intermediate|difficult)\/[a-z0-9-]+\/$/u.test(url.pathname))
+      (m.language === 'ja' ? url.hostname === 'www.irodori.jpf.go.jp' && /^\/en\/starter\/audio\/lesson(0[1-9]|1[0-8])\.html$/u.test(url.pathname)
+        : url.hostname === 'learningenglish.voanews.com' && /^\/a\/[a-z0-9-]+\/\d+\.html$/u.test(url.pathname) ||
+          url.hostname === 'www.esl-lab.com' && /^\/(?:easy|intermediate|difficult)\/[a-z0-9-]+\/$/u.test(url.pathname))
     } catch { return false }
   })()), 'External lessons require a publisher page, not copied transcripts or certified playback')
 export const sessionSchema = z.strictObject({
@@ -240,6 +242,8 @@ export function parseBackup(value: unknown): Backup {
   }
   const result = backupSchema.safeParse(value)
   if (!result.success) throw new Error(`Invalid backup schema at ${result.error.issues[0]?.path.join('.') || 'root'}`)
+  const language = result.data.schemaVersion === 3 ? result.data.learningLanguage : 'en'
+  if (result.data.tables.materials.some(material => (material.language ?? 'en') !== language)) throw new Error('Backup contains another learning language')
   validateRelationships(result.data.tables)
   return result.data
 }

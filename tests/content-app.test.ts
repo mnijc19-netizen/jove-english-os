@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick, reactive } from 'vue'
-import { db } from '../src/db/db'
+import { db, createLanguageDatabase } from '../src/db/db'
 import { useApp } from '../src/stores/app'
 import { defaultProfile } from '../src/domain/types'
 import { demoMaterials } from '../src/content/materials'
@@ -46,6 +46,21 @@ async function signIn() {
   await app.refresh(); state.cloud!.userId = 'owner-a'; await nextTick()
 }
 describe('Today automatic content coordination', () => {
+  it('uses one daily allowance and refuses a stale start after Japanese used the remaining time', async () => {
+    const japanese = createLanguageDatabase('ja')
+    try {
+      await japanese.profiles.put({ ...defaultProfile(), onboarded: true })
+      await japanese.events.put({ id: 'ja-completed', type: 'TASK_COMPLETED', source: 'objective', timestamp: Date.now(), data: { taskId: 'ja-task', minutes: 25 } })
+      await app.refresh()
+      expect(app.sharedDay?.totalMinutes).toBe(45)
+      expect(app.plan.minutes).toBe(20)
+      const original = app.plan.tasks.find(task => !task.done && !task.optional)!
+      await japanese.events.put({ id: 'ja-other-completed', type: 'TASK_COMPLETED', source: 'objective', timestamp: Date.now(), data: { taskId: 'ja-other', minutes: 20 } })
+      expect(await app.beginTask(original.id)).toBe(false)
+      expect(await db.events.get(`started:${original.id}`)).toBeUndefined()
+      expect(app.plan.tasks.filter(task => !task.done && !task.optional)).toEqual([])
+    } finally { await japanese.delete() }
+  })
   async function assignedExternalDraft() {
     const original = app.plan.tasks.find(task => task.kind === 'listen')!
     await app.beginTask(original.id)
@@ -54,6 +69,46 @@ describe('Today automatic content coordination', () => {
     await db.sessions.add(session)
     return { original, session, before: (await db.plans.get(app.plan.id))! }
   }
+  it('does not create a required replacement after the other language exhausts the shared day', async () => {
+    const { original, session, before } = await assignedExternalDraft(), japanese = createLanguageDatabase('ja')
+    try {
+      await japanese.profiles.put({ ...defaultProfile(), onboarded: true })
+      await japanese.events.put({ id: 'ja-full-day', type: 'TASK_COMPLETED', source: 'objective', timestamp: Date.now(), data: { taskId: 'ja-day', minutes: 45 } })
+      const events = await db.events.toArray()
+      expect(await app.replaceUnavailableExternalLesson(session.id, original.materialId!, original.id)).toEqual({ path: '/', query: {} })
+      expect(await db.events.toArray()).toEqual(events)
+      expect(await db.plans.get(before.id)).toEqual(before)
+      expect(await db.sessions.get(session.id)).toEqual(session)
+    } finally { await japanese.delete() }
+  })
+  it('reallocates a new offline day without reusing yesterday’s exhausted allowance', async () => {
+    const japanese = createLanguageDatabase('ja')
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date(2026, 8, 20, 23, 59))
+      await japanese.profiles.put({ ...defaultProfile(), onboarded: true })
+      await japanese.events.put({ id: 'ja-yesterday', type: 'TASK_COMPLETED', source: 'objective', timestamp: Date.now(), data: { taskId: 'ja-day', minutes: 45 } })
+      await app.refresh(); expect(app.plan.minutes).toBe(0)
+      vi.setSystemTime(new Date(2026, 8, 21, 0, 1))
+      window.dispatchEvent(new Event('offline')); window.dispatchEvent(new Event('focus'))
+      await vi.waitFor(() => expect(app.sharedDay?.date).toBe('2026-09-21'))
+      expect(app.plan.minutes).toBeGreaterThan(0)
+      expect(app.plan.minutes).toBeLessThanOrEqual(23)
+    } finally { vi.useRealTimers(); await japanese.delete() }
+  })
+  it('keeps plan arithmetic valid when a replacement has only part of its old time allowance', async () => {
+    const { original, session, before } = await assignedExternalDraft(), japanese = createLanguageDatabase('ja')
+    try {
+      await japanese.profiles.put({ ...defaultProfile(), onboarded: true })
+      await japanese.events.put({ id: 'ja-most-day', type: 'TASK_COMPLETED', source: 'objective', timestamp: Date.now(), data: { taskId: 'ja-day', minutes: 40 } })
+      const next = await app.replaceUnavailableExternalLesson(session.id, original.materialId!, original.id)
+      expect(next?.path).toBe('/listen')
+      const saved = (await db.plans.get(before.id))!, replacement = saved.tasks.find(task => task.id === next?.query.task)!
+      expect(replacement.minutes).toBe(5)
+      expect(saved.minutes).toBe(saved.tasks.filter(task => !task.optional).reduce((sum, task) => sum + task.minutes, 0))
+      expect(await db.sessions.get(session.id)).toEqual(session)
+    } finally { await japanese.delete() }
+  })
   it('atomically replaces an inaccessible assignment without completing it, losing work or increasing daily time', async () => {
     const { original, session, before } = await assignedExternalDraft()
     const skills = await db.skills.toArray(), cards = await db.cards.toArray()

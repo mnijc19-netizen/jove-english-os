@@ -1,6 +1,7 @@
 import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { db } from "../db/db";
+import { readLanguageDay } from "../db/language-day";
 import { initialize, recordEvent } from "../db/repository";
 import { makePlan, nextAssignedTask, taskActivity, taskPath } from "../domain/engine";
 import { hasTaskStarted, planLongitudinal } from "../domain/longitudinal";
@@ -62,7 +63,9 @@ export const useApp = defineStore("app", () => {
   });
   const clock = ref(Date.now());
   const tick = () => {
+    const priorDate = new Date(clock.value).toLocaleDateString('en-CA');
     clock.value = Date.now();
+    if (priorDate !== new Date(clock.value).toLocaleDateString('en-CA') || sharedDay.value && sharedDay.value.date !== today.value) void refreshSharedAllowance();
     if (document.visibilityState !== 'hidden') void loadContent();
     const messages = provider.takeNotices();
     if (messages.length)
@@ -77,11 +80,22 @@ export const useApp = defineStore("app", () => {
         .join(" ");
   };
   window.setInterval(tick, 15000);
-  window.addEventListener("focus", tick);
+  window.addEventListener("focus", () => { tick(); void refreshSharedAllowance(); });
   document.addEventListener("visibilitychange", tick);
   const today = computed(() =>
     new Date(clock.value).toLocaleDateString("en-CA"),
   );
+  const sharedDay = ref<Awaited<ReturnType<typeof readLanguageDay>>>(null);
+  let sharedRefresh: Promise<void> | undefined;
+  const sharedCap = computed(() => sharedDay.value ? sharedDay.value.date === today.value ? sharedDay.value.allowances.en.planCap : 0 : undefined);
+  function refreshSharedAllowance() {
+    if (sharedRefresh) return sharedRefresh;
+    sharedRefresh = readLanguageDay(db, Date.now()).then(value => {
+      if (!value || value.date === today.value) sharedDay.value = value;
+    }).catch(() => { notice.value = '暂时无法核对另一种语言的今日安排；已保存的学习记录不受影响。'; })
+      .finally(() => { sharedRefresh = undefined; });
+    return sharedRefresh;
+  }
   const plan = computed(() =>
     makePlan(
       profile.value,
@@ -91,6 +105,7 @@ export const useApp = defineStore("app", () => {
       materials.value,
       plans.value.find((p) => p.date === today.value),
       clock.value,
+      sharedCap.value,
     ),
   );
   const due = computed(() =>
@@ -137,6 +152,7 @@ export const useApp = defineStore("app", () => {
     usage.value = results[11];
     assessments.value = results[12];
     plans.value = results[13];
+    await refreshSharedAllowance();
     document.documentElement.dataset.theme =
       settings.value.theme === "system"
         ? matchMedia("(prefers-color-scheme: dark)").matches
@@ -241,6 +257,7 @@ export const useApp = defineStore("app", () => {
                 materials.value,
                 { ...previous, tasks: previous.tasks.filter((t) => t.done || t.optional || hasTaskStarted(t.id, events.value, clock.value)) },
                 clock.value,
+                sharedCap.value,
               ),
             );
         }
@@ -330,17 +347,20 @@ export const useApp = defineStore("app", () => {
     return blob;
   }
   async function beginTask(taskId: string) {
+    const budget = await readLanguageDay(db, Date.now());
     // Route hydration can resume after another tab or sync commits completion.
     // Recompute from one current database snapshot; never write a stale Pinia
     // plan over completed tasks, saved optional work or a changed daily budget.
-    const task = await db.transaction('rw', [db.plans, db.profiles, db.skills, db.cards, db.events, db.materials], async () => {
+    const task = await db.transaction('rw', [db.plans, db.profiles, db.skills, db.cards, db.events, db.materials, db.syncMeta], async () => {
+      if (budget && (await db.syncMeta.get('owner'))?.value !== budget.owner) throw new Error('Learning account changed');
       const now = Date.now(), date = new Date(now).toLocaleDateString('en-CA');
+      if (budget && budget.date !== date) throw new Error('Daily plan changed');
       const previous = await db.plans.get(date);
       if (previous?.tasks.find(t => t.id === taskId)?.done) return;
       const [currentProfile, currentSkills, currentCards, currentEvents, currentMaterials] = await Promise.all([
         db.profiles.get('main'), db.skills.toArray(), db.cards.toArray(), db.events.toArray(), db.materials.toArray(),
       ]);
-      const current = makePlan(currentProfile ?? defaultProfile(), currentSkills, currentCards, currentEvents, currentMaterials, previous, now);
+      const current = makePlan(currentProfile ?? defaultProfile(), currentSkills, currentCards, currentEvents, currentMaterials, previous, now, budget?.allowances.en.planCap);
       const requested = current.tasks.find(t => t.id === taskId);
       if (!requested || requested.done) return;
       await db.plans.put(current);
@@ -350,14 +370,17 @@ export const useApp = defineStore("app", () => {
       if (task) await appendEvidence({ id: `started:${task.id}`, type: 'TASK_STARTED', source: 'objective',
         data: { taskId: task.id, kind: taskActivity(task) === 'reading' ? 'reading' : task.kind, ...(task.materialId ? { materialId: task.materialId } : {}) } })
     } finally { await refresh(); }
+    return !!task;
   }
   async function continueAssignment(afterTaskId?: string) {
     const next = nextAssignedTask(plan.value, afterTaskId);
     if (!next) return { path: '/', query: {} };
-    await beginTask(next.id);
+    if (!await beginTask(next.id)) return { path: '/', query: {} };
     return taskPath(next);
   }
   async function replaceUnavailableExternalLesson(sessionId: string, materialId: string, taskId: string, signal?: AbortSignal) {
+    const budget = await readLanguageDay(db, Date.now());
+    let budgetExhausted = false;
     const userId = useCloud().userId, owner = (await db.syncMeta.get('owner'))?.value;
     const next = await db.transaction('rw', [db.plans, db.profiles, db.skills, db.cards, db.events, db.materials, db.sessions, db.syncMeta], async () => {
       const assertOwner = async () => {
@@ -367,6 +390,7 @@ export const useApp = defineStore("app", () => {
       };
       await assertOwner();
       const session = await db.sessions.get(sessionId), now = Date.now(), date = new Date(now).toLocaleDateString('en-CA');
+      if (budget && (budget.date !== date || budget.owner !== owner)) throw new Error('Daily plan or learning account changed');
       if (!session || session.kind !== 'listen' || session.materialId !== materialId || session.completedAt
         || String(session.draft.taskId ?? '') !== taskId) throw new Error('Listening attempt changed');
       const [profile, skills, cards, events, materials, previous] = await Promise.all([
@@ -376,6 +400,11 @@ export const useApp = defineStore("app", () => {
       const current = previous ?? makePlan(profile ?? defaultProfile(), skills, cards, events, materials, undefined, now);
       const assigned = taskId ? current.tasks.find(task => task.id === taskId && task.materialId === materialId && task.kind === 'listen') : undefined;
       if (taskId && (!assigned || assigned.done || events.some(event => event.type === 'TASK_COMPLETED' && event.data?.taskId === taskId))) throw new Error('Assignment changed');
+      if (assigned && !assigned.optional && budget && budget.allowances.en.remaining === 0) {
+        budgetExhausted = true;
+        await assertOwner();
+        return { path: '/', query: {} };
+      }
       const eventId = `${sessionId}:unavailable:${date}`, existing = events.find(event => event.id === eventId);
       if (assigned?.optional && existing?.data?.replacementTaskId) {
         const replacement = current.tasks.find(task => task.id === existing.data!.replacementTaskId && !task.done);
@@ -395,9 +424,11 @@ export const useApp = defineStore("app", () => {
       // assignment exactly. Never fall back to a too-hard or synthetic lesson.
       const selected = makePlan(profile ?? defaultProfile(), skills, cards, history, pool, undefined, now).tasks.find(task => task.kind === 'listen' && task.materialId);
       if (!selected) return null;
-      const replacement = { ...selected, id: `${date}:listen:${selected.materialId}:alt:${sessionId}`, minutes: assigned?.minutes ?? selected.minutes };
+      const replacement = { ...selected, id: `${date}:listen:${selected.materialId}:alt:${sessionId}`,
+        minutes: Math.min(assigned?.minutes ?? selected.minutes, budget?.allowances.en.remaining || Infinity) };
       const required = assigned && !assigned.optional;
-      const proposed = required ? { ...current, tasks: current.tasks.flatMap(task => task.id === taskId ? [{ ...task, optional: true }, replacement] : [task]) } : current;
+      const proposed = required ? { ...current, minutes: current.minutes - assigned!.minutes + replacement.minutes,
+        tasks: current.tasks.flatMap(task => task.id === taskId ? [{ ...task, optional: true }, replacement] : [task]) } : current;
       if (proposed.tasks.length > 100) return null;
       // These fixed non-scoring facts change no skill/card projection. Keep the
       // report, assignment and start marker atomic; never complete the old task.
@@ -413,6 +444,7 @@ export const useApp = defineStore("app", () => {
       return required ? taskPath(replacement) : { path: '/listen', query: { material: replacement.materialId! } };
     });
     await refresh();
+    if (budgetExhausted) notice.value = '今天两种语言共用的计划时间已用完。原草稿和录音已保留，没有新增必做任务。';
     return next;
   }
   async function completeTask(
@@ -517,6 +549,7 @@ export const useApp = defineStore("app", () => {
     usage,
     assessments,
     plan,
+    sharedDay,
     due,
     cost,
     init,

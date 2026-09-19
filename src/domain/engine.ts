@@ -106,7 +106,8 @@ export function nextAssignedTask(plan: DailyPlan, afterId?: string): PlanTask | 
   return [...plan.tasks.slice(index + 1), ...plan.tasks.slice(0, index + 1)].find(task => !task.done && !task.optional && task.minutes > 0)
 }
 
-export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[], events: StudyEvent[], materials: Material[], previous?: DailyPlan, now = Date.now()): DailyPlan {
+export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[], events: StudyEvent[], materials: Material[], previous?: DailyPlan, now = Date.now(), sharedBudgetCap?: number): DailyPlan {
+  if (sharedBudgetCap !== undefined && (!Number.isInteger(sharedBudgetCap) || sharedBudgetCap < 0 || sharedBudgetCap > 10000)) throw new Error('Invalid shared plan budget')
   const date = localDate(now)
   const today = previous?.date === date ? previous : undefined
   const ordered = orderedEvents(events.filter(e => e.timestamp <= now))
@@ -125,7 +126,7 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   const selectedIds = new Set(reviewBlockFinished ? [] : longitudinal.reviews.selectedIds)
   const due = cards.filter(c => selectedIds.has(c.id))
   const fatigue = clamp(profile.fatigue, 0, 1)
-  const budget = adjustment.minutes
+  const budget = Math.min(adjustment.minutes, sharedBudgetCap ?? Infinity)
   const inputSkills: SkillName[] = ['naturalListening', 'listeningWords', 'listeningSentences']
   const targetDifficulty = adjustment.targetDifficulty
   const interestTokens = profile.interests.map(i => i.toLocaleLowerCase('en-US'))

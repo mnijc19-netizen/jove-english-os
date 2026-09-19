@@ -1,19 +1,23 @@
 import { createEmptyCard, fsrs, Rating } from 'ts-fsrs'
 import { aggregateSkills, evidenceWeight } from '../domain/engine'
 import { defaultProfile, defaultSettings, type AudioAsset, type Chunk, type ErrorPattern, type Evaluation, type Material, type MaterialChunk, type ReviewCard, type StudyEvent } from '../domain/types'
-import { db, BACKUP_SCHEMA_VERSION, type JoveDatabase } from './db'
+import { db as defaultDatabase, BACKUP_SCHEMA_VERSION, type JoveDatabase } from './db'
 import { audioMetadataSchema, backupTables, eventSchema, evaluationErrorSchema, materialChunkSchema, materialSchema, modalities, parseBackup, reviewCardSchema, reviewOptionsSchema, repairAttemptOptionsSchema, type Backup, type ReviewOptions, type RepairAttemptOptions } from './schema'
 import { projectChunks, projectErrors } from './projections'
 import { resolveCardAlias, resolveEventAliases } from '../sync/journal'
 
 const scheduler = fsrs({ enable_fuzz: false })
-const normalize = (value: string) => value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US')
 const uuid = () => crypto.randomUUID()
-const projectionTables = [db.events, db.skills, db.chunks, db.errors, db.cards]
-const eventTables = [...projectionTables, db.sessions, db.materials, db.audio, db.conversations, db.assessments, db.syncMeta]
 export type { ReviewOptions, RepairAttemptOptions } from './schema'
 export const REPAIR_RETEST_DELAY = 10 * 60_000
 export const REPAIR_TRANSFER_DELAY = 2 * 86_400_000
+
+/** Bind once to a workspace. An in-flight save/review never follows a mutable
+ * language switch into another database. Legacy exports below stay English. */
+export function createLearningRepository(db: JoveDatabase) {
+const normalize = (value: string) => value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase(db.language === 'ja' ? 'ja-JP' : 'en-US')
+const projectionTables = [db.events, db.skills, db.chunks, db.errors, db.cards]
+const eventTables = [...projectionTables, db.sessions, db.materials, db.audio, db.conversations, db.assessments, db.syncMeta]
 
 async function rebuildProjections(database = db): Promise<void> {
   const events = await database.events.toArray()
@@ -33,12 +37,15 @@ async function ensureCards(chunk: Chunk, now: number): Promise<void> {
   if (missing.length) await db.cards.bulkAdd(missing)
 }
 
-export async function initialize(materials: Material[]): Promise<void> {
+async function initialize(materials: Material[]): Promise<void> {
   const validated = materials.map(material => materialSchema.parse(material))
+  if (validated.some(material => (material.language ?? 'en') !== db.language)) throw new Error('Seed material belongs to another learning language')
   if (new Set(validated.map(m => m.id)).size !== validated.length) throw new Error('Duplicate seed material IDs')
   await db.transaction('rw', [db.settings, db.profiles, db.materials, db.audio, ...projectionTables], async () => {
-    if (!await db.settings.get('main')) await db.settings.add({ id: 'main', value: { ...defaultSettings } })
-    if (!await db.profiles.get('main')) await db.profiles.add(defaultProfile())
+    if (!await db.settings.get('main')) await db.settings.add({ id: 'main', value: { ...defaultSettings, ...(db.language === 'ja' ? { accent: 'ja-JP' } : {}) } })
+    if (!await db.profiles.get('main')) await db.profiles.add({ ...defaultProfile(), ...(db.language === 'ja' ? {
+      goal: '听懂生活日语，并能自然地表达自己的意思', interests: ['日常交流', '在日本生活'],
+    } : {}) })
     for (const material of validated) {
       if (await db.materials.get(material.id)) continue
       if (material.audioId && !await db.audio.get(material.audioId)) throw new Error('Missing seed audio')
@@ -78,7 +85,7 @@ async function insertEvent(event: StudyEvent): Promise<boolean> {
   return true
 }
 
-export async function recordEvent(event: StudyEvent): Promise<void> {
+async function recordEvent(event: StudyEvent): Promise<void> {
   const validated = eventSchema.parse(event)
   await db.transaction('rw', eventTables, async () => {
     if (await insertEvent(validated)) {
@@ -108,7 +115,7 @@ async function scheduleRepairRetests(event: StudyEvent): Promise<void> {
 }
 
 /** Save an exact full-sentence text retry once, and atomically schedule its delayed retests. */
-export async function recordRepairAttempt(errorId: string, input: RepairAttemptOptions): Promise<StudyEvent> {
+async function recordRepairAttempt(errorId: string, input: RepairAttemptOptions): Promise<StudyEvent> {
   const options = repairAttemptOptionsSchema.parse(input)
   const timestamp = options.timestamp ?? Date.now()
   if (timestamp > Date.now()) throw new Error('Repair timestamp is in the future')
@@ -151,7 +158,7 @@ async function upsertChunk(input: MaterialChunk, materialId?: string): Promise<C
   return chunk
 }
 
-export async function addChunk(chunk: MaterialChunk, materialId: string): Promise<Chunk> {
+async function addChunk(chunk: MaterialChunk, materialId: string): Promise<Chunk> {
   const validated = materialChunkSchema.parse(chunk)
   return db.transaction('rw', [db.chunks, db.cards, db.materials], async () => {
     if (!await db.materials.get(materialId)) throw new Error('Missing source material')
@@ -163,7 +170,7 @@ export async function addChunk(chunk: MaterialChunk, materialId: string): Promis
  * AI oral language evidence requires both recorded-audio/transcript attestations; neither is an acoustic score.
  * Supply audioId to retain a validated recording reference. Context novelty is computed here, never supplied.
  */
-export async function reviewCard(cardId: string, rating: 1 | 2 | 3 | 4, input: ReviewOptions = {}): Promise<void> {
+async function reviewCard(cardId: string, rating: 1 | 2 | 3 | 4, input: ReviewOptions = {}): Promise<void> {
   if (![Rating.Again, Rating.Hard, Rating.Good, Rating.Easy].includes(rating)) throw new Error('Invalid review rating')
   const options = reviewOptionsSchema.parse(input)
   const source = options.source ?? 'self-report'
@@ -231,7 +238,7 @@ export async function reviewCard(cardId: string, rating: 1 | 2 | 3 | 4, input: R
   })
 }
 
-export async function saveError(error: Evaluation['errors'][number]): Promise<ErrorPattern> {
+async function saveError(error: Evaluation['errors'][number]): Promise<ErrorPattern> {
   const validated = evaluationErrorSchema.parse(error)
   return db.transaction('rw', eventTables, async () => {
     const pattern = `${normalize(validated.category)}: ${normalize(validated.original)}`
@@ -249,7 +256,7 @@ export async function saveError(error: Evaluation['errors'][number]): Promise<Er
   })
 }
 
-export async function rebuildSkills(): Promise<void> {
+async function rebuildSkills(): Promise<void> {
   await db.transaction('rw', projectionTables, () => rebuildProjections())
 }
 
@@ -258,7 +265,7 @@ function audioMetadata(asset: AudioAsset) {
   return audioMetadataSchema.parse({ id: asset.id, mimeType: asset.mimeType, createdAt: asset.createdAt, duration: asset.duration, kind: asset.kind, processed: asset.processed, label: asset.label })
 }
 
-export async function exportBackup(database: JoveDatabase = db): Promise<string> {
+async function exportBackup(database: JoveDatabase = db): Promise<string> {
   return database.transaction('r', backupTables.map(name => database.table(name)), async () => {
     const tables: Record<string, unknown[]> = {}
     for (const name of backupTables) tables[name] = name === 'audio' ? (await database.audio.toArray()).map(audioMetadata) : await database.table(name).toArray()
@@ -294,7 +301,7 @@ function markMissingAudio(tables: Backup['tables'], available: Set<string>): voi
   }
 }
 
-export async function restoreBackup(text: string, database: JoveDatabase = db): Promise<void> {
+async function restoreBackup(text: string, database: JoveDatabase = db): Promise<void> {
   if (typeof text !== 'string' || text.length > 50_000_000) throw new Error('Backup exceeds 50 MB text limit')
   let raw: unknown
   try { raw = JSON.parse(text) } catch { throw new Error('Backup is not valid JSON') }
@@ -318,3 +325,8 @@ export async function restoreBackup(text: string, database: JoveDatabase = db): 
     await rebuildProjections(database)
   })
 }
+
+return { initialize, recordEvent, recordRepairAttempt, addChunk, reviewCard, saveError, rebuildSkills, exportBackup, restoreBackup }
+}
+
+export const { initialize, recordEvent, recordRepairAttempt, addChunk, reviewCard, saveError, rebuildSkills, exportBackup, restoreBackup } = createLearningRepository(defaultDatabase)
