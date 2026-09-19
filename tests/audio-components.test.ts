@@ -13,7 +13,7 @@ import * as shortcuts from '../src/audio/shortcuts'
 import * as cache from '../src/audio/cache'
 import { AudioError } from '../src/audio/recorder'
 import { defaultSettings, type AudioAsset } from '../src/domain/types'
-import { updateAudioMetadata } from '../src/db/audio'
+import { AudioBudgetUnavailableError, AudioCapacityError, updateAudioMetadata, withAudioBudget } from '../src/db/audio'
 
 // Exercise the actual compiled SFCs and Vue lifecycle without adding jsdom/test-utils.
 class HostNode {
@@ -88,7 +88,7 @@ let rows: Map<string, AudioAsset>
 let appState: ReturnType<typeof makeState>
 let capture: { stop: ReturnType<typeof vi.fn>; cancel: ReturnType<typeof vi.fn> }
 const startRecording = vi.fn()
-const db = { audio: { put: vi.fn(), get: vi.fn(), update: vi.fn(), toArray: vi.fn() }, transaction: vi.fn() }
+const db = { audio: { put: vi.fn(), get: vi.fn(), update: vi.fn(), toArray: vi.fn() }, settings: { get: vi.fn(async () => undefined) }, syncMeta: { get: vi.fn(async () => undefined as undefined | { value: string }) }, transaction: vi.fn() }
 const localSpeech = { speakLocalText: vi.fn(), stopSpeech: vi.fn(), pauseSpeech: vi.fn(), resumeSpeech: vi.fn() }
 let Recorder: Vue.Component, AudioPlayer: Vue.Component, SavedRecording: Vue.Component
 function makeState() {
@@ -104,7 +104,7 @@ function loadSfc(name: string): Vue.Component {
   const dependencies: Record<string, unknown> = {
     vue: Vue, 'vue-router': { onBeforeRouteLeave: (guard: () => Promise<boolean>) => guards.push(guard) },
     '../stores/app': { useApp: () => appState }, '../db/db': { db }, '../audio/recorder': { AudioError, startRecording },
-    '../db/audio': { updateAudioMetadata },
+    '../db/audio': { updateAudioMetadata, withAudioBudget, AudioCapacityError, AudioBudgetUnavailableError },
     '../audio/recovery': recovery, '../audio/shortcuts': shortcuts, '../audio/cache': cache,
     '../composables/useRequest': { useRequest }, '../composables/useRecordingUrl': { useRecordingUrl }, '../audio/speech': localSpeech,
     './Icon.vue': { default: { setup: () => () => Vue.h('i') } },
@@ -125,6 +125,7 @@ beforeEach(() => {
   startRecording.mockReset().mockResolvedValue(capture)
   db.audio.put.mockReset().mockImplementation(async (asset: AudioAsset) => { rows.set(asset.id, asset); return asset.id })
   db.audio.toArray.mockReset().mockImplementation(async () => [...rows.values()])
+  db.syncMeta.get.mockReset().mockResolvedValue(undefined)
   db.transaction.mockReset().mockImplementation((_mode: string, _table: unknown, work: () => Promise<unknown>) => work())
   db.audio.get.mockReset().mockImplementation(async (id: string) => rows.get(id))
   db.audio.update.mockReset().mockImplementation(async (id: string, changes: Partial<AudioAsset>) => { const row = rows.get(id); if (row) rows.set(id, { ...row, ...changes }); return row ? 1 : 0 })
@@ -220,6 +221,18 @@ describe.each(['Recorder', 'SavedRecording'])('%s playback identity during hydra
 })
 
 describe('Recorder component recovery lifecycle', () => {
+  it('preserves the disabled English transcription affordance without exposing an unavailable Japanese transcriber', async () => {
+    const asset = makeAsset('no-provider')
+    appState.keySet = false; appState.audio = [asset]; rows.set(asset.id, asset)
+    const english = mount(Recorder, { savedAudioId: asset.id }); await flush()
+    expect(button(english.root, 'Transcribe recording').props.disabled).toBe(true)
+    expect(content(english.root)).toContain('Connect AI in Settings')
+    await invoke(button(english.root, 'Transcribe recording'), 'onClick')
+    expect(appState.provider.transcribe).not.toHaveBeenCalled()
+    const japanese = mount(Recorder, { savedAudioId: asset.id, workspace: { database: db, audio: () => [asset], refresh: async () => {}, assertCurrent: async () => {} } })
+    await flush()
+    expect(find(japanese.root, node => node.type === 'button' && content(node) === 'Transcribe recording')).toBeUndefined()
+  })
   it('synchronizes a saved ID delivered after mount and subsequent replacement', async () => {
     appState.audio = [makeAsset('one'), makeAsset('two')]
     const view = mount(Recorder)
@@ -472,6 +485,29 @@ describe('Recorder configured audio capacity', () => {
   const fullBlob = new Blob([new Uint8Array(limitBytes)], { type: 'audio/webm' })
   const storedAudio = (id: string, blob = fullBlob, kind: AudioAsset['kind'] = 'recording'): AudioAsset => ({ ...makeAsset(id), blob, kind })
 
+  it('keeps an unsaved recording under its capture owner when owner changes while admission is queued', async () => {
+    let owner = 'owner-a'
+    db.syncMeta.get.mockImplementation(async () => ({ value: owner }))
+    const view = mount(Recorder)
+    await view.child.value!.toggle()
+    const admission = deferred<AudioAsset[]>()
+    db.audio.toArray.mockReturnValueOnce(admission.promise)
+    const stopped = view.child.value!.toggle(); await flush()
+    owner = 'owner-b'; admission.resolve([])
+    await stopped; await flush()
+    const draft = [...recovery.recordingDrafts.values()][0]!
+    expect(draft.owner).toBe('owner-a'); expect(draft.saved).toBe(false)
+    expect(db.audio.put).not.toHaveBeenCalled(); expect(view.recorded).not.toHaveBeenCalled()
+    expect(content(view.root)).toContain('Return to that account')
+    view.unmount()
+    const resumed = mount(Recorder)
+    await invoke(button(resumed.root, 'Retry saving recording'), 'onClick')
+    expect(db.audio.put).not.toHaveBeenCalled()
+    owner = 'owner-a'
+    await invoke(button(resumed.root, 'Retry saving recording'), 'onClick'); await flush()
+    expect(draft.saved).toBe(true); expect(db.audio.put).toHaveBeenCalledOnce()
+  })
+
   it('does not open the microphone when persisted audio already fills the configured 25 MiB', async () => {
     appState.settings.audioLimitMB = 25
     const original = storedAudio('original')
@@ -507,7 +543,7 @@ describe('Recorder configured audio capacity', () => {
     expect(content(view.root)).toContain('audio storage limit')
     expect(content(view.root)).toContain('not yet saved')
     expect(find(view.root, node => node.type === 'a' && content(node).includes('Download recording'))).toBeDefined()
-    expect(db.transaction).toHaveBeenCalledWith('rw', db.audio, expect.any(Function))
+    expect(db.transaction).toHaveBeenCalledWith('rw', [db.audio, db.settings, db.syncMeta], expect.any(Function))
     expect(db.audio.put).not.toHaveBeenCalled()
     expect(view.recorded).not.toHaveBeenCalled(); expect(appState.provider.transcribe).not.toHaveBeenCalled()
     expect(rows.get(concurrent.id)?.blob).toBe(fullBlob)

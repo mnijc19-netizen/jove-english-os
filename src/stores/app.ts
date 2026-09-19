@@ -1,6 +1,7 @@
 import { computed, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import { db } from "../db/db";
+import { AudioBudgetUnavailableError, withAudioBudget } from "../db/audio";
 import { readLanguageDay } from "../db/language-day";
 import { initialize, recordEvent } from "../db/repository";
 import { makePlan, nextAssignedTask, taskActivity, taskPath } from "../domain/engine";
@@ -324,27 +325,33 @@ export const useApp = defineStore("app", () => {
       return generatedSpeech(text, signal);
     if (signal?.aborted) throw new DOMException("Cancelled", "AbortError");
     const blob = await provider.synthesize(text, signal);
-    const assets = await db.audio.toArray(),
-      limit = settings.value.audioLimitMB * 1024 * 1024;
-    let used = assets.reduce((n, a) => n + a.blob.size, 0);
-    for (const old of assets
-      .filter((a) => a.kind === "generated")
-      .sort((a, b) => a.createdAt - b.createdAt)) {
-      if (used + blob.size <= limit) break;
-      await db.audio.delete(old.id);
-      used -= old.blob.size;
-    }
-    if (used + blob.size <= limit)
-      await db.audio.put({
-        id,
-        blob,
-        mimeType: blob.type,
-        createdAt: Date.now(),
-        duration: 0,
-        kind: "generated",
-        processed: true,
-        label: text.slice(0, 80),
-      });
+    await withAudioBudget(db, async budget => {
+      const { assets, limitBytes: limit } = budget;
+      // Another tab may already have cached this exact immutable identity.
+      if (assets.some(asset => asset.id === id)) return;
+      let used = budget.usedBytes;
+      for (const old of assets
+        .filter((a) => a.kind === "generated")
+        .sort((a, b) => a.createdAt - b.createdAt)) {
+        if (used + blob.size <= limit) break;
+        await db.audio.delete(old.id);
+        used -= old.blob.size;
+      }
+      if (used + blob.size <= limit)
+        await db.audio.put({
+          id,
+          blob,
+          mimeType: blob.type,
+          createdAt: Date.now(),
+          duration: 0,
+          kind: "generated",
+          processed: true,
+          label: text.slice(0, 80),
+        });
+    }, settings.value.audioLimitMB).catch(failure => {
+      // A replaceable cache failure must not discard already received speech.
+      if (!(failure instanceof AudioBudgetUnavailableError) && (!(failure instanceof Error) || !['QuotaExceededError', 'UnknownError'].includes(failure.name))) throw failure;
+    });
     return blob;
   }
   async function beginTask(taskId: string) {

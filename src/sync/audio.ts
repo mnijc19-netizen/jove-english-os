@@ -1,5 +1,6 @@
 import type { JoveDatabase } from '../db/db'
 import { audioMetadataSchema } from '../db/schema'
+import { withAudioBudget } from '../db/audio'
 import type { AudioAsset } from '../domain/types'
 import { accountRequest, type SyncAccess } from './access'
 import { SyncJournal } from './journal'
@@ -155,12 +156,10 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
     } else if (!row.expires_at || Date.parse(row.expires_at) > now) {
       const asset = await downloadRecording(access, row, meta, language)
       await access.assertCurrent()
-      const added = await database.transaction('rw', database.audio, database.settings, database.syncMeta, async () => {
+      const added = await withAudioBudget(database, async budget => {
         if ((await database.syncMeta.get('owner'))?.value !== owner) throw new Error('Sync owner changed')
         if (await database.audio.get(asset.id)) return false
-        const bytes = (await database.audio.toArray()).reduce((sum, item) => sum + item.blob.size, 0)
-        const limit = ((await database.settings.get('main'))?.value.audioLimitMB ?? 200) * 1024 * 1024
-        if (bytes + asset.blob.size > limit) return false
+        if (budget.usedBytes + asset.blob.size > budget.limitBytes) return false
         await database.audio.add(asset)
         return true
       })

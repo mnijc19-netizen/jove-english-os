@@ -6,6 +6,43 @@ import { readFile } from 'node:fs/promises'
 test.skip(process.env.JOVE_JAPANESE_PREVIEW !== '1', 'Japanese workspace is a local development candidate')
 test.use({ serviceWorkers: 'block' })
 
+test('two actual tabs share one English-Japanese audio allowance without overwriting originals', async ({ page, context }) => {
+  await page.goto('#/ja')
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  const other = await context.newPage()
+  await other.goto('#/ja')
+  await expect(other.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  await page.evaluate(async () => {
+    const path = '/jove-english-os/src/db/db.ts', { db: en, createLanguageDatabase } = await import(/* @vite-ignore */ path)
+    const ja = createLanguageDatabase('ja'); await ja.open(); ja.close()
+    const setting = await en.settings.get('main')
+    // Tiny isolated fixture budget, never the owner's browser/account.
+    await en.settings.put({ ...setting, value: { ...setting.value, audioLimitMB: 10 / 1024 / 1024 } })
+    await en.audio.put({ id: 'original', blob: new Blob(['keep']), createdAt: 1, duration: 1, kind: 'recording', processed: false, mimeType: 'audio/wav', label: 'Fixture' })
+  })
+  const writes = await Promise.all([page, other].map((target, index) => target.evaluate(async language => {
+    const paths = ['/jove-english-os/src/db/db.ts', '/jove-english-os/src/db/audio.ts']
+    const [{ createLanguageDatabase }, { withAudioBudget }] = await Promise.all(paths.map(path => import(/* @vite-ignore */ path)))
+    const database = createLanguageDatabase(language)
+    try {
+      await withAudioBudget(database, async (budget: { assertFits: (bytes: number) => void }) => {
+        budget.assertFits(4)
+        await database.audio.put({ id: `new-${language}`, blob: new Blob(['next']), createdAt: 2, duration: 1, kind: 'recording', processed: false, mimeType: 'audio/wav', label: 'Fixture' })
+      }); return 'saved'
+    } catch (error) { return error instanceof Error && error.message.includes('combined audio storage limit') ? 'full' : 'unexpected' }
+    finally { database.close() }
+  }, index ? 'ja' : 'en')))
+  expect(writes.sort()).toEqual(['full', 'saved'])
+  const persisted = await page.evaluate(async () => {
+    const path = '/jove-english-os/src/db/db.ts', { createLanguageDatabase } = await import(/* @vite-ignore */ path)
+    const en = createLanguageDatabase('en'), ja = createLanguageDatabase('ja')
+    const rows = (await en.audio.toArray()).concat(await ja.audio.toArray()), original = await (await en.audio.get('original')).blob.text()
+    en.close(); ja.close(); return { bytes: rows.reduce((n: number, row: { blob: Blob }) => n + row.blob.size, 0), original }
+  })
+  expect(persisted).toEqual({ bytes: 8, original: 'keep' })
+  await other.close()
+})
+
 test('Japanese kana foundation resumes without an IME and keeps unavailable audio as script-only evidence', async ({ page }, testInfo) => {
   await page.goto('#/ja')
   await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)

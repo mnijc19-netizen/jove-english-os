@@ -570,7 +570,8 @@ onMounted(storageStatus);
             Clear reusable audio caches
           </button>
         </div>
-        <label for="audio-limit">Audio storage budget (MB)</label
+        <p class="help-text">音频上限由英语和日语共用，包含录音、导入文件和可复用缓存。超过上限时保留原件；可清理缓存或调整上限后重试。云端保留策略和浏览器实际可用空间另行限制。</p>
+        <label for="audio-limit">Combined audio storage budget (MB)</label
         ><input
           id="audio-limit"
           type="number"

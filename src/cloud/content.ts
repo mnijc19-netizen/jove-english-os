@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { cloudClient, createAuthFence, publicCloudConfig } from './client'
 import { db } from '../db/db'
+import { AudioBudgetUnavailableError, withAudioBudget } from '../db/audio'
 import { authenticPlaybackSchema, materialSchema } from '../db/schema'
 import type { AuthenticPlayback, Material, StudyEvent } from '../domain/types'
 import { abortable, checkAbort, readBytes, readJson, withDeadline } from '../ai/transport'
@@ -203,13 +204,12 @@ export async function prepareContentAudio(material: Material, signal?: AbortSign
     const blob = new Blob([bytes], { type: playback.mimeType })
     await context.assertCurrent(); context.assertLive(); checkAbort(scoped)
     let saved = false
-    try { await db.transaction('rw', [db.audio, db.settings, db.syncMeta], async () => {
+    try { await withAudioBudget(db, async budget => {
       if ((await db.syncMeta.get('owner'))?.value !== context.ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
-      const limit = ((await db.settings.get('main'))?.value.audioLimitMB ?? 100) * 1024 * 1024
-      const assets = await db.audio.toArray()
+      const limit = budget.limitBytes, assets = budget.assets
       const replaceable = assets.find(a => a.id === cacheId && a.kind === 'content-cache')
       if (replaceable) await db.audio.delete(cacheId)
-      let used = assets.reduce((n, a) => n + a.blob.size, 0) - (replaceable?.blob.size ?? 0)
+      let used = budget.usedBytes - (replaceable?.blob.size ?? 0)
       let cacheUsed = assets.filter(a => a.kind === 'content-cache' && a.id !== cacheId).reduce((n, a) => n + a.blob.size, 0)
       for (const old of assets.filter(a => a.kind === 'content-cache' && a.id !== cacheId).sort((a, b) => a.createdAt - b.createdAt)) {
         if (used + blob.size <= limit && cacheUsed + blob.size <= 100 * 1024 * 1024) break
@@ -226,7 +226,7 @@ export async function prepareContentAudio(material: Material, signal?: AbortSign
     }) } catch (error) {
       // Safari private storage/actual quota errors do not invalidate already
       // authenticated, hash-checked bytes. Never swallow protocol/auth/abort errors.
-      if (!(error instanceof Error) || !['QuotaExceededError', 'UnknownError'].includes(error.name)) throw error
+      if (!(error instanceof AudioBudgetUnavailableError) && (!(error instanceof Error) || !['QuotaExceededError', 'UnknownError'].includes(error.name))) throw error
       saved = false
     }
     await context.assertCurrent(); context.assertLive(); checkAbort(scoped)

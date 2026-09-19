@@ -1,7 +1,7 @@
 import { shallowReactive } from 'vue'
 import type { AudioAsset } from '../domain/types'
 
-export interface RecordingDraft { scope: string; asset: AudioAsset; saved: boolean }
+export interface RecordingDraft { scope: string; asset: AudioAsset; saved: boolean; owner?: unknown }
 
 /** Retained across component/route teardown; cleared only after successful save and attachment. */
 export const recordingDrafts = shallowReactive(new Map<string, RecordingDraft>())
@@ -19,10 +19,10 @@ function updateUnloadProtection(): void {
   }
 }
 
-export function retainRecording(scope: string, capture: { blob: Blob; duration: number }, label: string): RecordingDraft {
+export function retainRecording(scope: string, capture: { blob: Blob; duration: number }, label: string, owner?: unknown): RecordingDraft {
   const asset: AudioAsset = { id: crypto.randomUUID(), blob: capture.blob, mimeType: capture.blob.type,
     duration: capture.duration, createdAt: Date.now(), kind: 'recording', processed: false, label }
-  const draft = shallowReactive({ scope, asset, saved: false })
+  const draft = shallowReactive({ scope, asset, saved: false, owner })
   recordingDrafts.set(asset.id, draft)
   updateUnloadProtection()
   return draft

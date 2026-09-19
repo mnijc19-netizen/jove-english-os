@@ -3,6 +3,7 @@ import { computed, ref, onMounted, watch } from "vue";
 import { useApp } from "../stores/app";
 import { useCloud } from "../stores/cloud";
 import { db } from "../db/db";
+import { withAudioBudget } from "../db/audio";
 import type { Material } from "../domain/types";
 import { useRequest } from "../composables/useRequest";
 import Icon from "../components/Icon.vue";
@@ -87,24 +88,20 @@ async function chooseFile(event: Event) {
   await run(async () => {
     if (chosen.size > 25 * 1024 * 1024)
       throw new Error("Choose an audio file smaller than 25 MB.");
-    if (
-      app.audio.reduce((n, a) => n + a.blob.size, 0) + chosen.size >
-      app.settings.audioLimitMB * 1024 * 1024
-    )
-      throw new Error(
-        "Audio storage limit reached. Download recordings or clear generated cache in Settings before importing.",
-      );
     const id = crypto.randomUUID();
-    await db.audio.put({
-      id,
-      blob: chosen,
-      mimeType: chosen.type,
-      createdAt: Date.now(),
-      duration: 0,
-      kind: "import",
-      processed: false,
-      label: chosen.name,
-    });
+    await withAudioBudget(db, async budget => {
+      budget.assertFits(chosen.size);
+      await db.audio.put({
+        id,
+        blob: chosen,
+        mimeType: chosen.type,
+        createdAt: Date.now(),
+        duration: 0,
+        kind: "import",
+        processed: false,
+        label: chosen.name,
+      });
+    }, app.settings.audioLimitMB);
     fileAudioId.value = id;
     await persist();
     await app.refresh();

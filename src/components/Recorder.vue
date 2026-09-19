@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vu
 import { onBeforeRouteLeave } from "vue-router";
 import { useApp } from "../stores/app";
 import { db as englishDatabase, type JoveDatabase } from "../db/db";
-import { updateAudioMetadata } from "../db/audio";
+import { AudioBudgetUnavailableError, AudioCapacityError, updateAudioMetadata, withAudioBudget } from "../db/audio";
 import type { AudioAsset } from "../domain/types";
 import { AudioError, startRecording } from "../audio/recorder";
 import { attachRecording, recordingDrafts, retainRecording, saveRecording } from "../audio/recovery";
@@ -46,15 +46,7 @@ let handle: Awaited<ReturnType<typeof startRecording>> | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let stopping: Promise<void> | undefined, disposed = false;
 let unregisterShortcut: (() => void) | undefined;
-
-class AudioCapacityError extends Error {
-  constructor() { super("The configured audio storage limit would be exceeded. Increase the audio limit in Settings to save more audio."); }
-}
-function checkCapacity(assets: AudioAsset[], incomingBytes: number, replacingId?: string): void {
-  const limit = app.settings.audioLimitMB * 1024 * 1024;
-  const used = assets.reduce((bytes, asset) => bytes + (asset.id === replacingId ? 0 : asset.blob.size), 0);
-  if (!Number.isFinite(limit) || limit <= 0 || used + incomingBytes > limit) throw new AudioCapacityError();
-}
+let recordingOwner: unknown;
 
 watch(() => props.savedAudioId, value => {
   if (recording.value || starting.value || saving.value || pending.value) return;
@@ -71,12 +63,16 @@ async function savePending(): Promise<boolean> {
   statusError.value = "";
   try {
     await workspace?.assertCurrent();
-    await saveRecording(draft, asset => db.transaction("rw", db.audio, async () => {
-      // Count persisted recordings, imports and generated audio in the same write transaction.
-      // Overlapping saves cannot both spend the same remaining capacity.
-      checkCapacity(await db.audio.toArray(), asset.blob.size, asset.id);
+    const assertOwner = async () => {
+      if ((await db.syncMeta.get('owner'))?.value !== draft.owner)
+        throw new AudioBudgetUnavailableError('The recording belongs to the account active when capture started. Return to that account or download this original; nothing was overwritten.');
+    };
+    await assertOwner();
+    await saveRecording(draft, asset => withAudioBudget(db, async budget => {
+      await assertOwner();
+      budget.assertFits(asset.blob.size, asset.id);
       return db.audio.put(asset);
-    }));
+    }, app.settings.audioLimitMB, workspace?.assertCurrent));
     // A language-specific parent can durably attach before this recoverable
     // draft is released, including forced unmount during microphone shutdown.
     await workspace?.attach?.({ audioId: draft.asset.id, duration: draft.asset.duration });
@@ -90,7 +86,7 @@ async function savePending(): Promise<boolean> {
     catch { statusError.value = "Recording saved. The library could not refresh yet; your audio remains available."; }
     return true;
   } catch (failure) {
-    statusError.value = (failure instanceof AudioCapacityError ? failure.message + " " : "Recording has not been saved. ")
+    statusError.value = (failure instanceof AudioCapacityError || failure instanceof AudioBudgetUnavailableError ? failure.message + " " : "Recording has not been saved. ")
       + "Your audio is retained here: retry saving or download it before closing this tab.";
     return false;
   } finally { saving.value = false; }
@@ -104,9 +100,12 @@ async function start(): Promise<void> {
     try {
       await workspace?.assertCurrent();
       // Recording size is unknown until capture ends; require some room before opening the mic.
-      checkCapacity(await db.audio.toArray(), 1);
+      recordingOwner = await withAudioBudget(db, async budget => {
+        budget.assertFits(1);
+        return (await db.syncMeta.get('owner'))?.value;
+      }, app.settings.audioLimitMB, workspace?.assertCurrent);
     } catch (failure) {
-      statusError.value = failure instanceof AudioCapacityError ? failure.message
+      statusError.value = failure instanceof AudioCapacityError || failure instanceof AudioBudgetUnavailableError ? failure.message
         : "Audio storage could not be checked. Retry before recording; your existing audio is unchanged.";
       return;
     }
@@ -135,11 +134,11 @@ function stop(): Promise<void> {
   stopping = (async () => {
     try {
       const data = await capture.stop();
-      retainRecording(scope, data, props.label || "Speaking practice");
+      retainRecording(scope, data, props.label || "Speaking practice", recordingOwner);
       await savePending();
     } catch (failure) {
       if (failure instanceof AudioError && failure.recovery) {
-        retainRecording(scope, failure.recovery, (props.label || "Speaking practice") + " · recovered partial audio");
+        retainRecording(scope, failure.recovery, (props.label || "Speaking practice") + " · recovered partial audio", recordingOwner);
         const saved = await savePending();
         if (saved) statusError.value = "Capture stopped early. The available audio was retained; replay it before using it.";
       } else statusError.value = failure instanceof AudioError ? failure.message : "Capture could not finish. Your previous recording and text are unchanged.";
@@ -216,7 +215,7 @@ defineExpose({ toggle });
     <div v-if="existing && !pending" class="row wrap">
       <span v-if="saving" class="muted" role="status">Recording saved; finishing local updates…</span>
       <span v-else class="pill"><Icon name="check" :size="14" />Saved on this device</span>
-      <button v-if="canTranscribe" class="text-button" :disabled="locked || recording || !app.online" @click="transcribe">{{ transcribing ? "Transcribing…" : "Transcribe recording" }}</button>
+      <button v-if="!workspace || canTranscribe" class="text-button" :disabled="!canTranscribe || locked || recording || !app.online" @click="transcribe">{{ transcribing ? "Transcribing…" : "Transcribe recording" }}</button>
       <button v-if="busy" class="text-button" @click="cancel">Cancel</button>
     </div>
     <p v-if="existing && !workspace && !app.keySet" class="help-text">Your recording is saved. <RouterLink to="/settings">Connect AI in Settings</RouterLink> for transcription and feedback, or type your response.</p>
