@@ -283,6 +283,90 @@ test('Japanese Settings exports isolated backup and restores missing-recording p
   } finally { await device.close() }
 })
 
+test('Japanese three-turn dialogue resumes a failed reply, retains turns and finishes with a real recorded retry', async ({ page }) => {
+  let calls = 0
+  let releaseCancelledReply: (() => void) | undefined
+  const feedback = { summary: '三轮都回应了问题，先调整助词。', strengths: ['回应对方'], errors: [{ category: 'grammar', original: '私学生', corrected: '私は学生です。', hint: '主题后面少了什么？', explanation: '这里用は标记话题。' }],
+    comprehension: null, accuracy: 0.6, fluency: null, successfulChunks: [], nextPrompt: '换成另一种身份，完整重说。' }
+  await page.route('https://openrouter.ai/api/v1/**', async route => {
+    const request = route.request()
+    if (request.url().includes('/models?')) return route.fulfill({ json: { data: [{ id: 'fixture/japanese-talk', name: 'Fixture',
+      architecture: { input_modalities: ['text'], output_modalities: ['text'] }, supported_parameters: ['structured_outputs'] }] } })
+    calls++
+    const body = request.postDataJSON()
+    expect(body.messages[0].content).toContain('Japanese learning tutor for a native Chinese speaker')
+    if (calls === 1) return route.fulfill({ status: 401, json: { error: { message: 'Fixture authentication failure' } } })
+    if (calls === 3) { await new Promise<void>(resolve => { releaseCancelledReply = resolve }); return route.abort().catch(() => {}) }
+    return route.fulfill({ json: { model: 'fixture/japanese-talk', choices: [{ finish_reason: 'stop', message: { content: body.response_format ? JSON.stringify(feedback) : 'そうですか。もう少し教えてください。' } }], usage: { total_tokens: 40, cost: 0.001 } } })
+  })
+  await page.goto('#/ja')
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  const id = await page.evaluate(async () => {
+    const paths = ['/jove-english-os/src/db/db.ts', '/jove-english-os/src/db/japanese.ts', '/jove-english-os/src/domain/japanese.ts']
+    const [{ db, createLanguageDatabase }, { createJapaneseWorkspace }, { japanesePlacementItems }] = await Promise.all(paths.map(path => import(path)))
+    await db.secrets.bulkPut([{ id: 'openrouter', value: 'fixture-only-browser-key' }, { id: 'provider-mode', value: 'byok' }])
+    const settings = await db.settings.get('main'); settings.value.fastModel = 'fixture/japanese-talk'; settings.value.strongModel = 'fixture/japanese-talk'; await db.settings.put(settings)
+    const database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, db)
+    await learning.open(); await learning.saveDiagnostic(Object.fromEntries(japanesePlacementItems.map((item: { id: string }) => [item.id, '跳过'])), true)
+    const task = { id: 'fixture:ja:dialogue', kind: 'speak', title: '三轮情境对话', minutes: 5, reason: 'Fixture', materialId: 'ja-irodori-starter-3', done: false }
+    const date = new Date().toLocaleDateString('en-CA')
+    await database.plans.put({ id: date, date, minutes: 5, focus: 'realWorld', tasks: [task], createdAt: Date.now() })
+    const session = await learning.dialogue.start(task); database.close(); return session.id
+  })
+  await page.goto('#/ja/talk?session=' + encodeURIComponent(id)); await page.reload()
+  const input = page.getByRole('textbox', { name: '本轮日语回答', exact: true })
+  const checked = page.getByRole('checkbox', { name: /已核对本轮文字/ })
+  await page.getByRole('button', { name: 'Record response', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: '1s / 180s' })).toBeVisible()
+  await page.getByRole('button', { name: 'Stop & save', exact: true }).click()
+  await expect(page.getByText('Saved on this device', { exact: true })).toBeVisible()
+  await input.fill('私学生です。'); await checked.check()
+  await page.getByRole('button', { name: '发送并继续交流（AI，可能收费）' }).click()
+  await expect(page.getByRole('alert')).toContainText('不会自动重试')
+  await expect(page.getByText('私学生です。', { exact: true })).toBeVisible()
+  await expect(page.getByLabel('日语第1轮录音')).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('button', { name: '恢复／重试 AI 回复（可能再次收费）' })).toBeVisible(); expect(calls).toBe(1)
+  await page.getByRole('button', { name: '恢复／重试 AI 回复（可能再次收费）' }).click()
+  await expect(input).toBeVisible()
+  await input.fill('日本語を勉強しています。'); await checked.check()
+  await page.getByRole('button', { name: '发送并继续交流（AI，可能收费）' }).click()
+  await expect.poll(() => Boolean(releaseCancelledReply)).toBe(true)
+  await page.getByRole('button', { name: '停止等待，保留回答', exact: true }).click()
+  await page.getByRole('button', { name: '用离线应答继续', exact: true }).click()
+  releaseCancelledReply!()
+  await expect(page.getByText('离线固定应答提示 · 不是 AI 回复')).toBeVisible()
+  expect(calls).toBe(3)
+  await input.fill('あなたは何を勉強していますか。'); await checked.check()
+  await page.getByRole('button', { name: '发送并继续交流（AI，可能收费）' }).click()
+  await expect(page.getByRole('heading', { name: '现在只改一处，然后完整重说' })).toBeVisible()
+  await page.getByRole('button', { name: '请 AI 总结三轮表达（可能收费）' }).click()
+  await expect(page.getByText('先想一想：主题后面少了什么？')).toBeVisible()
+  await expect(page.getByText('私は学生です。', { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '想过后，查看参考改法' }).click()
+  await expect(page.getByText('私は学生です。', { exact: true })).toBeVisible()
+  const used = calls
+  await page.reload()
+  await expect(page.getByText('三轮都回应了问题，先调整助词。')).toBeVisible(); expect(calls).toBe(used)
+  await page.screenshot({ path: `test-results/ja-dialogue-${test.info().project.name}.png`, fullPage: true })
+  await page.getByRole('textbox', { name: '准备调整的一处表达' }).fill('加上主题助词，换成朋友的身份介绍。')
+  await page.getByRole('button', { name: 'Record response', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: '1s / 180s' })).toBeVisible()
+  await page.getByRole('button', { name: 'Stop & save', exact: true }).click()
+  await expect(page.getByText('Saved on this device', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '保存三轮对话与完整重说' }).click()
+  await expect(page.getByRole('heading', { name: '三轮练习和重说已保存' })).toBeVisible()
+  await page.reload(); await expect(page.getByRole('heading', { name: '三轮练习和重说已保存' })).toBeVisible()
+  const result = await page.evaluate(async () => {
+    const path = '/jove-english-os/src/db/db.ts', { db, createLanguageDatabase } = await import(path), database = createLanguageDatabase('ja')
+    const result = { englishSessions: await db.sessions.count(), japaneseAudio: await database.audio.count(),
+      abilityEvidence: (await database.skills.toArray()).reduce((sum: number, skill: { evidenceCount: number }) => sum + skill.evidenceCount, 0) }
+    database.close(); return result
+  })
+  expect(result).toEqual({ englishSessions: 0, japaneseAudio: 2, abilityEvidence: 0 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+})
+
 test('Japanese AI feedback retains checked input through failure, shows a hint first and reloads without another charge', async ({ page }) => {
   let calls = 0
   const evaluation = { summary: '意思清楚，先改主题助词。', strengths: ['表达身份'], errors: [{ category: 'grammar', original: '私学生です', corrected: '私は学生です。', hint: '想想用哪个助词标记话题。', explanation: 'は标记这里的话题。' }],

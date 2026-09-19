@@ -143,6 +143,20 @@ afterEach(async () => {
   vi.restoreAllMocks(); vi.unstubAllGlobals()
 })
 
+it('SavedRecording never falls back from explicit Japanese assets to equal-ID English audio', async () => {
+  const original = makeAsset('same-id')
+  appState.audio = [original]
+  const absent = mount(SavedRecording, { audioId: original.id, assets: [] }); await flush()
+  expect(find(absent.root, node => node.type === 'audio')).toBeUndefined()
+  expect(URL.createObjectURL).not.toHaveBeenCalled()
+  absent.unmount()
+  const japanese = { ...original, blob: new Blob(['japanese-original'], { type: original.mimeType }) }
+  const own = mount(SavedRecording, { audioId: original.id, assets: [japanese] }); await flush()
+  expect(find(own.root, node => node.type === 'audio')).toBeTruthy()
+  expect(URL.createObjectURL).toHaveBeenCalledExactlyOnceWith(japanese.blob)
+  own.unmount()
+})
+
 describe.each(['Recorder', 'SavedRecording'])('%s playback identity during hydration', name => {
   const show = (id: string) => mount(name === 'Recorder' ? Recorder : SavedRecording, name === 'Recorder' ? { savedAudioId: id } : { audioId: id })
   const audio = (root: HostNode) => find(root, node => node.type === 'audio')!

@@ -7,6 +7,7 @@ import { assessmentSchema, planSchema, sessionSchema } from './schema'
 import type { DailyPlan, StudySession } from '../domain/types'
 import { z } from 'zod'
 import { createJapaneseReview } from './japanese-review'
+import { createJapaneseDialogue } from './japanese-dialogue'
 
 /** Called only by an explicitly enabled Japanese workspace, never by English
  * bootstrap. Does not overwrite setup, learned content, cards or saved work. */
@@ -48,6 +49,9 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     await checkOwner()
   }
   const review = createJapaneseReview(database, checkOwner, fence)
+  const dialogue = createJapaneseDialogue(database, checkOwner, fence, async () => {
+    if (!opened || (await english.syncMeta.get('owner'))?.value !== owner) throw new Error('学习账号已改变，请重新打开日语区。')
+  })
   async function saveDiagnostic(responses: Record<string, string>, finish = false, now = Date.now()) {
     const frozen = { ...responses }
     for (const [id, answer] of Object.entries(frozen)) {
@@ -93,6 +97,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const completed = current?.tasks.filter(task => task.done || task.optional) ?? []
       const previous = current?.tasks.find(task => task.kind === 'listen' && !task.done && !task.optional)
       const previousReview = current?.tasks.find(task => task.kind === 'review' && !task.done && !task.optional)
+      const previousDialogue = current?.tasks.find(task => task.kind === 'speak' && !task.done && !task.optional)
       const minutes = allowance.allowances.ja.remaining
       const olderChunks = new Set((await database.chunks.toArray()).filter(chunk => chunk.createdAt <= now && new Date(chunk.createdAt).toLocaleDateString('en-CA') !== date).map(chunk => chunk.id))
       const due = (await database.cards.toArray()).filter(card => olderChunks.has(card.chunkId) && card.card.due.getTime() <= now)
@@ -103,14 +108,22 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       } : undefined)
       // Never insert new reviews after completing today's planned lesson.
       const reviewMinutes = reviewTask && !completed.some(task => task.kind === 'listen') ? Math.min(reviewTask.minutes, minutes) : 0
-      const lessonMinutes = Math.max(0, minutes - reviewMinutes)
+      // After two complete introductory practices, reserve a brief real-life
+      // exchange in the SAME daily allowance. Never add it to an already
+      // started/finished day's older plan or double the English/Japanese budget.
+      const dialogueTask = previousDialogue ?? (!current && history.length >= 2 && material && minutes - reviewMinutes >= 15 ? {
+        id: `${date}:ja:speak:${material.id}`, kind: 'speak' as const, title: '连续回应三轮，再改一处', minutes: 5,
+        reason: '系统沿用今天的话题；录音先保存，AI 不可用时可用标明的离线应答练习。', materialId: material.id, done: false,
+      } : undefined)
+      const dialogueMinutes = dialogueTask ? Math.min(dialogueTask.minutes, Math.max(0, minutes - reviewMinutes)) : 0
+      const lessonMinutes = Math.max(0, minutes - reviewMinutes - dialogueMinutes)
       // Preserve task identity after starting; do not fill a finished day again.
       const task = previous ?? (!completed.some(task => task.kind === 'listen') && material ? { id: `${date}:ja:listen:${material.id}`, kind: 'listen' as const,
         title: material.title, minutes, reason: history.at(-1)?.data?.effort === 'hard'
           ? '上次觉得吃力，今天先巩固熟悉话题；不急着加难度。'
           : '真人输入 → 回忆意思 → 自己表达 → 对照重说', materialId: material.id, done: false } : undefined)
       const tasks = [...completed, ...(reviewTask && reviewMinutes > 0 ? [{ ...reviewTask, minutes: reviewMinutes }] : []),
-        ...(task && lessonMinutes > 0 ? [{ ...task, minutes: lessonMinutes }] : [])]
+        ...(task && lessonMinutes > 0 ? [{ ...task, minutes: lessonMinutes }] : []), ...(dialogueTask && dialogueMinutes > 0 ? [{ ...dialogueTask, minutes: dialogueMinutes }] : [])]
       if (!tasks.length) return null
       const plan = planSchema.parse({ id: date, date, minutes: tasks.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0),
         focus: 'realWorld', tasks,
@@ -123,6 +136,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     const plan = await today(now)
     const task = plan?.tasks.find(task => task.id === taskId && !task.done && !task.optional)
     if (task?.kind === 'review') return review.start(task, now)
+    if (task?.kind === 'speak') return dialogue.start(task, now)
     if (!task?.materialId || task.minutes <= 0) throw new Error('今天的安排已更新，请返回今日任务。')
     await checkOwner()
     return database.transaction('rw', database.tables, async () => {
@@ -205,5 +219,5 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       return complete
     })
   }
-  return { database, repository, review, open, checkOwner, saveDiagnostic, today, start, save, finish, diagnosticId }
+  return { database, repository, review, dialogue, open, checkOwner, saveDiagnostic, today, start, save, finish, diagnosticId }
 }

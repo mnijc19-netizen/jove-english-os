@@ -12,6 +12,7 @@ const router = createRouter({
     ...(import.meta.env.DEV ? [
       { path: '/ja', component: () => import('./pages/Japanese.vue') },
       { path: '/ja/review', component: () => import('./pages/JapaneseReview.vue') },
+      { path: '/ja/talk', component: () => import('./pages/JapaneseDialogue.vue') },
     ] : []),
     { path: "/", redirect: "/today" },
     { path: "/today", component: () => import("./pages/Today.vue") },

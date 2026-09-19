@@ -2,9 +2,12 @@
 import { computed } from "vue";
 import { useApp } from "../stores/app";
 import { useRecordingUrl } from "../composables/useRecordingUrl";
-const props = defineProps<{ audioId: string; label?: string }>();
+import type { AudioAsset } from '../domain/types';
+const props = defineProps<{ audioId: string; label?: string; assets?: AudioAsset[] }>();
 const app = useApp();
-const asset = computed(() => app.audio.find((a) => a.id === props.audioId));
+// An explicitly supplied (even empty) language workspace never falls back to
+// an equal-ID English recording.
+const asset = computed(() => (props.assets ?? app.audio).find((a) => a.id === props.audioId));
 const url = useRecordingUrl(asset);
 </script>
 <template>
