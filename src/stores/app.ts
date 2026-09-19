@@ -28,6 +28,7 @@ import { OpenRouterProvider } from "../ai/provider";
 import { eventSchema, planSchema, profileSchema, settingsSchema } from "../db/schema";
 import { useCloud } from "./cloud";
 import { CloudProvider, routeProvider } from "../ai/cloud-provider";
+import { localAICost } from "../ai/workspace-provider";
 import { flushContentHistory, prepareContentAudio, refreshContentLessons, refreshExternalCourseCatalog } from "../cloud/content";
 
 export const useApp = defineStore("app", () => {
@@ -516,7 +517,7 @@ export const useApp = defineStore("app", () => {
         throw new Error(
           "Internet required. Your work is saved; continue with local practice.",
         );
-      if (cost.value >= settings.value.dailyBudget)
+      if (await localAICost(db) >= settings.value.dailyBudget)
         throw new Error(
           "Daily budget reached. Continue local practice or adjust your budget in Settings.",
         );

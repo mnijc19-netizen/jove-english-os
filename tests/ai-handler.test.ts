@@ -70,6 +70,21 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllGlobals())
 describe('real provider adapter behind authenticated server handler', () => {
+  it('pins Japanese prompts and budget fingerprints without changing absent-language English requests', async () => {
+    const original = payload(), japanese = { ...original, learningLanguage: 'ja', input: { kind: 'expression', text: '私は学生です。' } }
+    expect(aiRequestSchema.parse(original)).not.toHaveProperty('learningLanguage')
+    expect((await handler(request(japanese))).status).toBe(200)
+    const sent = JSON.parse(String(paid.mock.calls[0]![1].body))
+    expect(sent.messages[0].content).toContain('Japanese learning tutor for a native Chinese speaker')
+    expect((await handler(request(japanese))).status).toBe(200); expect(paid).toHaveBeenCalledOnce()
+    expect((await handler(request({ ...japanese, learningLanguage: 'en' }))).status).not.toBe(200)
+    expect(paid).toHaveBeenCalledOnce()
+    expect((await handler(request({ ...payload(), learningLanguage: 'fr' }))).status).toBe(400)
+  })
+  it('does not reuse the configured English voice for Japanese speech', async () => {
+    expect((await handler(request({ requestId: crypto.randomUUID(), action: 'synthesize', learningLanguage: 'ja', text: 'こんにちは。' }))).status).toBe(503)
+    expect(paid).not.toHaveBeenCalled(); expect(ledger.size).toBe(0)
+  })
   it('rejects unexpected origins, actions, oversized text and browser-supplied keys before dispatch', async () => {
     expect((await handler(request(payload(), 'https://untrusted.invalid'))).status).toBe(403)
     expect((await handler(request({ ...payload(), apiKey: 'must-not-be-used' }))).status).toBe(400)

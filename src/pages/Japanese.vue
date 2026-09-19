@@ -8,6 +8,7 @@ import { japaneseStarterLessons, japaneseSource } from '../content/japanese'
 import { readLanguageDay } from '../db/language-day'
 import type { Assessment, AudioAsset, DailyPlan, StudySession } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
+import JapaneseCoach from '../components/JapaneseCoach.vue'
 import { useRecordingUrl } from '../composables/useRecordingUrl'
 import { useJapaneseSpace } from '../stores/japanese-space'
 
@@ -15,6 +16,7 @@ const route = useRoute(), router = useRouter()
 const space = useJapaneseSpace()
 const database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, english)
 const ready = ref(false), busy = ref(false), navigating = ref(false), error = ref(''), notice = ref(''), captureActive = ref(false)
+const coachActive = ref(false)
 const assessment = shallowRef<Assessment>(), plan = shallowRef<DailyPlan | null>(null), session = shallowRef<StudySession>()
 const audio = shallowRef<AudioAsset[]>([]), unfinished = shallowRef<StudySession[]>([])
 const allowance = shallowRef<Awaited<ReturnType<typeof readLanguageDay>>>(null)
@@ -131,7 +133,7 @@ async function complete() {
 async function safeLeave(to: { fullPath: string }) {
   if (navigating.value) return false
   if (busy.value && to.fullPath !== allowedNavigation) { notice.value = '正在保存，请稍后再切换。'; return false }
-  if (captureActive.value) { error.value = '请先停止录音，等待保存后再切换。'; return false }
+  if (captureActive.value || coachActive.value) { error.value = '请先停止录音或 AI 请求，等待回答保存后再切换。'; return false }
   try {
     await flush()
     if (dirty.value) await flush()
@@ -168,7 +170,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="page japanese-page">
     <div class="page-heading"><div><p class="eyebrow">JAPANESE · 日语学习</p><h1 tabindex="-1">每天一点，真的用得上。</h1></div><RouterLink to="/today" class="text-button">返回英语</RouterLink></div>
-    <p class="help-text">开发预览：本页尚未开放到正式网站。日语 AI 反馈和正式云端验收仍在接入。</p>
+    <p class="help-text">开发预览：本页尚未开放到正式网站。日语 AI、分级内容和正式云端验收仍在完善。</p>
     <p class="help-text" role="status">日语：{{ space.status }} <span v-if="space.problem"> · {{ space.problem }}</span></p>
     <p v-if="error" class="error" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="act(ready ? flush : openPage)">{{ ready ? '重试保存' : '重试打开日语区' }}</button></p>
     <p v-if="!ready" role="status">正在打开独立的日语学习记录…</p>
@@ -233,8 +235,12 @@ onBeforeUnmount(() => {
           v-if="step === 'speak' || step === 'compare'" :key="session.id + step" :workspace="recorderWorkspace"
           :saved-audio-id="step === 'compare' ? draft.retryAudioId : draft.audioId" :disabled="busy || navigating"
           :label="step === 'compare' ? '日语：对照后完整重说' : '日语：新情境回答'" @active="captureActive = $event" />
+        <JapaneseCoach
+          v-if="step === 'compare'" :key="session.id" :database="database" :session-id="session.id" :audio-id="draft.audioId"
+          :reference="`${lesson.canDo}。任务：${lesson.transferZh}。本站表达示例（不是原站字幕）：${lesson.phrase}`" :target="lesson.phrase"
+          :check-owner="learning.checkOwner" @active="coachActive = $event" />
         <div class="row wrap ja-actions">
-          <button class="button primary" :disabled="busy || navigating || captureActive || !nextEnabled" @click="act(() => step === 'compare' ? complete() : move(step === 'listen' ? 'notice' : step === 'notice' ? 'speak' : 'compare'))">{{ step === 'compare' ? '保存这次完整练习' : '保存并继续' }}</button>
+          <button class="button primary" :disabled="busy || navigating || captureActive || coachActive || !nextEnabled" @click="act(() => step === 'compare' ? complete() : move(step === 'listen' ? 'notice' : step === 'notice' ? 'speak' : 'compare'))">{{ step === 'compare' ? '保存这次完整练习' : '保存并继续' }}</button>
           <RouterLink to="/ja" class="text-button">保存后回到今日安排</RouterLink>
         </div>
       </section>

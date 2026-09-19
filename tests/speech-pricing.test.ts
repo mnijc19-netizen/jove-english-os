@@ -22,6 +22,13 @@ describe('verified supplemental speech pricing', () => {
   it('does not accept a stale operator rate lower than the live published rate', async () => {
     await expect(quoteSpeechDispatch(body, () => '0.00001')).rejects.toMatchObject({ code: 'PRICING' })
   })
+  it('requires a Japanese voice to be present in the verified speech catalog', async () => {
+    const japanese = { ...body, voice: 'ja-JP-Fixture:MAI-Voice-2', input: 'こんにちは。' }
+    await expect(quoteSpeechDispatch(japanese, () => undefined)).rejects.toMatchObject({ code: 'CONFIGURATION' })
+    now += 301_000; vi.mocked(Date.now).mockReturnValue(now)
+    fetcher.mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ ...row, supported_voices: [japanese.voice] }] })))
+    await expect(quoteSpeechDispatch(japanese, () => undefined)).resolves.toMatchObject({ body: japanese, estimateUsd: expect.any(Number) })
+  })
   it.each(['wrong-unit', 'wrong-modality', 'missing'])('fails closed for %s catalog data', async kind => {
     const changed = structuredClone(row)
     if (kind === 'wrong-unit') changed.pricing.completion = '0.00001'

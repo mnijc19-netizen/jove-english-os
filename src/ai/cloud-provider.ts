@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { cloudClient, createAuthFence, publicCloudConfig } from '../cloud/client'
-import { db } from '../db/db'
+import { db as englishDatabase, type JoveDatabase } from '../db/db'
 import { usageSchema } from '../db/schema'
 import type { Usage } from '../domain/types'
 import type { AIRequest } from '../server/ai'
@@ -17,9 +17,10 @@ const envelope = z.strictObject({ value: z.unknown(), notices, usage: z.array(us
 type ResultEnvelope = z.infer<typeof envelope>
 const speechResult = z.strictObject({ audioBase64: z.string().min(4).max(2_000_000)
   .regex(/^[A-Za-z0-9+/]+={0,2}$/).refine(value => value.length % 4 === 0), mimeType: z.literal('audio/mpeg') })
+const languageMaterialSchema = materialSchema.extend({ language: z.literal('ja').optional() })
 const resultSchemas: Record<AIRequest['action'], z.ZodType> = {
   status: z.strictObject({ label: z.string() }), evaluate: evaluatedResultSchema,
-  chat: z.string().min(1).max(16000), lookup: lookupSchema, analyzeMaterial: materialSchema, generateMaterial: materialSchema,
+  chat: z.string().min(1).max(16000), lookup: lookupSchema, analyzeMaterial: languageMaterialSchema, generateMaterial: languageMaterialSchema,
   discover: z.array(z.strictObject({ title: z.string(), url: z.url(), description: z.string() })).max(3),
   transcribe: z.string().min(1).max(16000),
   synthesize: speechResult,
@@ -50,7 +51,10 @@ export class CloudProvider implements LearningProvider {
   // A new paid identity is allowed only after this instance actually rejects
   // with ACCOUNT_UNCERTAIN, never merely because asynchronous cleanup ran.
   private warned = new Set<string>()
-  constructor(private local: OpenRouterProvider, private onUsage: (usage: Usage) => Promise<void>) {}
+  constructor(private local: OpenRouterProvider, private onUsage: (usage: Usage) => Promise<void>, private database: JoveDatabase = englishDatabase) {
+    if (database.language !== local.learningLanguage) throw new ProviderError('INPUT')
+  }
+  get learningLanguage() { return this.database.language }
   listModels(signal?: AbortSignal) { return this.local.listModels(signal) }
   retrieve(url: string, signal?: AbortSignal) { return this.local.retrieve(url, signal) }
   takeNotices() { return [...this.local.takeNotices(), ...this.notices.splice(0)] }
@@ -67,6 +71,8 @@ export class CloudProvider implements LearningProvider {
     return result.value
   }
   private request(input: RequestInput, signal?: AbortSignal, onDelta?: (text: string) => void): Promise<unknown> {
+    const db = this.database
+    if (db.language === 'ja') input = { ...input, learningLanguage: 'ja' }
     const client = cloudClient
     if (!client) return Promise.reject(new ProviderError('ACCOUNT_SERVICE'))
     // Synchronous invalidation closes the gap *inside* async SDK/IDB checks,
@@ -86,12 +92,14 @@ export class CloudProvider implements LearningProvider {
       assertIdentity()
       const owner = (await db.syncMeta.get('owner'))?.value
       if (owner !== ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
+      if (db.language === 'ja' && (await englishDatabase.syncMeta.get('owner'))?.value !== ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
       assertIdentity()
       const assertCurrent = async () => {
         assertIdentity()
         const current = await client.auth.getSession()
         assertIdentity()
         if (current.error || current.data.session?.user.id !== ownerId || (await db.syncMeta.get('owner'))?.value !== ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
+        if (db.language === 'ja' && (await englishDatabase.syncMeta.get('owner'))?.value !== ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
         assertIdentity()
         // Re-read after IDB for SDK notifications that have not been dispatched
         // yet. The synchronous fence still protects this final awaited read.
@@ -300,8 +308,13 @@ export class CloudProvider implements LearningProvider {
   async lookup(expression: string, sourceSentence: string, signal?: AbortSignal) {
     return lookupSchema.parse(await this.request({ action: 'lookup', expression, sourceSentence }, signal))
   }
-  async analyzeMaterial(text: string, signal?: AbortSignal) { return materialSchema.parse(await this.request({ action: 'analyzeMaterial', text }, signal)) }
-  async generateMaterial(topic: string, signal?: AbortSignal) { return materialSchema.parse(await this.request({ action: 'generateMaterial', topic }, signal)) }
+  async analyzeMaterial(text: string, signal?: AbortSignal) { return this.material(await this.request({ action: 'analyzeMaterial', text }, signal)) }
+  async generateMaterial(topic: string, signal?: AbortSignal) { return this.material(await this.request({ action: 'generateMaterial', topic }, signal)) }
+  private material(value: unknown) {
+    const result = languageMaterialSchema.parse(value)
+    if ((result.language ?? 'en') !== this.learningLanguage) throw new ProviderError('INVALID_RESPONSE')
+    return result
+  }
   async discover(topic: string, signal?: AbortSignal) {
     return z.array(z.strictObject({ title: z.string(), url: z.url(), description: z.string() })).max(3).parse(await this.request({ action: 'discover', topic }, signal))
   }
@@ -320,6 +333,7 @@ export class CloudProvider implements LearningProvider {
 
 /** Per-call route selection preserves an explicit advanced BYOK fallback. */
 export function routeProvider(local: OpenRouterProvider, remote: CloudProvider, useAccount: () => boolean): LearningProvider {
+  if (local.learningLanguage !== remote.learningLanguage) throw new ProviderError('INPUT')
   return new Proxy(local, { get(target, name) {
     const selected = useAccount() ? remote : target
     const value = Reflect.get(selected, name)

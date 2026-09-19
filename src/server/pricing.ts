@@ -12,7 +12,7 @@ let catalog: { fetchedAt: number; models: unknown[] } | undefined
 let speechCatalog: { fetchedAt: number; models: unknown[] } | undefined
 /** Character pricing is verified separately; context_length=0 is normal for TTS. */
 export async function quoteSpeechDispatch(body: object, env: ServerEnvironment, signal?: AbortSignal): Promise<{ estimateUsd: number; body: object }> {
-  const input = z.strictObject({ model: z.literal('microsoft/mai-voice-2'), voice: z.literal('en-US-Harper:MAI-Voice-2'),
+  const input = z.strictObject({ model: z.literal('microsoft/mai-voice-2'), voice: z.union([z.literal('en-US-Harper:MAI-Voice-2'), z.string().regex(/^ja-JP-[A-Za-z0-9:-]{1,80}$/)]),
     input: z.string().trim().min(1).max(800), response_format: z.literal('mp3') }).parse(body)
   if (!speechCatalog || Date.now() - speechCatalog.fetchedAt > 300000) {
     const data = await withDeadline(signal, 15000, scoped => publicGet('/models?output_modalities=speech', scoped))
@@ -20,11 +20,13 @@ export async function quoteSpeechDispatch(body: object, env: ServerEnvironment, 
     if (!checked.success) throw new GatewayError(503, 'PRICING', 'Could not verify current speech pricing.')
     speechCatalog = { fetchedAt: Date.now(), models: checked.data.data }
   }
-  const selected = z.object({ id: z.literal(input.model), architecture: z.object({ output_modalities: z.array(z.string()) }),
+  const selected = z.object({ id: z.literal(input.model), architecture: z.object({ output_modalities: z.array(z.string()) }), supported_voices: z.array(z.string()).optional(),
     pricing: z.object({ prompt: price, completion: price, request: price.optional() }) })
     .safeParse(speechCatalog.models.find(item => typeof item === 'object' && item !== null && 'id' in item && item.id === input.model))
   if (!selected.success || !selected.data.architecture.output_modalities.includes('speech') || selected.data.pricing.completion !== 0)
     throw new GatewayError(503, 'PRICING', 'The configured speech model price units need verification.')
+  if (input.voice.startsWith('ja-JP-') && !selected.data.supported_voices?.includes(input.voice))
+    throw new GatewayError(503, 'CONFIGURATION', 'A supported Japanese voice must be verified before synthesis.')
   const published = selected.data.pricing.prompt
   const rate = Number(env('JOVE_TTS_USD_PER_CHARACTER') ?? published)
   if (!Number.isFinite(rate) || rate < published || rate <= 0 || rate > 0.001)

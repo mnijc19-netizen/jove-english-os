@@ -3,7 +3,7 @@ import Dexie from 'dexie'
 import { build } from 'esbuild'
 import { chromium } from '@playwright/test'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { db } from '../src/db/db'
+import { db, JoveDatabase } from '../src/db/db'
 import { CloudProvider } from '../src/ai/cloud-provider'
 import { OpenRouterProvider } from '../src/ai/provider'
 import { defaultSettings, type Usage } from '../src/domain/types'
@@ -45,6 +45,33 @@ const input = { kind: 'meaning', text: 'I would like some water.', reference: 'A
 const chatInput = [{ role: 'user' as const, content: 'Hi.' }], chatContext = { mode: 'guided', scenario: 'Greeting', level: 'beginner', targets: [] }
 const newProvider = () => new CloudProvider(new OpenRouterProvider({ getKey: async () => '', getSettings: () => defaultSettings }), async value => { rows.push(value) })
 const pendingRow = async () => (await db.syncMeta.toArray()).find(row => row.id.startsWith('ai-request:'))!
+
+describe('Japanese account AI partition', () => {
+  it('pins request language, recovery receipts and usage to Japanese while keeping the shared owner', async () => {
+    const ja = new JoveDatabase(`cloud-ai-ja-${crypto.randomUUID()}`, 'ja')
+    try {
+      await ja.syncMeta.put({ id: 'owner', value: 'owner-a' })
+      const local = new OpenRouterProvider({ learningLanguage: 'ja', getKey: async () => '', getSettings: () => defaultSettings })
+      const japanese = new CloudProvider(local, async row => { await ja.usage.put(row) }, ja)
+      fetcher.mockImplementation(async (_url: string, options: RequestInit) => json({ ...envelope(evaluation, [{ id: 'ja-fee', timestamp: Date.now(), model: 'fixture', purpose: 'evaluate', tokens: 12, cost: 0.001 }]),
+        delivery: { requestId: JSON.parse(String(options.body)).requestId, cache: 'unconfirmed' } }))
+      await japanese.evaluate({ ...input, text: '私は学生です。' })
+      expect(JSON.parse(fetcher.mock.calls[0]![1].body).learningLanguage).toBe('ja')
+      expect((await ja.syncMeta.toArray()).some(row => row.id.startsWith('ai-request:'))).toBe(true)
+      expect((await db.syncMeta.toArray()).some(row => row.id.startsWith('ai-request:'))).toBe(false)
+      expect(await ja.usage.count()).toBe(1); expect(await db.usage.count()).toBe(0)
+      await japanese.evaluate({ ...input, text: '私は学生です。' }); expect(fetcher).toHaveBeenCalledOnce()
+      await db.syncMeta.put({ id: 'owner', value: 'unaccepted-owner' })
+      await expect(japanese.evaluate(input)).rejects.toMatchObject({ code: 'ACCOUNT_REQUIRED' })
+      expect(fetcher).toHaveBeenCalledOnce()
+    } finally { await ja.delete() }
+  })
+  it('rejects a Japanese provider bound to the English database before a request', () => {
+    const local = new OpenRouterProvider({ learningLanguage: 'ja', getKey: async () => '', getSettings: () => defaultSettings })
+    expect(() => new CloudProvider(local, async () => {})).toThrow()
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+})
 function localReceipt(value: unknown = evaluation) {
   fetcher.mockImplementationOnce(async (_url: string, options: RequestInit) => json({ ...envelope(value),
     delivery: { requestId: JSON.parse(String(options.body)).requestId, cache: 'unconfirmed' } }))

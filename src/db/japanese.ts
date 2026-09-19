@@ -195,6 +195,8 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       }
       const complete = { ...session, completedAt: now, stage: 'completed' }
       await database.sessions.put(complete)
+      const coach = await database.sessions.get(`ja-coach:${sessionId}`)
+      if (coach?.kind === 'japanese-coach') await database.sessions.put({ ...coach, completedAt: now, stage: 'completed' })
       return complete
     })
   }

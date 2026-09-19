@@ -234,3 +234,95 @@ test('Japanese Settings exports isolated backup and restores missing-recording p
     expect(await target.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   } finally { await device.close() }
 })
+
+test('Japanese AI feedback retains checked input through failure, shows a hint first and reloads without another charge', async ({ page }) => {
+  let calls = 0
+  const evaluation = { summary: '意思清楚，先改主题助词。', strengths: ['表达身份'], errors: [{ category: 'grammar', original: '私学生です', corrected: '私は学生です。', hint: '想想用哪个助词标记话题。', explanation: 'は标记这里的话题。' }],
+    comprehension: null, accuracy: 0.5, fluency: null, successfulChunks: [], nextPrompt: '换成朋友的身份，完整重说一次。' }
+  await page.route('https://openrouter.ai/api/v1/**', async route => {
+    const request = route.request()
+    if (request.url().includes('/models?')) return route.fulfill({ json: { data: [{ id: 'fixture/japanese', name: 'Fixture',
+      architecture: { input_modalities: ['text'], output_modalities: ['text'] }, supported_parameters: ['structured_outputs'] }] } })
+    calls++
+    expect(request.postDataJSON().messages[0].content).toContain('Japanese learning tutor for a native Chinese speaker')
+    if (calls === 1) return route.fulfill({ status: 401, json: { error: { message: 'Fixture authentication failure' } } })
+    return route.fulfill({ json: { model: 'fixture/japanese', choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(evaluation) } }], usage: { total_tokens: 30, cost: 0.001 } } })
+  })
+  await page.goto('#/ja')
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  const sessionId = await page.evaluate(async () => {
+    const paths = ['/jove-english-os/src/db/db.ts', '/jove-english-os/src/db/japanese.ts', '/jove-english-os/src/domain/japanese.ts']
+    const [{ db, createLanguageDatabase }, { createJapaneseWorkspace }, { japanesePlacementItems }] = await Promise.all(paths.map(path => import(path)))
+    await db.secrets.bulkPut([{ id: 'openrouter', value: 'fixture-only-browser-key' }, { id: 'provider-mode', value: 'byok' }])
+    const settings = await db.settings.get('main'); settings.value.fastModel = 'fixture/japanese'; settings.value.strongModel = 'fixture/japanese'; await db.settings.put(settings)
+    const database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, db)
+    await learning.open(); await learning.saveDiagnostic(Object.fromEntries(japanesePlacementItems.map((item: { id: string }) => [item.id, '跳过'])), true)
+    const plan = await learning.today(), session = await learning.start(plan.tasks[0].id)
+    await database.audio.put({ id: 'first', blob: new Blob(['fixture-only-audio']), mimeType: 'audio/wav', createdAt: Date.now(), duration: 1, kind: 'recording', processed: false, label: 'Fixture' })
+    await learning.save(session.id, { ...session.draft, listened: true, response: '问候', expression: 'おはよう', example: 'おはようございます。', audioId: 'first' }, 'compare')
+    database.close(); return session.id
+  })
+  await page.goto('#/ja?session=' + encodeURIComponent(sessionId)); await page.reload()
+  const answer = page.getByRole('textbox', { name: '写下自己刚才说的日语，或核对转写后修改' })
+  await answer.fill('私学生です')
+  await page.getByRole('checkbox', { name: /我核对过这段文字/ }).check()
+  await page.getByRole('button', { name: '请 AI 帮我改进（可能收费）' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'AI 或保存暂未完成' })).toBeVisible()
+  await expect(answer).toHaveValue('私学生です')
+  await page.reload()
+  await expect(answer).toHaveValue('私学生です')
+  await page.getByRole('button', { name: '请 AI 帮我改进（可能收费）' }).click()
+  await expect(page.getByText('先试着改一处：想想用哪个助词标记话题。', { exact: true })).toBeVisible()
+  await expect(page.getByText('私は学生です。', { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '想过后，查看示例与解释' }).click()
+  await expect(page.getByText('私は学生です。', { exact: true })).toBeVisible()
+  await page.reload()
+  await expect(page.getByText('先试着改一处：想想用哪个助词标记话题。', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '查看已保存的反馈' }).click()
+  await expect(page.getByRole('button', { name: '查看已保存的反馈' })).toBeEnabled()
+  expect(calls).toBe(2)
+  expect(await page.evaluate(async () => {
+    const path = '/jove-english-os/src/db/db.ts', { db, createLanguageDatabase } = await import(path), ja = createLanguageDatabase('ja')
+    const result = { enUsage: await db.usage.count(), jaUsage: await ja.usage.count(), aiEvidence: await ja.events.filter((event: { source: string }) => event.source === 'ai').count() }
+    ja.close(); return result
+  })).toEqual({ enUsage: 0, jaUsage: 2, aiEvidence: 0 })
+  await page.locator('.ja-coach').scrollIntoViewIfNeeded()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: test.info().outputPath('japanese-coach.png') })
+  await page.evaluate(async id => {
+    const path = '/jove-english-os/src/db/db.ts', { createLanguageDatabase } = await import(path), ja = createLanguageDatabase('ja')
+    const coach = await ja.sessions.get(`ja-coach:${id}`)
+    coach.draft.text = '另一设备保存的回答'; coach.draft.revision++; await ja.sessions.put(coach); ja.close()
+  }, sessionId)
+  await page.getByRole('button', { name: '查看已保存的反馈' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '没有提交另一份回答' })).toBeVisible()
+  expect(calls).toBe(2)
+  await expect(answer).toHaveValue('私学生です')
+  await page.evaluate(async id => {
+    const path = '/jove-english-os/src/db/db.ts', { createLanguageDatabase, JoveDatabase } = await import(path), ja = createLanguageDatabase('ja')
+    let prototype = Object.getPrototypeOf(ja.sessions)
+    while (!Object.hasOwn(prototype, 'get')) prototype = Object.getPrototypeOf(prototype)
+    const original = prototype.get
+    prototype.get = function (...args: unknown[]) {
+      const result = original.apply(this, args)
+      if (this.name === 'sessions' && args[0] === `ja-coach:${id}`) {
+        prototype.get = original
+        return result.then((value: unknown) => JoveDatabase.waitFor(new Promise(resolve => {
+          (window as unknown as { releaseCoachReload: () => void }).releaseCoachReload = () => resolve(value)
+        })))
+      }
+      return result
+    }
+    ja.close()
+  }, sessionId)
+  await page.getByRole('button', { name: '重新载入已保存的辅导（保留本页文字副本）' }).click()
+  await expect.poll(() => page.evaluate(() => typeof (window as unknown as { releaseCoachReload?: () => void }).releaseCoachReload)).toBe('function')
+  await page.getByRole('button', { name: '停止等待，保留回答' }).click()
+  await answer.fill('取消等待后继续写的新回答')
+  await page.evaluate(() => (window as unknown as { releaseCoachReload: () => void }).releaseCoachReload())
+  await expect(page.getByRole('alert').filter({ hasText: '没有覆盖旧记录' })).toBeVisible()
+  await expect(answer).toHaveValue('取消等待后继续写的新回答')
+  await page.getByRole('button', { name: '重新载入已保存的辅导（保留本页文字副本）' }).click()
+  await expect(answer).toHaveValue('另一设备保存的回答')
+  await expect(page.getByText('重新载入前的本页文字副本', { exact: true })).toBeVisible()
+})

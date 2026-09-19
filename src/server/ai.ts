@@ -6,7 +6,8 @@ import { currentTextPrice, quoteAudioDispatch, quoteSpeechDispatch, quoteTextDis
 import { withDeadline } from '../ai/transport'
 
 const text = z.string().trim().min(1).max(16000), targets = z.array(z.string().max(200)).max(20)
-const identity = { requestId: z.uuid() }
+// Keep absent language absent in legacy English request hashes/receipts.
+const identity = { requestId: z.uuid(), learningLanguage: z.enum(['en', 'ja']).optional() }
 export const aiRequestSchema = z.discriminatedUnion('action', [
   z.strictObject({ ...identity, action: z.literal('status') }),
   z.strictObject({ ...identity, action: z.literal('evaluate'), input: z.strictObject({ kind: z.string().trim().min(1).max(80), text, reference: text.optional(), targets: targets.optional(), rubric: z.string().max(8000).optional() }) }),
@@ -83,13 +84,20 @@ export function createAIHandler(options: AIHandlerOptions): (request: Request) =
       const parsed = aiRequestSchema.safeParse(body)
       if (!parsed.success) throw new GatewayError(400, 'INPUT', 'Check the practice request and try again.')
       const input = parsed.data
+      const learningLanguage = input.learningLanguage ?? 'en'
       // Supplemental synthetic practice only; this default does not certify a
       // General American reference or bypass the separately reviewed speech flow.
       const settings = { ...defaultSettings, fastModel: env('JOVE_FAST_MODEL') ?? 'google/gemini-3.8-flash', strongModel: env('JOVE_STRONG_MODEL') ?? 'anthropic/claude-opus-5',
         sttModel: env('JOVE_STT_MODEL') ?? 'deepgram/nova-3', ttsModel: env('JOVE_TTS_MODEL') ?? 'microsoft/mai-voice-2', voice: env('JOVE_TTS_VOICE') ?? 'en-US-Harper:MAI-Voice-2' }
+      if (learningLanguage === 'ja') {
+        // Never silently send Japanese through an English-only speech setup.
+        settings.sttModel = env('JOVE_JA_STT_MODEL') ?? 'deepgram/nova-3'
+        settings.ttsModel = env('JOVE_JA_TTS_MODEL') ?? ''
+        settings.voice = env('JOVE_JA_TTS_VOICE') ?? ''
+      }
       if (input.action === 'status') {
         if (!env('OPENROUTER_API_KEY')) throw new GatewayError(503, 'CONFIGURATION', 'The account AI service needs server configuration.')
-        const verifier = (options.provider ?? (value => new OpenRouterProvider(value)))({ getKey: async () => env('OPENROUTER_API_KEY') ?? '', getSettings: () => settings })
+        const verifier = (options.provider ?? (value => new OpenRouterProvider(value)))({ learningLanguage, getKey: async () => env('OPENROUTER_API_KEY') ?? '', getSettings: () => settings })
         await verifier.testConnection(request.signal)
         return jsonResponse({ value: { label: 'Account AI connection verified' }, notices: [], usage: [] }, headers)
       }
@@ -112,6 +120,7 @@ export function createAIHandler(options: AIHandlerOptions): (request: Request) =
       let dispatchIndex = 0
       let dispatchFailure: GatewayError | undefined
       const provider = (options.provider ?? (value => new OpenRouterProvider(value)))({
+        learningLanguage,
         getKey: async () => env('OPENROUTER_API_KEY') ?? '', getSettings: () => settings,
         beforeDispatch: async (dispatch, signal) => {
           try {

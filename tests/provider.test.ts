@@ -49,6 +49,36 @@ beforeEach(() => {
 })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
+describe('language-bound Japanese tutoring', () => {
+  beforeEach(() => { provider = new OpenRouterProvider({ learningLanguage: 'ja', getKey: async () => 'test-credential', getSettings: () => settings, beforeRequest, onUsage }) })
+  it('uses Chinese guidance and Japanese word units, not English boundaries or partial kanji matches', async () => {
+    handler = () => completion(JSON.stringify({ ...evaluation, successfulChunks: ['学生', '日本'] }))
+    const result = await provider.evaluate({ kind: 'Japanese response', text: '私は学生です。日本語を勉強しています。', targets: ['学生', '日本'] })
+    expect(bodyOf().messages[0].content).toContain('native Chinese speaker')
+    expect(bodyOf().messages[0].content).toContain('particles, conjugation')
+    expect(bodyOf().messages[0].content).not.toContain('English learning tutor')
+    expect(result.successfulChunks).toEqual(['学生']); expect(result.fluency).toBeNull()
+  })
+  it('keeps conversational output Japanese and tutor explanations Chinese', async () => {
+    handler = () => completion('はじめまして。お名前は？')
+    await provider.chat([{ role: 'user', content: 'はじめまして。' }], { ...context, scenario: '自己紹介' })
+    expect(bodyOf().messages[0].content).toContain('Respond in Japanese')
+    expect(bodyOf().messages[0].content).toContain('simplified Chinese')
+  })
+  it('preserves non-spaced Japanese sentence segmentation and labels authored candidates', async () => {
+    const japanese = { ...material, transcript: 'こんにちは。学生です。', sentences: ['こんにちは。', '学生です。'] }
+    handler = () => completion(JSON.stringify(japanese))
+    await expect(provider.analyzeMaterial(japanese.transcript)).resolves.toEqual({ ...japanese, language: 'ja' })
+  })
+  it('sends explicit Japanese STT and refuses an English voice without a speech dispatch', async () => {
+    handler = () => json({ text: 'こんにちは。' })
+    await expect(provider.transcribe(new Blob(['voice'], { type: 'audio/wav' }))).resolves.toBe('こんにちは。')
+    expect(bodyOf().language).toBe('ja')
+    await expect(provider.synthesize('こんにちは。')).rejects.toMatchObject({ code: 'VOICE' })
+    expect(posts()).toHaveLength(1)
+  })
+})
+
 describe('provider catalog, credentials and guard contract', () => {
   it('discovers three dedicated modalities with real catalog voices and structured capability', async () => {
     const result = await provider.listModels()
