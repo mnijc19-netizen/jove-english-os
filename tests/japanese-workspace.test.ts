@@ -74,7 +74,7 @@ describe('Japanese usable practice persistence', () => {
     expect((await ja.skills.toArray()).every(skill => skill.evidenceCount === 0)).toBe(true)
     expect((await learning.today(now + 3000))?.tasks.every(task => task.done)).toBe(true)
     expect(await en.sessions.count()).toBe(0); expect(await en.audio.count()).toBe(0); expect(await en.cards.count()).toBe(0)
-    expect((await learning.today(now + 86400000))?.tasks[0]?.materialId).toBe('ja-irodori-starter-2')
+    expect((await learning.today(now + 86400000))?.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-2')
   })
   it('stops allocation when English used the account allowance and fences an owner change', async () => {
     const { learning, en, ja } = await setup()

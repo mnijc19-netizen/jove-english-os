@@ -6,6 +6,7 @@ import { readLanguageDay } from './language-day'
 import { assessmentSchema, planSchema, sessionSchema } from './schema'
 import type { DailyPlan, StudySession } from '../domain/types'
 import { z } from 'zod'
+import { createJapaneseReview } from './japanese-review'
 
 /** Called only by an explicitly enabled Japanese workspace, never by English
  * bootstrap. Does not overwrite setup, learned content, cards or saved work. */
@@ -44,6 +45,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     await initializeJapanese(database)
     await checkOwner()
   }
+  const review = createJapaneseReview(database, checkOwner, fence)
   async function saveDiagnostic(responses: Record<string, string>, finish = false, now = Date.now()) {
     const frozen = { ...responses }
     for (const [id, answer] of Object.entries(frozen)) {
@@ -69,7 +71,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     await checkOwner()
     const allowance = await readLanguageDay(english, now, database)
     if (!allowance) return null
-    return database.transaction('rw', database.plans, database.events, database.materials, database.assessments, database.syncMeta, async () => {
+    return database.transaction('rw', [database.plans, database.events, database.materials, database.assessments, database.cards, database.chunks, database.syncMeta], async () => {
       await fence()
       const diagnostic = await database.assessments.get(diagnosticId)
       if (!diagnostic?.completedAt) return null
@@ -83,15 +85,30 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const probe = materials.find(material => material.id === `ja-irodori-starter-${placement.conversationProbe}`)
       const next = nextJapaneseLesson(materials, events, target, now)
       const material = !completedIds.size && probe && nextJapaneseLesson([probe], events, target, now) ? probe : next
-      const completed = current?.tasks.filter(task => task.done) ?? []
-      const previous = current?.tasks.find(task => !task.done && !task.optional)
+      // Keep explicitly resolved/skipped optional rows as history, but never
+      // mark them done: completed optional work legitimately consumes time.
+      const completed = current?.tasks.filter(task => task.done || task.optional) ?? []
+      const previous = current?.tasks.find(task => task.kind === 'listen' && !task.done && !task.optional)
+      const previousReview = current?.tasks.find(task => task.kind === 'review' && !task.done && !task.optional)
       const minutes = allowance.allowances.ja.remaining
+      const olderChunks = new Set((await database.chunks.toArray()).filter(chunk => chunk.createdAt <= now && new Date(chunk.createdAt).toLocaleDateString('en-CA') !== date).map(chunk => chunk.id))
+      const due = (await database.cards.toArray()).filter(card => olderChunks.has(card.chunkId) && card.card.due.getTime() <= now)
+      const lessonStarted = previous && events.some(event => event.type === 'TASK_STARTED' && event.data?.taskId === previous.id)
+      const reviewTask = previousReview ?? (!lessonStarted && !completed.some(task => task.kind === 'review') && due.length ? {
+        id: `${date}:ja:review`, kind: 'review' as const, title: '把学过的日语真正想起来', minutes: Math.min(5, new Set(due.map(card => card.chunkId)).size),
+        reason: '先独立回答，再对照；汉字识别、听辨和表达分开复习。', done: false,
+      } : undefined)
+      // Never insert new reviews after completing today's planned lesson.
+      const reviewMinutes = reviewTask && !completed.some(task => task.kind === 'listen') ? Math.min(reviewTask.minutes, minutes) : 0
+      const lessonMinutes = Math.max(0, minutes - reviewMinutes)
       // Preserve task identity after starting; do not fill a finished day again.
-      const task = previous ?? (!completed.length && material ? { id: `${date}:ja:listen:${material.id}`, kind: 'listen' as const,
+      const task = previous ?? (!completed.some(task => task.kind === 'listen') && material ? { id: `${date}:ja:listen:${material.id}`, kind: 'listen' as const,
         title: material.title, minutes, reason: '真人输入 → 回忆意思 → 自己表达 → 对照重说', materialId: material.id, done: false } : undefined)
-      if (!completed.length && (!task || minutes <= 0)) return null
-      const plan = planSchema.parse({ id: date, date, minutes: completed.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0) + (task && minutes > 0 ? minutes : 0),
-        focus: 'realWorld', tasks: [...completed, ...(task && minutes > 0 ? [{ ...task, minutes }] : [])],
+      const tasks = [...completed, ...(reviewTask && reviewMinutes > 0 ? [{ ...reviewTask, minutes: reviewMinutes }] : []),
+        ...(task && lessonMinutes > 0 ? [{ ...task, minutes: lessonMinutes }] : [])]
+      if (!tasks.length) return null
+      const plan = planSchema.parse({ id: date, date, minutes: tasks.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0),
+        focus: 'realWorld', tasks,
         evidenceFingerprint: `ja:${diagnostic.completedAt}:${events.length}:${minutes}`, createdAt: current?.createdAt ?? now })
       await database.plans.put(plan)
       return plan
@@ -100,6 +117,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
   async function start(taskId: string, now = Date.now()): Promise<StudySession> {
     const plan = await today(now)
     const task = plan?.tasks.find(task => task.id === taskId && !task.done && !task.optional)
+    if (task?.kind === 'review') return review.start(task, now)
     if (!task?.materialId || task.minutes <= 0) throw new Error('今天的安排已更新，请返回今日任务。')
     await checkOwner()
     return database.transaction('rw', database.tables, async () => {
@@ -179,5 +197,5 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       return complete
     })
   }
-  return { database, repository, open, checkOwner, saveDiagnostic, today, start, save, finish, diagnosticId }
+  return { database, repository, review, open, checkOwner, saveDiagnostic, today, start, save, finish, diagnosticId }
 }
