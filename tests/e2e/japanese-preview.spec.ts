@@ -6,6 +6,48 @@ import { readFile } from 'node:fs/promises'
 test.skip(process.env.JOVE_JAPANESE_PREVIEW !== '1', 'Japanese workspace is a local development candidate')
 test.use({ serviceWorkers: 'block' })
 
+test('Japanese kana foundation resumes without an IME and keeps unavailable audio as script-only evidence', async ({ page }, testInfo) => {
+  await page.goto('#/ja')
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  const fixture = await page.evaluate(async () => {
+    const paths = ['/jove-english-os/src/db/db.ts', '/jove-english-os/src/db/japanese.ts', '/jove-english-os/src/content/japanese-kana.ts']
+    const [{ db: en, createLanguageDatabase }, { createJapaneseWorkspace }, { japaneseKana }] = await Promise.all(paths.map(path => import(/* @vite-ignore */ path)))
+    const ja = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(ja, en), unit = japaneseKana[0]
+    await learning.open()
+    const saved = await learning.reading.start({ id: 'browser-foundation', kind: 'learn', title: unit.title, reason: 'Browser fixture', minutes: 3, materialId: unit.id, done: false })
+    ja.close(); return { id: saved.id as string, unit }
+  })
+  await page.goto(`#/ja/read?session=${encodeURIComponent(fixture.id)}`)
+  await expect(page.getByRole('heading', { name: '每次几个字，听过再认。' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '打开原站示范' })).toHaveAttribute('href', fixture.unit.kana.sourceUrl)
+  await expect(page.getByRole('button', { name: '保存首答，再看解析' })).toBeDisabled()
+  await page.getByRole('radio', { name: '现在无法播放，先做字形练习' }).check()
+  for (const question of fixture.unit.questions) await page.getByRole('group', { name: question.prompt, exact: false }).getByRole('radio', { name: question.answer, exact: true }).check()
+  for (const word of fixture.unit.words) await page.getByRole('group', { name: `${word.text} 对应哪种假名写法？`, exact: true }).getByRole('radio', { name: word.reading, exact: true }).check()
+  await expect(page.getByRole('status').filter({ hasText: '首答与笔记已保存在本机' })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('radio', { name: '现在无法播放，先做字形练习' })).toBeChecked()
+  await page.screenshot({ path: `test-results/ja-kana-${testInfo.project.name}.png`, fullPage: true })
+  await page.getByRole('button', { name: '保存首答，再看解析' }).click()
+  await expect(page.getByRole('heading', { name: '字形结果不等于发音成绩' })).toBeVisible()
+  await expect(page.getByText('本次只做字形练习，之后仍要听原声。', { exact: false })).toBeVisible()
+  await page.getByRole('textbox', { name: '换一个情境用一用（也可先用中文记下调整）' }).fill('明天再听 あ／お，今天先分清字形。')
+  await page.getByRole('button', { name: '保存基础练习，安排下次回顾' }).click()
+  await expect(page.getByRole('heading', { name: '这次基础练习已保存' })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('heading', { name: '这次基础练习已保存' })).toBeVisible()
+  const evidence = await page.evaluate(async id => {
+    const path = '/jove-english-os/src/db/db.ts', { db: en, createLanguageDatabase } = await import(/* @vite-ignore */ path)
+    const ja = createLanguageDatabase('ja'), saved = await ja.sessions.get(id), events = await ja.events.toArray()
+    const check = events.find((event: { type: string }) => event.type === 'JAPANESE_KANA_CHECK')
+    const result = { matches: check.data.scriptRecognitionMatches + check.data.kanaMatches, heard: check.data.publisherHeardSelfReport,
+      listening: check.data.listeningAssessed, acoustic: check.data.acousticAssessed, due: saved.draft.dueAt - saved.completedAt,
+      englishSessions: await en.sessions.count(), overflow: document.documentElement.scrollWidth > innerWidth + 1 }
+    ja.close(); return result
+  }, fixture.id)
+  expect(evidence).toEqual({ matches: 4, heard: false, listening: false, acoustic: false, due: 86400000, englishSessions: 0, overflow: false })
+})
+
 test('Japanese original reading locks independent evidence, resumes help and schedules a separate text revisit', async ({ page }, testInfo) => {
   await page.goto('#/ja')
   await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
@@ -158,7 +200,7 @@ test('Japanese graded continuation and expression-specific reading help work aft
     const material = await database.materials.get(task.materialId), chunk = await learning.repository.addChunk(material.chunks[0], material.id)
     // Don't let these newly seeded review cards replace the tested bound task.
     for (const card of await database.cards.toArray()) await database.cards.put({ ...card, card: { ...card.card, due: new Date(now + 86400000) } })
-    const result = { sessionId: session.id, materialId: task.materialId, chunkId: chunk.id, count: await database.materials.count() }
+    const result = { sessionId: session.id, materialId: task.materialId, chunkId: chunk.id, count: await database.materials.filter((m: { id: string }) => m.id.startsWith('ja-irodori-')).count() }
     database.close(); return result
   })
   expect(fixture.count).toBe(54); expect(fixture.materialId).toBe('ja-irodori-elementary01-1')

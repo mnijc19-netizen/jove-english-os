@@ -148,22 +148,27 @@ describe('Japanese original reading and independently recorded word reading', ()
   it('automatically includes reading within shared time and alternates with dialogue when only one short slot fits', async () => {
     const { learning, ja, en } = await setup()
     await learning.saveDiagnostic(Object.fromEntries(japanesePlacementItems.map(item => [item.id, '跳过'])), true, now)
-    for (const i of [1, 2]) await ja.events.add({ id: `reflection-${i}`, type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report', sessionId: `old-${i}`, timestamp: now - day + i,
+    for (const i of [1]) await ja.events.add({ id: `reflection-${i}`, type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report', sessionId: `old-${i}`, timestamp: now - day + i,
       data: { materialId: `ja-irodori-starter-${i}`, response: '过去练习', expression: 'お願いします', example: 'お願いします。', audioId: 'fixture', listened: true, playbackObserved: false, comprehensionVerified: false } })
-    const plan = (await learning.today(now))!, assigned = plan.tasks.find(t => t.kind === 'learn')!
+    const plan = (await learning.today(now))!, assigned = plan.tasks.find(t => t.materialId?.startsWith('ja-reading-'))!
     expect(assigned.minutes).toBe(5); expect(plan.minutes).toBeLessThanOrEqual(23)
     const session = await learning.start(assigned.id, now)
     expect(session.kind).toBe('japanese-reading')
-    expect((await learning.today(now))!.tasks.filter(t => t.kind === 'learn')).toHaveLength(1)
+    expect((await learning.today(now))!.tasks.filter(t => t.materialId?.startsWith('ja-reading-'))).toHaveLength(1)
+    const firstReflection = (await ja.events.get('reflection-1'))!
+    await ja.events.add({ ...firstReflection, id: 'reflection-2', sessionId: 'old-2', timestamp: now - day + 2,
+      data: { ...firstReflection.data, materialId: 'ja-irodori-starter-2' } })
     // Completing 30 English minutes leaves only 15 of the shared 45.
     // Planner-only fixture: this does not establish any dialogue proficiency.
     await ja.sessions.put({ id: 'finished-talk', kind: 'japanese-dialogue', startedAt: now, completedAt: now + 10, stage: 'completed', draft: {} })
-    await en.events.add({ id: 'english-next-day', type: 'TASK_COMPLETED', source: 'objective', timestamp: now + day, data: { taskId: 'english-next', minutes: 30 } })
-    const next = (await learning.today(now + day))!
+    // Pick two consecutive short non-foundation days (Sep22/23); Sep21 has
+    // the separate three-minute foundation rotation covered in kana tests.
+    await en.events.add({ id: 'english-next-day', type: 'TASK_COMPLETED', source: 'objective', timestamp: now + 2 * day, data: { taskId: 'english-next', minutes: 30 } })
+    const next = (await learning.today(now + 2 * day))!
     expect(next.minutes).toBe(15); expect(next.tasks.some(t => t.kind === 'learn')).toBe(true); expect(next.tasks.some(t => t.kind === 'speak')).toBe(false)
-    await ja.sessions.put(finished(0, now + day + 10))
-    await en.events.add({ id: 'english-third-day', type: 'TASK_COMPLETED', source: 'objective', timestamp: now + 2 * day, data: { taskId: 'english-third', minutes: 30 } })
-    const third = (await learning.today(now + 2 * day))!
+    await ja.sessions.put(finished(0, now + 2 * day + 10))
+    await en.events.add({ id: 'english-third-day', type: 'TASK_COMPLETED', source: 'objective', timestamp: now + 3 * day, data: { taskId: 'english-third', minutes: 30 } })
+    const third = (await learning.today(now + 3 * day))!
     expect(third.minutes).toBe(15); expect(third.tasks.some(t => t.kind === 'speak')).toBe(true); expect(third.tasks.some(t => t.kind === 'learn')).toBe(false)
   })
 })

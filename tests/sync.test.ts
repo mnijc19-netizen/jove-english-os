@@ -5,7 +5,9 @@ import Dexie from 'dexie'
 import { createClient } from '@supabase/supabase-js'
 import { db as repositoryDatabase, JoveDatabase, version1Stores } from '../src/db/db'
 import { defaultProfile, defaultSettings, type Chunk, type StudyEvent, type Material, type DailyPlan } from '../src/domain/types'
-import { makePlan } from '../src/domain/engine'
+import { makePlan, taskActivity } from '../src/domain/engine'
+import { japaneseReadingMaterials, japaneseReadings } from '../src/content/japanese-reading'
+import { japaneseKana } from '../src/content/japanese-kana'
 import { externalMaterials } from '../src/content/external'
 import { planSchema } from '../src/db/schema'
 import { canonical, changedFields, eventOccurrenceKey, isPrivateAudio, parseOperation, projectOperations, withoutCacheAudioReferences, type RecordValue, type StoredOperation, type SyncOperation } from '../src/sync/protocol'
@@ -701,6 +703,27 @@ describe('review regressions: fields, deletions and dependency closure', () => {
     const result = await projectOperations([op('plans', base), op('plans', short, 2, deviceB, base), op('plans', renamed, 3, deviceA, base)])
     // A later recommendation cannot rewrite the duration or identity of completed work.
     expect(result.records.plans[0]).toMatchObject({ minutes: 45, tasks: [{ title: 'Listen', minutes: 45, done: true }] })
+  })
+  it.each([['kana', 'TASK_STARTED'], ['reading', 'TASK_STARTED'], ['kana', 'TASK_COMPLETED'], ['reading', 'TASK_COMPLETED']])('keeps both Japanese written assignments when %s is retained by %s', async (first, eventType) => {
+    const materials = japaneseReadingMaterials([japaneseKana[0]!, japaneseReadings[0]!])
+    const tasks = materials.map((material, index) => ({ id: `2026-09-20:ja:${index ? 'learn' : 'kana'}:${material.id}`, kind: 'learn' as const,
+      title: material.title, materialId: material.id, minutes: index ? 5 : 3, done: false, reason: 'Fixture' }))
+    const base = { id: '2026-09-20', date: '2026-09-20', minutes: 8, focus: 'realWorld', tasks, evidenceFingerprint: 'fixture', createdAt: now }
+    const selected = tasks[first === 'kana' ? 0 : 1]!
+    const event: StudyEvent = { id: `retained:${selected.id}`, type: eventType!, source: 'objective', timestamp: now + 1,
+      data: { taskId: selected.id, materialId: selected.materialId, kind: selected.kind, minutes: selected.minutes } }
+    const history = [...materials.map(material => op('materials', material as unknown as RecordValue)), op('plans', base),
+      op('events', event as unknown as RecordValue, 2), op('plans', base, 3, deviceB)]
+    for (const input of [history, [...history].reverse()]) {
+      const projected = await projectOperations(input), plan = planSchema.parse(projected.records.plans[0])
+      expect(plan.tasks.map(task => task.id)).toEqual(tasks.map(task => task.id))
+      expect(plan.tasks.find(task => task.id === selected.id)?.done).toBe(eventType === 'TASK_COMPLETED')
+      expect(plan.tasks.find(task => task.id !== selected.id)?.done).toBe(false)
+      expect(plan.minutes).toBe(8)
+    }
+    expect(tasks.map(taskActivity)).toEqual(['japanese-kana', 'japanese-reading'])
+    expect(taskActivity({ kind: 'learn', id: '2026-09-20:learn:reading' })).toBe('reading')
+    expect(taskActivity({ kind: 'learn', id: '2026-09-20:learn:chunks' })).toBe('chunks')
   })
   it.each(['completed', 'completion-event-only', 'started', 'draft-only', 'quota-completed', 'quota-events-only'] as const)('retains an actual offline %s reading assignment after another device replans', async state => {
     const completed = state === 'completed' || state === 'completion-event-only'

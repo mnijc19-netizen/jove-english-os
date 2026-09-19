@@ -87,7 +87,11 @@ function fingerprint(value: unknown): string {
 }
 
 /** Legacy learn IDs remain language assignments; never rename persisted work. */
-export function taskActivity(task: Pick<PlanTask, 'kind'> & { id?: string }): string {
+export function taskActivity(task: Pick<PlanTask, 'kind'> & Partial<Pick<PlanTask, 'id' | 'materialId'>>): string {
+  // These share the written-practice UI, not a replaceable daily assignment.
+  // Keep both when sync retains a started/completed task of the other kind.
+  if (task.kind === 'learn' && task.materialId?.startsWith('ja-kana-')) return 'japanese-kana'
+  if (task.kind === 'learn' && task.materialId?.startsWith('ja-reading-')) return 'japanese-reading'
   return task.kind === 'learn' ? task.id?.endsWith(':reading') ? 'reading' : 'chunks' : task.kind
 }
 

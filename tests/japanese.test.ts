@@ -10,6 +10,7 @@ import { JoveDatabase } from '../src/db/db'
 import { SyncJournal } from '../src/sync/journal'
 import { changedFields, type RecordValue } from '../src/sync/protocol'
 import type { StudyEvent } from '../src/domain/types'
+import { japaneseWrittenExercises } from '../src/content/japanese-reading'
 
 const now = Date.UTC(2026, 8, 20), databases: JoveDatabase[] = []
 afterEach(async () => { for (const db of databases.splice(0)) await db.delete() })
@@ -128,7 +129,7 @@ describe('Japanese-specific source and practice support', () => {
     const ja = database('ja'), en = database('en')
     await expect(initializeJapanese(en)).rejects.toThrow('own workspace')
     await initializeJapanese(ja)
-    expect(await ja.materials.count()).toBe(72); expect((await ja.profiles.get('main'))?.onboarded).toBe(false)
+    expect(await ja.materials.count()).toBe(japaneseMaterials().length + japaneseWrittenExercises.length); expect((await ja.profiles.get('main'))?.onboarded).toBe(false)
     expect(await ja.events.count()).toBe(0)
     await ja.profiles.update('main', { goal: 'Preserve my own goal' }); await initializeJapanese(ja)
     expect((await ja.profiles.get('main'))?.goal).toBe('Preserve my own goal')

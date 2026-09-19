@@ -232,7 +232,7 @@ function readingSnapshot(row: RecordValue): RecordValue {
 }
 function readingSubmission(row: RecordValue): string {
   const draft = row.draft as Record<string, unknown>
-  if (row.kind === 'japanese-reading') return canonical([row.materialId, row.startedAt, draft.meaning, draft.kana, draft.helped, draft.seen, draft.lockedAt])
+  if (row.kind === 'japanese-reading') return canonical([row.materialId, row.startedAt, draft.meaning, draft.kana, draft.helped, draft.seen, draft.lockedAt, draft.sourcePractice ?? ''])
   return canonical([row.materialId, row.startedAt, draft.passage ?? '', draft.submittedResponse ?? '',
     draft.retell ?? '', draft.audioId ?? '', draft.audioSeconds ?? 0, draft.observationAt ?? 0, draft.activeMs ?? 0,
     draft.readSections ?? [], draft.sectionMs ?? [], draft.priorExposure !== false])
@@ -249,7 +249,7 @@ function includesReadingWork(earlier: RecordValue, later: RecordValue): boolean 
   if (earlier.materialId !== later.materialId || earlier.startedAt !== later.startedAt) return false
   if (earlier.kind === 'japanese-reading') {
     const a = earlier.draft as Record<string, unknown>, b = later.draft as Record<string, unknown>
-    if (a.note && a.note !== b.note || a.helped && !b.helped) return false
+    if (a.note && a.note !== b.note || a.helped && !b.helped || a.sourcePractice && a.sourcePractice !== b.sourcePractice) return false
     if (committedReading(earlier)) return committedReading(later) && readingSubmission(earlier) === readingSubmission(later)
       && (!earlier.completedAt || !!later.completedAt)
     return ['meaning', 'kana'].every(key => Array.isArray(a[key]) && Array.isArray(b[key])
@@ -279,7 +279,7 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
     if (row.kind === 'japanese-reading') return all.some(e => {
       const event = e.payload.record, data = event?.data as Record<string, unknown> | undefined
       return e.entityType === 'events' && event?.type === 'JAPANESE_READING_LOCK' && event.sessionId === row.id && event.timestamp === draft.lockedAt
-        && !!data && data.materialId === row.materialId && canonical([data.meaning, data.kana, data.helped, data.seen]) === canonical([draft.meaning, draft.kana, draft.helped, draft.seen])
+        && !!data && data.materialId === row.materialId && canonical([data.meaning, data.kana, data.helped, data.seen, data.sourcePractice ?? '']) === canonical([draft.meaning, draft.kana, draft.helped, draft.seen, draft.sourcePractice ?? ''])
     })
     if (typeof draft.observationAt !== 'number' || !Number.isFinite(draft.observationAt) || draft.observationAt <= 0) return false
     const evidence = all.filter(e => e.entityType === 'events' && e.payload.record?.sessionId === row.id
@@ -311,7 +311,7 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
     if (!latest || puts.some(op => compare(op, latest) > 0 && includesReadingWork(latest.payload.record!, op.payload.record!))) { inactive.push(id); continue }
     const row = readingSnapshot(latest.payload.record!)
     const draft = row.draft as Record<string, unknown>
-    const changedWork = row.kind === 'japanese-reading' ? !!draft.note || !!draft.helped || ['meaning', 'kana'].some(key => Array.isArray(draft[key]) && (draft[key] as unknown[]).some(Boolean))
+    const changedWork = row.kind === 'japanese-reading' ? !!draft.note || !!draft.helped || !!draft.sourcePractice || ['meaning', 'kana'].some(key => Array.isArray(draft[key]) && (draft[key] as unknown[]).some(Boolean))
       : !!draft.response || !!draft.retell || !!draft.audioId || Number(draft.activeMs) > 0
     if (!changedWork) { inactive.push(id); continue }
     const sourceVersion = await eventOccurrenceKey(row)

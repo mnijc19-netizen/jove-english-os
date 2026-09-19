@@ -213,13 +213,14 @@ onBeforeUnmount(() => {
           <h2>{{ task ? `今日练习：${task.title}` : '今天先到这里' }}</h2>
           <p v-if="task?.kind === 'review'">先做一小组到期复习：独立回答 → 对照参考 → 安排下次。之后再进行今日新情境练习。</p>
           <p v-else-if="task?.kind === 'speak'">围绕今天的情境连续回应三轮；先保持交流，结束后挑一处改进并完整重说。</p>
+          <p v-else-if="task?.kind === 'learn'">{{ task.materialId?.startsWith('ja-kana-') ? '① 听原站示范 → ② 联系字形 → ③ 保存首答 → ④ 对照后再练' : '① 阅读短篇 → ② 理解与读法分开答 → ③ 对照 → ④ 安排回顾' }}</p>
           <p v-else-if="task">① 听一段真人对话 → ② 回忆意思 → ③ 用自己的话回应 → ④ 对照后重说</p>
           <p v-if="task" class="help-text">{{ task.reason }}</p>
           <p v-else>已完成今天的安排，或当天时间已用完。已有草稿仍然保留，不需要补做堆积的任务。</p>
           <button v-if="task" class="button primary" :disabled="busy || navigating" @click="act(start)">开始学习 · 约 {{ task.minutes }} 分钟</button>
           <p class="help-text">听力、口语仍待实际练习观察；认字不等于会说。{{ placement?.kanaSupport ? '需要时会显示假名读法和拍数提示。' : '读法提示默认收起，需要时可以展开。' }}</p>
         </section>
-        <section v-if="unfinished.length" class="section"><h2>接着上次的练习</h2><p v-for="saved in unfinished" :key="saved.id"><RouterLink :to="{ path: sessionPath(saved), query: { session: saved.id } }">{{ saved.kind === 'japanese-review' ? '日语延迟复习' : saved.kind === 'japanese-dialogue' ? '日语三轮对话' : saved.kind === 'japanese-reading' ? '日语短篇阅读' : japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title }} · 继续草稿</RouterLink></p></section>
+        <section v-if="unfinished.length" class="section"><h2>接着上次的练习</h2><p v-for="saved in unfinished" :key="saved.id"><RouterLink :to="{ path: sessionPath(saved), query: { session: saved.id } }">{{ saved.kind === 'japanese-review' ? '日语延迟复习' : saved.kind === 'japanese-dialogue' ? '日语三轮对话' : saved.kind === 'japanese-reading' ? (saved.materialId?.startsWith('ja-kana-') ? '日语假名与节拍' : '日语短篇阅读') : japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title }} · 继续草稿</RouterLink></p></section>
       </template>
       <section v-else-if="session.completedAt" class="panel ja-panel">
         <h2>这次练习已保存</h2><p>回答、原始录音和重说录音都已保留。参考词块已加入日语间隔复习；完成练习不等于已掌握。</p>

@@ -7,6 +7,8 @@ import { japanesePlacementItems } from '../src/domain/japanese'
 import { demoMaterials } from '../src/content/materials'
 import type { AudioAsset } from '../src/domain/types'
 import { readLanguageDay } from '../src/db/language-day'
+import { japaneseMaterials } from '../src/content/japanese'
+import { japaneseWrittenExercises } from '../src/content/japanese-reading'
 
 const databases: JoveDatabase[] = [], now = Date.UTC(2026, 8, 20, 4)
 afterEach(async () => { for (const database of databases.splice(0)) await database.delete() })
@@ -72,7 +74,10 @@ describe('Japanese usable practice persistence', () => {
     expect((await ja.events.toArray()).filter(event => event.type === 'TASK_COMPLETED')).toHaveLength(1)
     expect((await ja.events.toArray()).every(event => event.score === undefined)).toBe(true)
     expect((await ja.skills.toArray()).every(skill => skill.evidenceCount === 0)).toBe(true)
-    expect((await learning.today(now + 3000))?.tasks.every(task => task.done)).toBe(true)
+    const after = (await learning.today(now + 3000))!
+    expect(after.tasks.filter(task => task.kind === 'listen')).toHaveLength(1)
+    expect(after.tasks.find(task => task.kind === 'listen')?.done).toBe(true)
+    expect(after.tasks.find(task => task.materialId?.startsWith('ja-kana-'))?.done).toBe(false)
     expect(await en.sessions.count()).toBe(0); expect(await en.audio.count()).toBe(0); expect(await en.cards.count()).toBe(0)
     expect((await learning.today(now + 86400000))?.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-2')
   })
@@ -90,7 +95,7 @@ describe('Japanese usable practice persistence', () => {
     await ja.materials.update('ja-irodori-starter-1', { title: 'My retained title' })
     await learning.open()
     expect((await ja.materials.get('ja-irodori-starter-1'))?.title).toBe('My retained title')
-    expect(await ja.materials.count()).toBe(72)
+    expect(await ja.materials.count()).toBe(japaneseMaterials().length + japaneseWrittenExercises.length)
     await learning.saveDiagnostic(skipped, true, now)
     const session = await learning.start((await learning.today(now))!.tasks[0]!.id, now)
     await ja.audio.bulkAdd([recording('original'), recording('retry')])
@@ -113,7 +118,8 @@ describe('Japanese usable practice persistence', () => {
     const tomorrow = now + 86400000
     await learning.finish(session.id, tomorrow); await learning.finish(session.id, tomorrow + 1000)
     const day = await readLanguageDay(en, tomorrow + 1000, ja)
-    expect(day?.allowances.ja.completed).toBe(plan.minutes)
-    expect(day?.remaining).toBe(45 - plan.minutes)
+    const completedMinutes = plan.tasks.find(task => task.kind === 'listen')!.minutes
+    expect(day?.allowances.ja.completed).toBe(completedMinutes)
+    expect(day?.remaining).toBe(45 - completedMinutes)
   })
 })

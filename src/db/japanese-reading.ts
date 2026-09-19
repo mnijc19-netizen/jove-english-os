@@ -1,7 +1,7 @@
 import Dexie from 'dexie'
 import type { JoveDatabase } from './db'
 import type { PlanTask, StudySession } from '../domain/types'
-import { japaneseReadings } from '../content/japanese-reading'
+import { japaneseWrittenExercises } from '../content/japanese-reading'
 import { japaneseReadingDraft, japaneseReadingDelay, japaneseReadingResult, type JapaneseReadingDraft } from '../domain/japanese-reading'
 import { sessionSchema } from './schema'
 import { createLearningRepository } from './repository'
@@ -12,7 +12,7 @@ export function createJapaneseReading(database: JoveDatabase, checkOwner: () => 
   async function transactionFence() { await Dexie.waitFor(Dexie.ignoreTransaction(sharedFence)); await fence() }
   async function read(id: string) {
     await checkOwner()
-    const session = await database.sessions.get(id), reading = japaneseReadings.find(r => r.id === session?.materialId)
+    const session = await database.sessions.get(id), reading = japaneseWrittenExercises.find(r => r.id === session?.materialId)
     if (!session || session.kind !== 'japanese-reading' || !reading) throw new Error('日语阅读记录不存在，请从今日安排进入。')
     const draft = japaneseReadingDraft.parse(session.draft)
     const conflicts = (await database.sessions.bulkGet(draft.syncReadingConflicts ?? [])).filter((s): s is StudySession => !!s && s.kind === 'japanese-reading-conflict')
@@ -34,7 +34,7 @@ export function createJapaneseReading(database: JoveDatabase, checkOwner: () => 
     })
   }
   async function start(task: PlanTask, now = Date.now()) {
-    const reading = japaneseReadings.find(r => r.id === task.materialId)
+    const reading = japaneseWrittenExercises.find(r => r.id === task.materialId)
     if (!reading || task.kind !== 'learn' || task.done || task.optional || task.minutes < 1) throw new Error('阅读安排已更新。')
     await checkOwner()
     return database.transaction('rw', database.tables, async () => {
@@ -54,21 +54,24 @@ export function createJapaneseReading(database: JoveDatabase, checkOwner: () => 
   async function save(id: string, input: JapaneseReadingDraft, action: 'save' | 'help' | 'lock' = 'save', now = Date.now()) {
     const value = japaneseReadingDraft.parse(input)
     return change(id, value.revision, async (draft, session) => {
-      const reading = japaneseReadings.find(r => r.id === session.materialId)!
+      const reading = japaneseWrittenExercises.find(r => r.id === session.materialId)!
       if (value.meaning.some((a, i) => a && !reading.questions[i]!.choices.includes(a))) throw new Error('请选择当前阅读的选项。')
       if (draft.lockedAt !== undefined && (JSON.stringify(draft.meaning) !== JSON.stringify(value.meaning) || JSON.stringify(draft.kana) !== JSON.stringify(value.kana))) throw new Error('首答已锁定，对照后的笔记单独保存。')
       draft.note = value.note; draft.effort = value.effort
       if (draft.lockedAt === undefined) {
         draft.meaning = value.meaning; draft.kana = value.kana
+        if (reading.kana && value.sourcePractice) draft.sourcePractice = value.sourcePractice
         if (action === 'help') draft.helped = true
         if (action === 'lock') {
+          if (reading.kana && !draft.sourcePractice) throw new Error('请先听原站示范；若无法播放，可明确选择今天只练字形。')
           if (!Number.isFinite(now) || now < session.startedAt) throw new Error('设备时间异常，请校正后保存。')
           draft.seen ||= (await database.sessions.toArray()).some(s => s.id !== id && s.materialId === reading.id
             && ['japanese-reading', 'japanese-reading-conflict'].includes(s.kind)
             && (japaneseReadingDraft.safeParse(s.draft).data?.helped === true || japaneseReadingDraft.safeParse(s.draft).data?.lockedAt !== undefined))
           draft.lockedAt = now; session.stage = 'compare'
           await repository.recordEvent({ id: `${id}:locked`, type: 'JAPANESE_READING_LOCK', source: 'objective', timestamp: now, sessionId: id,
-            prompted: draft.helped || draft.seen, data: { materialId: reading.id, meaning: draft.meaning, kana: draft.kana, helped: draft.helped, seen: draft.seen } })
+            prompted: draft.helped || draft.seen, data: { materialId: reading.id, meaning: draft.meaning, kana: draft.kana, helped: draft.helped, seen: draft.seen,
+              ...(draft.sourcePractice ? { sourcePractice: draft.sourcePractice } : {}) } })
         }
       }
     })
@@ -78,12 +81,13 @@ export function createJapaneseReading(database: JoveDatabase, checkOwner: () => 
     if (prior.session.completedAt) return prior.session
     return change(id, revision, async (draft, session) => {
       if (draft.lockedAt === undefined || now < draft.lockedAt || !Number.isFinite(now) || !draft.note.trim()) throw new Error('请先保存首答，对照后写一句自己的调整或应用。')
-      const reading = japaneseReadings.find(r => r.id === session.materialId)!, results = japaneseReadingResult(reading, draft)
+      const reading = japaneseWrittenExercises.find(r => r.id === session.materialId)!, results = japaneseReadingResult(reading, draft)
       draft.dueAt = now + japaneseReadingDelay(reading, draft, await database.sessions.toArray(), now)
       const plan = await database.plans.get(new Date(now).toLocaleDateString('en-CA')), task = plan?.tasks.find(t => t.id === draft.taskId)
       if (plan && task) { task.done = true; await database.plans.put(plan) }
-      await repository.recordEvent({ id: `${id}:result`, type: 'JAPANESE_READING_CHECK', source: 'objective', timestamp: draft.lockedAt, sessionId: id,
-        prompted: draft.helped || draft.seen, data: { materialId: reading.id, meaningMatches: results.meaning.filter(Boolean).length,
+      await repository.recordEvent({ id: `${id}:result`, type: reading.kana ? 'JAPANESE_KANA_CHECK' : 'JAPANESE_READING_CHECK', source: 'objective', timestamp: draft.lockedAt, sessionId: id,
+        prompted: draft.helped || draft.seen, data: { materialId: reading.id, ...(reading.kana ? { scriptRecognitionMatches: results.meaning.filter(Boolean).length,
+          publisherHeardSelfReport: draft.sourcePractice === 'heard', playbackObserved: false } : { meaningMatches: results.meaning.filter(Boolean).length }),
           kanaMatches: results.kana.filter(Boolean).length, listeningAssessed: false, acousticAssessed: false, dueAt: draft.dueAt } })
       await repository.recordEvent({ id: `${id}:completed`, type: 'TASK_COMPLETED', source: 'objective', timestamp: now, sessionId: id,
         data: { taskId: draft.taskId, minutes: task?.minutes ?? draft.minutes, materialId: reading.id, carriedOver: !task } })

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { StudySession } from './types'
 import { japaneseReadings, type JapaneseReading } from '../content/japanese-reading'
+import { japaneseKana } from '../content/japanese-kana'
 
 const pair = z.tuple([z.string().max(200), z.string().max(200)])
 export const japaneseReadingDraft = z.strictObject({
@@ -9,6 +10,7 @@ export const japaneseReadingDraft = z.strictObject({
   note: z.string().max(2000), effort: z.enum(['hard', 'okay', 'easy']), dueAt: z.number().finite().nonnegative().optional(),
   syncReadingConflicts: z.array(z.string()).optional(),
   syncRecovery: z.strictObject({ sourceSessionId: z.string(), rootSessionId: z.string(), sourceDeviceId: z.string(), sourceVersion: z.string() }).optional(),
+  sourcePractice: z.enum(['heard', 'unavailable']).optional(),
 })
 export type JapaneseReadingDraft = z.infer<typeof japaneseReadingDraft>
 export function normalizeKana(text: string): string {
@@ -20,13 +22,14 @@ export function japaneseReadingResult(reading: JapaneseReading, draft: JapaneseR
   const alternatives: Record<string, string[]> = { 明日: ['あす', 'みょうにち'], 昨日: ['さくじつ'] }
   return {
     meaning: reading.questions.map((q, i) => draft.meaning[i] === q.answer),
-    kana: reading.words.map((w, i) => [w.reading, ...(alternatives[w.text] ?? [])].includes(normalizeKana(draft.kana[i] ?? ''))),
+    kana: reading.words.map((w, i) => reading.kana ? draft.kana[i]?.normalize('NFKC').trim() === w.reading
+      : [w.reading, ...(alternatives[w.text] ?? [])].includes(normalizeKana(draft.kana[i] ?? ''))),
   }
 }
 const day = 86400000
-export function japaneseReadingHistory(sessions: StudySession[], now: number) {
+export function japaneseReadingHistory(sessions: StudySession[], now: number, catalog = japaneseReadings) {
   return sessions.flatMap(session => {
-    const reading = japaneseReadings.find(r => r.id === session.materialId), parsed = japaneseReadingDraft.safeParse(session.draft)
+    const reading = catalog.find(r => r.id === session.materialId), parsed = japaneseReadingDraft.safeParse(session.draft)
     if (session.kind !== 'japanese-reading' || !reading || !parsed.success || session.stage !== 'completed'
       || !session.completedAt || !Number.isFinite(session.completedAt) || session.completedAt > now || session.startedAt > session.completedAt
       || parsed.data.lockedAt === undefined || parsed.data.lockedAt < session.startedAt || parsed.data.lockedAt > session.completedAt
@@ -77,11 +80,25 @@ export function nextJapaneseReading(sessions: StudySession[], now: number): (Jap
 }
 export function japaneseReadingDelay(reading: JapaneseReading, draft: JapaneseReadingDraft, sessions: StudySession[], now: number): number {
   const result = japaneseReadingResult(reading, draft)
-  if (draft.helped || draft.effort === 'hard' || !result.meaning.every(Boolean) || !result.kana.every(Boolean)) return day
-  const previous = japaneseReadingHistory(sessions, now).filter(h => h.reading.id === reading.id)
+  if (draft.helped || draft.effort === 'hard' || !result.meaning.every(Boolean) || !result.kana.every(Boolean)
+    || reading.kana && draft.sourcePractice !== 'heard') return day
+  const previous = japaneseReadingHistory(sessions, now, reading.kana ? japaneseKana : japaneseReadings).filter(h => h.reading.id === reading.id)
   // Simple transparent 3/7/21-day text recheck; existing oral/chunk FSRS remains
   // separate. Never increase a gap merely because the page was opened.
   const last = previous.at(-1)
   const priorSuccess = last && !last.draft.helped && last.draft.effort !== 'hard' && last.result.meaning.every(Boolean) && last.result.kana.every(Boolean)
+    && (!reading.kana || last.draft.sourcePractice === 'heard')
   return (priorSuccess ? (last.draft.dueAt! - last.session.completedAt! >= 7 * day ? 21 : 7) : 3) * day
+}
+
+/** Short foundation alongside communication. Completion selects exposure, not
+ * mastery; publisher listening is only a labelled self-report. Never force a
+ * backlog of alphabet drills before allowing meaningful conversation. */
+export function nextJapaneseKana(sessions: StudySession[], now: number, needsBasics: boolean): JapaneseReading | undefined {
+  const history = japaneseReadingHistory(sessions, now, japaneseKana), latest = new Map(history.map(h => [h.reading.id, h]))
+  const order = needsBasics ? japaneseKana : [...japaneseKana.filter(r => r.kana?.script === 'rhythm'), ...japaneseKana.filter(r => r.kana?.script !== 'rhythm')]
+  const fresh = order.find(r => !latest.has(r.id))
+  const due = [...latest.values()].filter(h => h.draft.dueAt! <= now).sort((a, b) => a.draft.dueAt! - b.draft.dueAt!)
+  const twoRevisits = history.length >= 2 && history.slice(-2).every(h => h.draft.seen)
+  return due.length && !(fresh && twoRevisits) ? due[0]!.reading : fresh ?? due[0]?.reading
 }

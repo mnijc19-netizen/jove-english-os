@@ -1,10 +1,12 @@
 import type { Material } from '../domain/types'
+import { japaneseKana } from './japanese-kana'
 
 export interface JapaneseReading {
   id: string; band: 0 | 1 | 2; title: string; passage: string; meaningZh: string
   questions: { prompt: string; choices: string[]; answer: string; why: string }[]
-  words: { text: string; reading: string; meaning: string }[]
+  words: { text: string; reading: string; meaning: string; choices?: string[] }[]
   transfer: string
+  kana?: { script: 'hiragana' | 'katakana' | 'rhythm'; targets: string[]; sourceUrl: string; drillUrl: string; guidance: string }
 }
 // Original micro-readings, not translations or derivatives of publisher books.
 // Editorial bands describe these texts, never a learner's JLPT/CEFR level.
@@ -41,8 +43,9 @@ export const japaneseReadings: JapaneseReading[] = bands.flatMap((rows, band) =>
   questions: [{ prompt: r[3], choices: r[4], answer: r[5], why: r[2] }, { prompt: r[6], choices: r[7], answer: r[8], why: r[2] }],
   words: [r[9], r[10]].map(([text, reading, meaning]) => ({ text, reading, meaning })), transfer: r[11],
 })))
-export function japaneseReadingMaterials(): Material[] {
-  return japaneseReadings.map(r => ({ id: r.id, language: 'ja', title: r.title, topic: '生活日语阅读', difficulty: [0.15, 0.45, 0.7][r.band]!,
+export const japaneseWrittenExercises = [...japaneseReadings, ...japaneseKana]
+export function japaneseReadingMaterials(exercises = japaneseReadings): Material[] {
+  return exercises.map(r => ({ id: r.id, language: 'ja', title: r.title, topic: r.kana ? '假名字形与节拍' : '生活日语阅读', difficulty: [0.15, 0.45, 0.7][r.band]!,
     duration: 0, transcript: r.passage, sentences: r.passage.split('。').filter(Boolean).map(s => `${s}。`), sourceKind: 'curated',
     sourceLabel: 'Jove 原创短篇练习', license: 'Original app practice; no publisher book content.', synthetic: false, approved: true,
     question: r.questions[0]!.prompt, answer: r.questions[0]!.answer, keywords: [], chunks: [], createdAt: Date.UTC(2026, 8, 19) }))

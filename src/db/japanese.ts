@@ -9,14 +9,14 @@ import { z } from 'zod'
 import { createJapaneseReview } from './japanese-review'
 import { createJapaneseDialogue } from './japanese-dialogue'
 import { createJapaneseReading } from './japanese-reading'
-import { japaneseReadingMaterials } from '../content/japanese-reading'
-import { nextJapaneseReading } from '../domain/japanese-reading'
+import { japaneseReadingMaterials, japaneseWrittenExercises } from '../content/japanese-reading'
+import { nextJapaneseReading, nextJapaneseKana } from '../domain/japanese-reading'
 
 /** Called only by an explicitly enabled Japanese workspace, never by English
  * bootstrap. Does not overwrite setup, learned content, cards or saved work. */
 export async function initializeJapanese(database: JoveDatabase): Promise<void> {
   if (database.language !== 'ja') throw new Error('Japanese setup requires its own workspace')
-  await createLearningRepository(database).initialize([...japaneseMaterials(), ...japaneseReadingMaterials()])
+  await createLearningRepository(database).initialize([...japaneseMaterials(), ...japaneseReadingMaterials(japaneseWrittenExercises)])
 }
 
 const text = z.string().max(10_000)
@@ -103,7 +103,8 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const previous = current?.tasks.find(task => task.kind === 'listen' && !task.done && !task.optional)
       const previousReview = current?.tasks.find(task => task.kind === 'review' && !task.done && !task.optional)
       const previousDialogue = current?.tasks.find(task => task.kind === 'speak' && !task.done && !task.optional)
-      const previousReading = current?.tasks.find(task => task.kind === 'learn' && !task.done && !task.optional)
+      const previousReading = current?.tasks.find(task => task.kind === 'learn' && !task.materialId?.startsWith('ja-kana-') && !task.done && !task.optional)
+      const previousKana = current?.tasks.find(task => task.kind === 'learn' && task.materialId?.startsWith('ja-kana-') && !task.done && !task.optional)
       const minutes = allowance.allowances.ja.remaining
       const olderChunks = new Set((await database.chunks.toArray()).filter(chunk => chunk.createdAt <= now && new Date(chunk.createdAt).toLocaleDateString('en-CA') !== date).map(chunk => chunk.id))
       const due = (await database.cards.toArray()).filter(card => olderChunks.has(card.chunkId) && card.card.due.getTime() <= now)
@@ -118,29 +119,40 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       // exchange in the SAME daily allowance. Never add it to an already
       // started/finished day's older plan or double the English/Japanese budget.
       const sessions = await database.sessions.toArray(), selectedReading = nextJapaneseReading(sessions, now)
-      const lastAuxiliary = sessions.filter(s => s.completedAt && s.completedAt <= now && ['japanese-dialogue', 'japanese-reading'].includes(s.kind))
+      const selectedKana = nextJapaneseKana(sessions, now, placement.kanaSupport)
+      // On very short days rotate foundation with integrated work instead of
+      // letting a permanent kana backlog crowd out reading/conversation.
+      const foundationDay = history.length < 2 || minutes - reviewMinutes >= 18 || new Date(now).getDate() % 3 === 0
+      const kanaTask = previousKana ?? (!current && foundationDay && selectedKana && minutes - reviewMinutes >= 12 ? {
+        id: `${date}:ja:kana:${selectedKana.id}`, kind: 'learn' as const, title: `听读基础：${selectedKana.title}`, minutes: 3,
+        reason: '每天只练一小组，与生活对话并行；原站听示范，本站存首答。字形正确不等于已经会发音。', materialId: selectedKana.id, done: false,
+      } : undefined)
+      const kanaMinutes = kanaTask ? Math.min(kanaTask.minutes, Math.max(0, minutes - reviewMinutes)) : 0
+      const auxiliaryMinutes = Math.max(0, minutes - reviewMinutes - kanaMinutes)
+      const lastAuxiliary = sessions.filter(s => s.completedAt && s.completedAt <= now && !s.materialId?.startsWith('ja-kana-') && ['japanese-dialogue', 'japanese-reading'].includes(s.kind))
         .sort((a, b) => a.completedAt! - b.completedAt!).at(-1)
       const readingTurn = !!selectedReading && lastAuxiliary?.kind === 'japanese-dialogue'
-      const dialogueTask = previousDialogue ?? (!current && history.length >= 2 && material && minutes - reviewMinutes >= 15
-        && !(readingTurn && minutes - reviewMinutes < 20) ? {
+      const dialogueTask = previousDialogue ?? (!current && history.length >= 2 && material && auxiliaryMinutes >= 15
+        && !(readingTurn && auxiliaryMinutes < 20) ? {
         id: `${date}:ja:speak:${material.id}`, kind: 'speak' as const, title: '连续回应三轮，再改一处', minutes: 5,
         reason: '系统沿用今天的话题；录音先保存，AI 不可用时可用标明的离线应答练习。', materialId: material.id, done: false,
       } : undefined)
-      const dialogueMinutes = dialogueTask ? Math.min(dialogueTask.minutes, Math.max(0, minutes - reviewMinutes)) : 0
-      const readingTask = previousReading ?? (!current && history.length >= 1 && selectedReading && minutes - reviewMinutes - dialogueMinutes >= 15 ? {
+      const dialogueMinutes = dialogueTask ? Math.min(dialogueTask.minutes, auxiliaryMinutes) : 0
+      const readingTask = previousReading ?? (!current && history.length >= 1 && selectedReading && auxiliaryMinutes - dialogueMinutes >= 15 ? {
         id: `${date}:ja:learn:${selectedReading.id}`, kind: 'learn' as const, title: `读懂生活短篇：${selectedReading.title}`, minutes: 5,
         reason: selectedReading.trial ? '新难度试读，不代表已经升级；吃力就回退。理解和读法分开练。'
           : '先读意思，再试假名读法；理解与读法分别记录，不算听说成绩。', materialId: selectedReading.id, done: false,
       } : undefined)
-      const readingMinutes = readingTask ? Math.min(readingTask.minutes, Math.max(0, minutes - reviewMinutes - dialogueMinutes)) : 0
-      const lessonMinutes = Math.max(0, minutes - reviewMinutes - dialogueMinutes - readingMinutes)
+      const readingMinutes = readingTask ? Math.min(readingTask.minutes, Math.max(0, auxiliaryMinutes - dialogueMinutes)) : 0
+      const lessonMinutes = Math.max(0, auxiliaryMinutes - dialogueMinutes - readingMinutes)
       // Preserve task identity after starting; do not fill a finished day again.
       const task = previous ?? (!completed.some(task => task.kind === 'listen') && material ? { id: `${date}:ja:listen:${material.id}`, kind: 'listen' as const,
         title: material.title, minutes, reason: history.at(-1)?.data?.effort === 'hard'
           ? '上次觉得吃力，今天先巩固熟悉话题；不急着加难度。'
           : '真人输入 → 回忆意思 → 自己表达 → 对照重说', materialId: material.id, done: false } : undefined)
       const tasks = [...completed, ...(reviewTask && reviewMinutes > 0 ? [{ ...reviewTask, minutes: reviewMinutes }] : []),
-        ...(task && lessonMinutes > 0 ? [{ ...task, minutes: lessonMinutes }] : []), ...(readingTask && readingMinutes > 0 ? [{ ...readingTask, minutes: readingMinutes }] : []),
+        ...(task && lessonMinutes > 0 ? [{ ...task, minutes: lessonMinutes }] : []), ...(kanaTask && kanaMinutes > 0 ? [{ ...kanaTask, minutes: kanaMinutes }] : []),
+        ...(readingTask && readingMinutes > 0 ? [{ ...readingTask, minutes: readingMinutes }] : []),
         ...(dialogueTask && dialogueMinutes > 0 ? [{ ...dialogueTask, minutes: dialogueMinutes }] : [])]
       if (!tasks.length) return null
       const plan = planSchema.parse({ id: date, date, minutes: tasks.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0),
