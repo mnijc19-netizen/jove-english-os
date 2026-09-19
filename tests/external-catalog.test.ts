@@ -6,6 +6,8 @@ import { materialSchema } from '../src/db/schema'
 import { readOrRefreshExternalCatalog, refreshExternalCatalog } from '../src/server/external-catalog'
 import { catalogJobAdmin, createContentHandler } from '../src/server/content'
 import { createContentFetcher, type ContentFetcher } from '../src/server/content-network'
+import { aggregateSkills, makePlan } from '../src/domain/engine'
+import { defaultProfile, type Skill, type StudyEvent } from '../src/domain/types'
 
 const now = Date.UTC(2026, 8, 13, 8)
 const legacy: Record<number, string> = { 1: 'external-voa-welcome', 3: 'external-voa-im-here', 10: 'external-voa-directions' }
@@ -14,8 +16,61 @@ const entries = Array.from({ length: 52 }, (_, i) => ({ position: i + 1,
 const anchors = entries.map(e => `<a href="${e.url}" title="Lesson ${e.position}: Sample">Course</a>`).join('\n')
 const html = `Certified American English teachers; 52 weeks\n${anchors}`
 const catalog = { version: 1 as const, sourceId: 'voa-level1' as const, language: 'en' as const, checkedAt: now, revision: 'a'.repeat(64), entries }
+const intermediateEntries = Array.from({ length: 30 }, (_, i) => ({ position: i + 1,
+  url: `https://learningenglish.voanews.com/a/lets-learn-english-level-2-lesson-${i + 1}/${9100000 + i}.html` }))
+const intermediateHtml = `Certified American English teachers; intermediate learners\n${intermediateEntries
+  .map(e => `<a href="${e.url}" title="Lesson ${e.position}: Sample">Course</a>`).join('\n')}`
+const intermediateCatalog = { ...catalog, sourceId: 'voa-level2' as const, entries: intermediateEntries }
 
 describe('bounded publisher course catalog', () => {
+  it('accepts the separate 30-lesson intermediate course without rebinding beginner identities', () => {
+    expect(parseExternalCatalogPage(intermediateHtml, 'voa-level2')).toEqual(intermediateEntries)
+    const materials = materialFromExternalCatalog(intermediateCatalog)
+    expect(materials).toHaveLength(30)
+    const beginnerIds = new Set(materialFromExternalCatalog(catalog).map(m => m.id))
+    for (const item of materials) {
+      expect(materialSchema.parse(item)).toEqual(item)
+      expect(beginnerIds.has(item.id)).toBe(false)
+      expect(item.externalStudy?.level).toBe('intermediate')
+      expect(item.difficulty).toBeGreaterThanOrEqual(0.55)
+      expect(item.difficulty).toBeLessThanOrEqual(0.85)
+      expect(item.audioPath).toBeUndefined(); expect(item.transcript).toBe('')
+    }
+  })
+  it('fails closed on swapped, incomplete and ambiguous intermediate directories', () => {
+    expect(() => parseExternalCatalogPage(html, 'voa-level2')).toThrow()
+    expect(() => parseExternalCatalogPage(intermediateHtml)).toThrow()
+    expect(() => parseExternalCatalogPage(intermediateHtml.replace('Lesson 30:', 'Lesson 31:'), 'voa-level2')).toThrow()
+    expect(externalCatalogSchema.safeParse({ ...intermediateCatalog, entries }).success).toBe(false)
+    expect(externalCatalogSchema.safeParse({ ...catalog, entries: intermediateEntries }).success).toBe(false)
+    expect(externalCatalogSchema.safeParse({ ...intermediateCatalog, sourceId: 'arbitrary' }).success).toBe(false)
+  })
+  it('keeps course positions independent and expires both catalog-only reserves', () => {
+    const beginner = materialFromExternalCatalog(catalog), intermediate = materialFromExternalCatalog(intermediateCatalog)
+    expect(externalLessonCandidates([...beginner, ...intermediate], [], now).map(m => m.id))
+      .toEqual(['external-voa-welcome', 'external-voa-level2-1'])
+    expect(externalLessonCandidates(intermediate, [], now + 91 * 86400000)).toEqual([])
+    expect(externalLessonCandidates(intermediate.slice(0, 2), [{ id: 'practice', type: 'EXTERNAL_LISTEN_REFLECTION',
+      source: 'self-report', sessionId: 'saved', timestamp: now - 1, data: { materialId: intermediate[0]!.id,
+        response: 'summary', expression: 'expression', example: 'my example', audioId: 'audio', listened: true,
+        playbackObserved: false, comprehensionVerified: false } }], now).map(m => m.id)).toEqual(['external-voa-level2-2'])
+  })
+  it('plans by observed ability rather than promoting a learner from beginner participation alone', () => {
+    const materials = [...materialFromExternalCatalog(catalog), ...materialFromExternalCatalog(intermediateCatalog)]
+    const profile = { ...defaultProfile(), createdAt: now - 86400000, onboarded: true }
+    const evidence = (score: number): Skill[] => [{ id: 'naturalListening', score, confidence: 0.8, evidenceCount: 6, updatedAt: now }]
+    const history: StudyEvent[] = materials.filter(m => m.externalStudy?.level === 'beginner').map((m, i) => ({
+      id: `reflection-${i}`, type: 'EXTERNAL_LISTEN_REFLECTION', sessionId: `practice-${i}`, timestamp: now - 1000 - i,
+      source: 'self-report', data: { materialId: m.id, response: 'summary', expression: 'expression', example: 'my example',
+        audioId: `audio-${i}`, listened: true, playbackObserved: false, comprehensionVerified: false } }))
+    const lowPlan = makePlan(profile, evidence(0.15), [], history, materials, undefined, now)
+    expect(lowPlan.tasks.find(task => task.kind === 'listen')?.materialId).not.toMatch(/^external-voa-level2-/u)
+    expect(aggregateSkills(history).every(skill => skill.evidenceCount === 0)).toBe(true)
+    const higherPlan = makePlan(profile, evidence(0.65), [], [], materials, undefined, now)
+    expect(higherPlan.tasks.find(task => task.kind === 'listen')?.materialId).toBe('external-voa-level2-1')
+    const bound = makePlan(profile, evidence(0.65), [], history, materials, lowPlan, now)
+    expect(bound.tasks.find(task => task.kind === 'listen')?.materialId).toBe(lowPlan.tasks.find(task => task.kind === 'listen')?.materialId)
+  })
   it('extracts all 52 distinct positions and only page metadata', () => {
     expect(parseExternalCatalogPage(html)).toEqual(entries)
     expect(parseExternalCatalogPage(html + '\n' + anchors)).toEqual(entries)
@@ -72,6 +127,24 @@ function persistence(afterClaim?: () => void) {
 const fetched = (text = html) => ({ status: 200, contentType: 'text/html', body: new TextEncoder().encode(text), finalUrl: EXTERNAL_CATALOG_URL,
   etag: null, lastModified: null, retryAfter: null, dnsPinning: 'injected' as const })
 describe('independent no-model catalog worker', () => {
+  it('binds intermediate source to every RPC and only its exact publisher directory', async () => {
+    const db = persistence(), fetcher = vi.fn<ContentFetcher>(async () => ({ ...fetched(intermediateHtml),
+      finalUrl: 'https://learningenglish.voanews.com/p/6765.html' }))
+    const handler = createContentHandler(() => undefined, { authenticateCatalogJob: async () => db.admin, catalogFetcher: fetcher, now: () => now })
+    const response = await handler(new Request('https://project.example/content', { method: 'POST',
+      headers: { 'X-Jove-Catalog-Job': 'fixture-only' }, body: '{"action":"catalog-refresh","sourceId":"voa-level2"}' }))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ sourceId: 'voa-level2', lessons: 30, refreshed: true })
+    expect(fetcher.mock.calls[0]?.[0]).toMatchObject({ url: 'https://learningenglish.voanews.com/p/6765.html',
+      exactUrls: ['https://learningenglish.voanews.com/p/6765.html'], source: { id: 'voa-level2' } })
+    for (const call of vi.mocked(db.admin.rpc).mock.calls) expect(call[1]).toMatchObject({ args: { sourceId: 'voa-level2' } })
+  })
+  it('rejects cross-course readback rather than advancing the wrong reserve', async () => {
+    const db = persistence(); db.state.catalog = catalog
+    await expect(readOrRefreshExternalCatalog(db.admin, { sourceId: 'voa-level2', now: () => now }))
+      .rejects.toMatchObject({ code: 'EXTERNAL_CATALOG' })
+    expect(db.calls).toEqual(['read'])
+  })
   it.each(['before-claim', 'after-claim', 'after-fetch', 'after-digest'])('does not commit when cancelled %s', async point => {
     const controller = new AbortController(), db = persistence(() => { if (point === 'after-claim') controller.abort() })
     if (point === 'before-claim') controller.abort()
@@ -156,6 +229,7 @@ describe('independent no-model catalog worker', () => {
     expect(db.calls).toEqual(['claim', 'commit']); expect(denied).not.toHaveBeenCalled()
   })
   it.each(['{}', '{"action":"refresh"}', '{"action":"provider-status"}', '{"action":"lessons"}',
+    '{"action":"catalog-refresh","sourceId":"unknown"}', '{"action":"catalog-refresh","sourceId":null}',
     '{"action":"external-catalog"}', '{"action":"catalog-refresh","ownerId":"another-owner"}'])('rejects action escalation with directory authority: %s', body => {
     const db = persistence()
     const handler = createContentHandler(() => undefined, { authenticateCatalogJob: async () => db.admin })
@@ -177,9 +251,10 @@ describe('independent no-model catalog worker', () => {
     expect(seen).toEqual(['JOVE_CATALOG_JOB_TOKEN'])
     await expect(catalogJobAdmin(new Request('https://project.example/content', { headers: { 'X-Jove-Catalog-Job': credential } }), env)).resolves.toBeDefined()
   })
-  it.runIf(process.env.LIVE_EXTERNAL_CATALOG === '1')('reads the actual pinned publisher directory without media or AI', async () => {
+  it.runIf(process.env.LIVE_EXTERNAL_CATALOG === '1').each(['voa-level1', 'voa-level2'] as const)('reads the actual pinned %s publisher directory without media or AI', async sourceId => {
     const db = persistence()
-    expect(await refreshExternalCatalog(db.admin, { fetcher: createContentFetcher() })).toMatchObject({ lessons: 52, refreshed: true })
-    expect(externalCatalogSchema.parse(db.state.catalog).entries).toHaveLength(52)
+    const lessons = sourceId === 'voa-level1' ? 52 : 30
+    expect(await refreshExternalCatalog(db.admin, { fetcher: createContentFetcher(), sourceId })).toMatchObject({ lessons, refreshed: true, sourceId })
+    expect(externalCatalogSchema.parse(db.state.catalog).entries).toHaveLength(lessons)
   }, 30000)
 })

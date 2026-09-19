@@ -36,7 +36,7 @@ export const useApp = defineStore("app", () => {
     keySet = ref(false);
   const providerMode = ref<'account' | 'byok'>('account');
   const contentState = ref<'idle' | 'loading' | 'ready' | 'empty' | 'offline' | 'error'>('idle');
-  const catalogState = ref<'idle' | 'loading' | 'ready' | 'empty' | 'offline' | 'error'>('idle');
+  const catalogState = ref<'idle' | 'loading' | 'ready' | 'partial' | 'empty' | 'offline' | 'error'>('idle');
   let contentJob: Promise<void> | undefined, contentController: AbortController | undefined;
   let contentIdentity = '', lastContentAttempt = 0;
   const profile = ref<Profile>(defaultProfile()),
@@ -172,16 +172,21 @@ export const useApp = defineStore("app", () => {
       try {
         // Independent delivery: the legacy clip/history route may be unavailable.
         try {
-          const catalog = await refreshExternalCourseCatalog(controller.signal);
+          const catalogs = await Promise.allSettled([
+            refreshExternalCourseCatalog(controller.signal),
+            refreshExternalCourseCatalog(controller.signal, 'voa-level2'),
+          ]);
           if (!current()) return;
-          hasCatalog = catalog.length > 0;
+          const loaded = catalogs.filter(result => result.status === 'fulfilled' && result.value.length > 0).length;
+          hasCatalog = loaded > 0;
           if (hasCatalog) await refresh();
           if (!current()) return;
-          catalogState.value = hasCatalog ? 'ready' : 'empty';
+          catalogState.value = loaded === 2 ? 'ready' : loaded ? 'partial'
+            : catalogs.some(result => result.status === 'rejected') ? 'error' : 'empty';
         } catch { if (!current()) return; catalogState.value = online.value ? 'error' : 'offline'; }
         // The shared page-only directory needs no learner diagnosis. Personalized
         // legacy selection still waits for setup; never mark setup done for access.
-        if (!profile.value.onboarded) { contentState.value = catalogState.value; return; }
+        if (!profile.value.onboarded) { contentState.value = hasCatalog ? 'ready' : catalogState.value === 'error' ? 'error' : 'empty'; return; }
         await flushContentHistory(events.value, materials.value, controller.signal);
         const targetDifficulty = planLongitudinal({ profile: profile.value, skills: skills.value,
           cards: cards.value, events: events.value, materials: materials.value, now: Date.now() }).adjustments.targetDifficulty;

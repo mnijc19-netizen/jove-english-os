@@ -78,7 +78,7 @@ interface PageState {
   start: () => Promise<void>; send: () => Promise<void>; finish: () => Promise<void>; check: () => Promise<void>
   beforeNavigation: () => Promise<boolean | undefined>; savedSpokenRecording: (value: { audioId: string; duration: number }) => Promise<void>
   text: string; audioId: string; sttText: string; mode: string; sid: string; loaded: boolean
-  pronunciationActive: boolean; error: string; draft: Record<string, unknown>; hydrating: boolean
+  pronunciationActive: boolean; error: string; draft: Record<string, unknown>; hydrating: boolean; working: boolean
   listeningMedia: { querySelector: () => unknown }; sampleListeningTime: () => void; flushListeningTime: () => Promise<void>
   pronunciation: { recorded: (value: { audioId: string; duration: number; referenceId: string }) => Promise<void>; persistAttempt: (value: { attemptId: string; recordingId: string; referenceId: string }) => Promise<void>; retry: () => Promise<void>;
     evaluated: (value: Extract<BrowserAssessmentResult, { ok: true }>) => Promise<void>; recoveredResults: Vue.Ref<Extract<BrowserAssessmentResult, { ok: true }>[]>; loading: Vue.Ref<boolean>; problem: Vue.Ref<string> }
@@ -282,6 +282,74 @@ describe('Listen authentic clip playback and lifecycle', () => {
 })
 
 describe('compiled Listen/Speak page contracts and actual pronunciation persistence', () => {
+  it('keeps external step saving busy until the exact stage-two draft commits; disabled Save is not a persistence barrier', async () => {
+    const [{ default: Dexie }, { IDBFactory, IDBKeyRange }] = await Promise.all([import('dexie'), import('fake-indexeddb')])
+    const database = new Dexie('external-step-save-' + crypto.randomUUID(), { indexedDB: new IDBFactory(), IDBKeyRange })
+    database.version(1).stores({ sessions: 'id,kind,startedAt,materialId' })
+    const sessions = database.table<StudySession, string>('sessions')
+    const entered = deferred<void>(), release = deferred<void>()
+    const view = mountPage('Listen', {}, { legacyAcoustic: false, materials: [externalStudy.externalMaterials[0]!], renderTemplate: true })
+    // Reuse the compiled-page harness, but read/write real Dexie transactions
+    // against isolated fake IndexedDB instead of its ordinary Map-backed store.
+    view.storage.sessions.get.mockImplementation(id => sessions.get(id))
+    view.storage.sessions.add.mockImplementation(async row => { await sessions.add(row) })
+    view.storage.sessions.put.mockImplementation(async row => { await sessions.put(row) })
+    view.storage.sessions.where = () => ({ equals: id => ({ toArray: () => sessions.where('materialId').equals(id).toArray() }) })
+    view.storage.transaction = async (...args: unknown[]) => database.transaction('rw', sessions, args.at(-1) as () => Promise<void>)
+    let transition: Promise<void> | undefined
+    try {
+      await vi.waitFor(() => expect(view.state.hydrating).toBe(false))
+      await flush()
+      const fields = { listened: true, answer: 'Two neighbors introduce themselves.', externalExpression: 'Nice to meet you',
+        externalExample: 'Nice to meet you, Sam. I work in design.', audioId: '' }
+      Object.assign(view.state.draft, fields)
+      await Vue.nextTick()
+      await click(button(view.root, 'Continue to notice an expression'))
+      await view.state.beforeNavigation(); await flush()
+      const sessionId = view.state.sid, before = await sessions.get(sessionId)
+      const draftBefore = JSON.parse(JSON.stringify(view.state.draft)) as StudySession['draft']
+      expect(before).toMatchObject({ id: sessionId, materialId: externalStudy.externalMaterials[0]!.id,
+        stage: '1', draft: { stage: 1, ...fields } })
+      expect(before!.draft).toEqual(draftBefore)
+      expect(view.state.working).toBe(false)
+      let commits = 0, settled = false
+      const busyAtCommit: boolean[] = []
+      view.storage.sessions.put.mockImplementation(async row => {
+        if (row.id === sessionId && row.stage === '2') {
+          entered.resolve(); await release.promise
+          busyAtCommit.push(view.state.working)
+          await sessions.put(row)
+          commits++
+          busyAtCommit.push(view.state.working)
+        } else await sessions.put(row)
+      })
+      transition = (click(button(view.root, 'Continue to spoken retell')) as Promise<void>).then(() => { settled = true })
+      await entered.promise; await Vue.nextTick()
+      // The old browser-test assertion already passes here, while a reload
+      // would restore stage one: rendered step/disabled state is not a commit.
+      expect(content(view.root)).toContain('3 · Close the script and retell')
+      expect(button(view.root, 'Save practice and continue').props.disabled).toBe(true)
+      expect(view.state.draft).toEqual({ ...draftBefore, stage: 2 })
+      expect(view.state.working).toBe(true)
+      expect(find(view.root, node => node.type === 'section' && node.props.class === 'panel')?.props['aria-busy']).toBe(true)
+      expect(settled).toBe(false); expect(commits).toBe(0)
+      expect(await sessions.get(sessionId)).toEqual(before)
+      release.resolve(); await transition; await Vue.nextTick()
+      expect(commits).toBeGreaterThan(0); expect(settled).toBe(true)
+      expect(busyAtCommit.every(busy => busy)).toBe(true)
+      expect(view.state.working).toBe(false)
+      expect(find(view.root, node => node.type === 'section' && node.props.class === 'panel')?.props['aria-busy']).toBe(false)
+      expect(button(view.root, 'Save practice and continue').props.disabled).toBe(true)
+      const expected = { ...before, stage: '2', draft: { ...draftBefore, stage: 2 } }
+      expect(await sessions.get(sessionId)).toEqual(expected)
+      database.close(); await database.open()
+      expect(await sessions.get(sessionId)).toEqual(expected)
+      expect(view.app.events).toEqual([])
+    } finally {
+      release.resolve(); await transition
+      view.unmount(); await database.delete()
+    }
+  })
   it.each(['Listen', 'Speak'] as const)('normal %s route no longer starts an acoustic session', async name => {
     const view = mountPage(name, {}, { legacyAcoustic: false }); await flush()
     expect(view.refs.session).not.toHaveBeenCalled()

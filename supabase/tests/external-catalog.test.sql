@@ -51,6 +51,35 @@ begin
   update public.external_course_catalog set last_success_at=now()-interval '91 days' where source_id='voa-level1';
   assert public.external_catalog_worker('read') is null, 'expired catalog freshly recommended';
 end $$;
+do $$
+declare first_token text; second_token text; snapshot jsonb; remembered jsonb;
+begin
+  select catalog into remembered from public.external_course_catalog where source_id='voa-level1';
+  update public.external_course_catalog set next_attempt_at=now()-interval '1 second', lease_until=null where source_id='voa-level1';
+  first_token := public.external_catalog_worker('claim')->>'leaseToken';
+  second_token := public.external_catalog_worker('claim','{"sourceId":"voa-level2"}')->>'leaseToken';
+  assert first_token is not null and second_token is not null and first_token<>second_token, 'course leases not independent';
+  assert public.external_catalog_worker('read','{"sourceId":"voa-level2"}') is null, 'Level 1 leaked into Level 2';
+  assert public.external_catalog_worker('claim','{"sourceId":"voa-level2"}')->>'leaseToken' is null, 'second source claim duplicated';
+  snapshot := jsonb_build_object('version',1,'sourceId','voa-level2','language','en','checkedAt',9999999999999,'revision',repeat('b',64),
+    'entries',(select jsonb_agg(jsonb_build_object('position',n,'url',format('https://learningenglish.voanews.com/a/level-two-lesson-%s/%s.html',n,9100000+n))) from generate_series(1,30)n));
+  assert public.external_catalog_worker('commit',jsonb_build_object('sourceId','voa-level2','leaseToken',first_token,'catalog',snapshot))='false'::jsonb, 'cross-source lease committed';
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('leaseToken',first_token,'catalog',snapshot));
+    raise exception 'default source accepted Level 2'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','voa-level2','leaseToken',second_token,'catalog',remembered));
+    raise exception 'explicit source accepted wrong snapshot'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('claim','{"sourceId":"unknown"}');
+    raise exception 'unknown source accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('read','{"sourceId":null}');
+    raise exception 'null source accepted'; exception when invalid_parameter_value then null; end;
+  assert public.external_catalog_worker('commit',jsonb_build_object('sourceId','voa-level2','leaseToken',second_token,'catalog',snapshot))='true'::jsonb, 'Level 2 snapshot failed';
+  assert jsonb_array_length(public.external_catalog_worker('read','{"sourceId":"voa-level2"}')->'entries')=30, 'Level 2 incomplete';
+  assert (select catalog=remembered from public.external_course_catalog where source_id='voa-level1'), 'Level 2 modified Level 1';
+  perform public.external_catalog_worker('fail',jsonb_build_object('sourceId','voa-level2','leaseToken',first_token));
+  assert (select failures=0 from public.external_course_catalog where source_id='voa-level2'), 'cross-source failure changed backoff';
+  assert (select lease_token::text=first_token from public.external_course_catalog where source_id='voa-level1'), 'other course consumed lease';
+  assert public.external_catalog_worker('claim','{"sourceId":"voa-level2"}')->>'leaseToken' is null, 'Level 2 success backoff missing';
+end $$;
 reset role;
 do $$ begin
   assert (select relrowsecurity from pg_class where oid='public.external_course_catalog'::regclass), 'RLS not enabled';

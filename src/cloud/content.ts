@@ -5,7 +5,7 @@ import { authenticPlaybackSchema, materialSchema } from '../db/schema'
 import type { AuthenticPlayback, Material, StudyEvent } from '../domain/types'
 import { abortable, checkAbort, readBytes, readJson, withDeadline } from '../ai/transport'
 import { ProviderError } from '../ai/errors'
-import { externalCatalogSchema, materialFromExternalCatalog } from '../content/external-catalog'
+import { externalCatalogSchema, externalCatalogSourceSchema, type ExternalCatalogSource, materialFromExternalCatalog } from '../content/external-catalog'
 import { EXTERNAL_CATALOG_MAX_AGE } from '../content/external'
 
 const segmentIdSchema = z.string().regex(/^authentic-[a-f0-9]{64}$/u)
@@ -126,14 +126,16 @@ export async function refreshContentLessons(profile: ContentProfile, signal?: Ab
 }
 
 /** Separate page-only delivery; failed acoustic selection cannot block this catalog. */
-export async function refreshExternalCourseCatalog(signal?: AbortSignal): Promise<Material[]> {
+export async function refreshExternalCourseCatalog(signal?: AbortSignal, sourceId: ExternalCatalogSource = 'voa-level1'): Promise<Material[]> {
+  externalCatalogSourceSchema.parse(sourceId)
   return withDeadline(signal, 25_000, async scoped => {
     const context = await access(scoped)
     try {
       scoped = AbortSignal.any([scoped, context.signal])
       const response = z.strictObject({ catalog: externalCatalogSchema.nullable() })
-        .parse(await request(context, { action: 'external-catalog' }, scoped))
+        .parse(await request(context, { action: 'external-catalog', ...(sourceId === 'voa-level1' ? {} : { sourceId }) }, scoped))
       if (!response.catalog) return []
+      if (response.catalog.sourceId !== sourceId) throw invalid()
       if (response.catalog.checkedAt > Date.now() + 300_000 || response.catalog.checkedAt <= Date.now() - EXTERNAL_CATALOG_MAX_AGE) throw invalid()
       const materials = materialFromExternalCatalog(response.catalog).map(m => materialSchema.parse(m))
       await context.assertCurrent(); context.assertLive(); checkAbort(scoped)

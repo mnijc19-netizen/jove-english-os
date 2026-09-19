@@ -21,6 +21,8 @@ test('signed-in Library loads and retries the directory before initial learning 
   const catalog = { version: 1, sourceId: 'voa-level1', language: 'en', checkedAt: Date.now(), revision: 'a'.repeat(64),
     entries: Array.from({ length: 52 }, (_, i) => ({ position: i + 1,
       url: externalMaterials.find(m => m.id === legacy[i + 1])?.sourceUrl ?? `https://learningenglish.voanews.com/a/lesson-${i + 1}/${9000000 + i}.html` })) }
+  const intermediate = { ...catalog, sourceId: 'voa-level2', entries: Array.from({ length: 30 }, (_, i) => ({
+    position: i + 1, url: `https://learningenglish.voanews.com/a/level-two-lesson-${i + 1}/${9100000 + i}.html` })) }
   let attempts = 0, cursor = 0
   const unexpected: string[] = []
   await page.route('https://*.supabase.co/**', async route => {
@@ -36,6 +38,7 @@ test('signed-in Library loads and retries the directory before initial learning 
     if (path === '/rest/v1/rpc/append_sync_operations') return json(request.postDataJSON().operations.map((op: { id: string }) =>
       ({ id: op.id, cursor: ++cursor, received_at: new Date().toISOString() })))
     if (path === '/functions/v1/content' && request.postDataJSON().action === 'external-catalog') {
+      if (request.postDataJSON().sourceId === 'voa-level2') return json({ catalog: intermediate })
       attempts++
       return attempts === 1 ? json({ error: 'fixture-unavailable' }, 503) : json({ catalog })
     }
@@ -43,14 +46,16 @@ test('signed-in Library loads and retries the directory before initial learning 
   })
   await page.goto('#/library')
   const status = page.getByRole('status', { name: 'Course directory status' })
-  await expect(status).toContainText('The course directory could not load.')
+  await expect(status).toContainText('Some courses loaded; another course directory is unavailable.')
   expect((await records(page, 'profiles'))[0]).toMatchObject({ onboarded: false })
   await page.getByRole('textbox', { name: 'Search materials' }).fill('Everyday English · Lesson 2')
   await expect(page.getByRole('heading', { name: 'Everyday English · Lesson 2', exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: 'Retry course directory' }).click()
   await expect(status).toContainText('Course directory loaded.')
   await expect(page.getByRole('heading', { name: 'Everyday English · Lesson 2', exact: true })).toBeVisible()
-  expect((await records(page, 'materials')).filter(m => String(m.id).startsWith('external-voa-'))).toHaveLength(52)
+  expect((await records(page, 'materials')).filter(m => String(m.id).startsWith('external-voa-'))).toHaveLength(82)
+  await page.getByRole('textbox', { name: 'Search materials' }).fill('Everyday English · Intermediate · Lesson 1')
+  await expect(page.getByRole('heading', { name: 'Everyday English · Intermediate · Lesson 1', exact: true })).toBeVisible()
   await page.reload()
   await expect(status).toContainText('Course directory loaded.')
   expect((await records(page, 'profiles'))[0]).toMatchObject({ onboarded: false })
@@ -89,6 +94,17 @@ test('external lesson saves a guided draft without media downloads or invented a
   await page.locator('#external-example').fill('Nice to meet you, Sam. I work in design.')
   await page.getByRole('button',{name:'Continue to spoken retell'}).click()
   await expect(page.getByRole('button',{name:'Save practice and continue'})).toBeDisabled()
+  // Disabled also means "no recording" and is not a save-completion barrier.
+  // Reload only after the actual active draft and stage have committed.
+  await expect(page.locator('section.panel[aria-busy]').filter({ has: page.getByRole('heading', { name: 'Welcome: introduce yourself' }) }))
+    .toHaveAttribute('aria-busy', 'false')
+  await expect.poll(async () => (await records(page, 'sessions')).some(s => {
+    const saved = s as unknown as StudySession
+    return saved.materialId === 'external-voa-welcome' && saved.stage === '2'
+      && saved.draft.answer === 'Two neighbors introduce themselves.'
+      && saved.draft.externalExpression === 'Nice to meet you'
+      && saved.draft.externalExample === 'Nice to meet you, Sam. I work in design.'
+  })).toBe(true)
   await page.reload()
   await expect(page.getByRole('heading',{name:'3 · Close the script and retell'})).toBeVisible()
   await page.getByRole('button',{name:'Previous step'}).click()

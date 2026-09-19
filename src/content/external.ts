@@ -34,16 +34,18 @@ export function externalPracticeReady(draft: { listened: boolean; answer: string
   return draft.listened && !!draft.answer.trim() && !!draft.expression.trim() && !!draft.example.trim() && !!draft.audioId
 }
 
-function voaCoursePosition(material: Material): number | undefined {
+function voaCoursePosition(material: Material): { course: string; position: number } | undefined {
   const legacy: Record<string, number> = { 'external-voa-welcome': 1, 'external-voa-im-here': 3, 'external-voa-directions': 10 }
-  return legacy[material.id] ?? (/^external-voa-level1-([1-9]|[1-4][0-9]|5[0-2])$/u.exec(material.id)?.[1]
-    ? Number(material.id.slice('external-voa-level1-'.length)) : undefined)
+  if (legacy[material.id]) return { course: 'voa-level1', position: legacy[material.id]! }
+  const match = /^external-(voa-level[12])-([1-9]|[1-4][0-9]|5[0-2])$/u.exec(material.id)
+  return match && (match[1] === 'voa-level1' || Number(match[2]) <= 30)
+    ? { course: match[1]!, position: Number(match[2]) } : undefined
 }
 
 export const EXTERNAL_CATALOG_MAX_AGE = 90 * 86_400_000
 /** Catalog-only links expire for new assignments, not for saved work or static seeds. */
 export function externalCatalogFresh(material: Material, now: number): boolean {
-  if (!/^external-voa-level1-([1-9]|[1-4][0-9]|5[0-2])$/u.test(material.id)) return true
+  if (!/^external-voa-level[12]-/u.test(material.id)) return true
   const checkedAt = material.externalStudy?.checkedAt
   return typeof checkedAt === 'number' && Number.isFinite(checkedAt)
     && checkedAt <= now + 300_000 && now - checkedAt < EXTERNAL_CATALOG_MAX_AGE
@@ -65,11 +67,14 @@ export function externalLessonCandidates(materials: Material[], events: StudyEve
   }
   const unseen = eligible.filter(m => !lastPractice.has(m.id))
   if (unseen.length) {
-    const positions = unseen.map(voaCoursePosition).filter((n): n is number => n !== undefined)
-    const next = positions.length ? Math.min(...positions) : undefined
-    // Editorial sequence within this beginner course, not alphabetical ID order
-    // or a claim that submitting the previous lesson proves mastery.
-    return unseen.filter(m => voaCoursePosition(m) === undefined || voaCoursePosition(m) === next)
+    const next = new Map<string, number>()
+    for (const material of unseen) {
+      const item = voaCoursePosition(material)
+      if (item) next.set(item.course, Math.min(next.get(item.course) ?? Infinity, item.position))
+    }
+    // Independent editorial sequences. The planner still applies difficulty;
+    // participation in either course never proves readiness for the other.
+    return unseen.filter(m => { const item = voaCoursePosition(m); return !item || item.position === next.get(item.course) })
   }
   // Once the eligible reserve is exhausted, revisit the least recently practised
   // lesson. No new-content, verified-comprehension or proficiency claim is made.

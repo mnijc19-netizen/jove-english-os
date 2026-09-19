@@ -66,6 +66,33 @@ beforeEach(async () => {
 afterEach(async () => { expect(auth.listeners.size).toBe(0); vi.restoreAllMocks(); vi.unstubAllGlobals(); await db.delete() })
 
 describe('automatic authenticated lesson delivery', () => {
+  it('loads the independent intermediate reserve without rebinding beginner materials', async () => {
+    const catalog = { ...externalCatalog(), sourceId: 'voa-level2', entries: Array.from({ length: 30 }, (_, i) => ({
+      position: i + 1, url: `https://learningenglish.voanews.com/a/level-two-lesson-${i + 1}/${9100000 + i}.html` })) }
+    const retained = structuredClone(externalMaterials[0]!)
+    await db.materials.add(retained)
+    fetcher.mockImplementation(async (_url, init) => {
+      expect(JSON.parse(String(init.body))).toEqual({ action: 'external-catalog', sourceId: 'voa-level2' })
+      return json({ catalog })
+    })
+    expect(await refreshExternalCourseCatalog(undefined, 'voa-level2')).toHaveLength(30)
+    expect(await db.materials.count()).toBe(31)
+    expect(await db.materials.get(retained.id)).toEqual(retained)
+    expect(await db.events.count()).toBe(0); expect(await db.cards.count()).toBe(0)
+  })
+  it('rejects a valid response for another source without modifying the reserve', async () => {
+    fetcher.mockResolvedValue(json({ catalog: externalCatalog() }))
+    await expect(refreshExternalCourseCatalog(undefined, 'voa-level2')).rejects.toBeDefined()
+    expect(await db.materials.count()).toBe(0)
+  })
+  it('keeps a successful beginner delivery when the independent intermediate request fails', async () => {
+    fetcher.mockImplementation(async (_url, init) => JSON.parse(String(init.body)).sourceId
+      ? json({ error: { code: 'UNAVAILABLE' } }, 503) : json({ catalog: externalCatalog() }))
+    const results = await Promise.allSettled([refreshExternalCourseCatalog(), refreshExternalCourseCatalog(undefined, 'voa-level2')])
+    expect(results.map(result => result.status)).toEqual(['fulfilled', 'rejected'])
+    expect(await db.materials.count()).toBe(52)
+    expect(await db.events.count()).toBe(0)
+  })
   it('delivers the complete external reserve idempotently without audio or skill evidence', async () => {
     const retained = { ...structuredClone(externalMaterials[0]!), title: 'My retained title' }
     await db.materials.add(retained)

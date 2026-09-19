@@ -9,9 +9,11 @@ import { demoMaterials } from '../src/content/materials'
 import { makePlan } from '../src/domain/engine'
 import { externalMaterials } from '../src/content/external'
 
-const services = vi.hoisted(() => ({ refresh: vi.fn(), catalog: vi.fn(), audio: vi.fn(), history: vi.fn() }))
+const services = vi.hoisted(() => ({ refresh: vi.fn(), catalog: vi.fn(), intermediate: vi.fn(), audio: vi.fn(), history: vi.fn() }))
 const state = vi.hoisted(() => ({ cloud: null as null | { configured: boolean; userId: string; start: () => Promise<void> } }))
-vi.mock('../src/cloud/content', () => ({ refreshContentLessons: services.refresh, refreshExternalCourseCatalog: services.catalog, prepareContentAudio: services.audio, flushContentHistory: services.history }))
+vi.mock('../src/cloud/content', () => ({ refreshContentLessons: services.refresh,
+  refreshExternalCourseCatalog: (signal?: AbortSignal, source?: string) => source === 'voa-level2' ? services.intermediate(signal) : services.catalog(signal),
+  prepareContentAudio: services.audio, flushContentHistory: services.history }))
 vi.mock('../src/stores/cloud', () => ({ useCloud: () => state.cloud }))
 vi.mock('../src/cloud/client', () => ({ cloudClient: null, publicCloudConfig: { url: '', publishableKey: '' } }))
 const segmentId = `authentic-${'a'.repeat(64)}`
@@ -31,6 +33,7 @@ beforeEach(async () => {
   vi.stubGlobal('matchMedia', () => ({ matches: false }))
   services.history.mockReset().mockResolvedValue(undefined)
   services.catalog.mockReset().mockResolvedValue([])
+  services.intermediate.mockReset().mockResolvedValue([])
   services.audio.mockReset().mockResolvedValue(new Blob(['transport fixture']))
   services.refresh.mockReset().mockImplementation(async () => { await db.materials.put(structuredClone(material)); return [material] })
   app = useApp()
@@ -43,6 +46,24 @@ async function signIn() {
   await app.refresh(); state.cloud!.userId = 'owner-a'; await nextTick()
 }
 describe('Today automatic content coordination', () => {
+  it('loads both courses concurrently and retains a successful course when the other is empty', async () => {
+    let release!: () => void
+    services.catalog.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve([]) }))
+    const added = { ...structuredClone(externalMaterials[0]!), id: 'external-voa-level2-1',
+      title: 'Intermediate course', sourceUrl: 'https://learningenglish.voanews.com/a/level-two/12345.html' }
+    services.intermediate.mockImplementation(async () => { await db.materials.put(added); return [added] })
+    await db.syncMeta.put({ id: 'owner', value: 'owner-a' })
+    state.cloud!.userId = 'owner-a'; await nextTick()
+    await vi.waitFor(() => expect(services.intermediate).toHaveBeenCalledOnce())
+    expect(services.catalog).toHaveBeenCalledOnce()
+    release(); await app.loadContent()
+    expect(app.catalogState).toBe('partial'); expect(app.contentState).toBe('ready')
+    expect(app.materials.some(m => m.id === added.id)).toBe(true)
+    services.catalog.mockResolvedValueOnce([externalMaterials[0]!])
+    await app.loadContent(true)
+    expect(app.catalogState).toBe('ready')
+    expect(await db.events.count()).toBe(0)
+  })
   it('loads the course directory after login even while initial learning setup is unfinished', async () => {
     const added = { ...structuredClone(externalMaterials[0]!), id: 'external-voa-level1-2',
       title: 'Everyday English · Lesson 2', sourceUrl: 'https://learningenglish.voanews.com/a/lesson-two/12345.html' }
@@ -50,7 +71,7 @@ describe('Today automatic content coordination', () => {
     await db.syncMeta.put({ id: 'owner', value: 'owner-a' })
     state.cloud!.userId = 'owner-a'; await nextTick(); await app.loadContent()
     expect(services.catalog).toHaveBeenCalledOnce()
-    expect(app.catalogState).toBe('ready')
+    expect(app.catalogState).toBe('partial')
     expect(app.materials.some(m => m.id === added.id)).toBe(true)
     expect(app.profile.onboarded).toBe(false)
     expect(services.history).not.toHaveBeenCalled()
@@ -72,7 +93,7 @@ describe('Today automatic content coordination', () => {
     await signIn(); await vi.waitFor(() => expect(app.contentState).toBe('ready'))
     expect(app.catalogState).toBe('error')
     await app.loadContent(true)
-    expect(app.catalogState).toBe('ready')
+    expect(app.catalogState).toBe('partial')
     expect(services.catalog).toHaveBeenCalledTimes(2)
   })
   it('keeps the background check loading after catalog failure until legacy work settles', async () => {
@@ -92,9 +113,9 @@ describe('Today automatic content coordination', () => {
     state.cloud!.userId = 'owner-a'; await nextTick()
     await vi.waitFor(() => expect(services.catalog).toHaveBeenCalledOnce())
     await db.profiles.put({ ...defaultProfile(), onboarded: true }); await app.refresh()
-    await vi.waitFor(() => expect(app.catalogState).toBe('ready'))
+    await vi.waitFor(() => expect(app.catalogState).toBe('partial'))
     release(); await app.loadContent()
-    expect(app.catalogState).toBe('ready'); expect(services.refresh).toHaveBeenCalledOnce()
+    expect(app.catalogState).toBe('partial'); expect(services.refresh).toHaveBeenCalledOnce()
   })
   it('delivers page-only courses even when legacy audio-history synchronization fails', async () => {
     const added = { ...structuredClone(externalMaterials[0]!), id: 'external-voa-level1-2',

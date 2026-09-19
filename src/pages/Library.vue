@@ -421,8 +421,8 @@ async function discover() {
       <template v-else-if="app.catalogState === 'ready'">Course directory loaded. Videos open on the publisher’s website; your practice stays here.</template>
       <template v-else-if="app.catalogState === 'offline'">Offline: saved lessons remain available. The course directory will retry when you reconnect.</template>
       <template v-else-if="!cloud.userId"><RouterLink to="/settings">Sign in to your learning account</RouterLink> to load the course directory. Initial learning setup is not required to browse.</template>
-      <template v-else-if="app.catalogState === 'error' || app.catalogState === 'empty'">
-        {{ app.catalogState === 'error' ? 'The course directory could not load.' : 'The course directory is not available yet.' }} Your saved work is unchanged.
+      <template v-else-if="app.catalogState === 'partial' || app.catalogState === 'error' || app.catalogState === 'empty'">
+        {{ app.catalogState === 'partial' ? 'Some courses loaded; another course directory is unavailable.' : app.catalogState === 'error' ? 'The course directory could not load.' : 'The course directory is not available yet.' }} Your saved work is unchanged.
         <button class="text-button" :disabled="app.contentState === 'loading'" @click="app.loadContent(true)">{{ app.contentState === 'loading' ? 'Finishing background check…' : 'Retry course directory' }}</button>
       </template>
       <template v-else>Preparing the course directory.</template>

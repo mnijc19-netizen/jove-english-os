@@ -4,6 +4,7 @@ import { authenticatedOwner, boundedBody, corsHeaders, digestRequest, GatewayErr
   type OwnerContext, type ServerEnvironment } from './gateway'
 import { createContentAudioServices, inspectContentProviderAccess } from './content-audio'
 import { readOrRefreshExternalCatalog, refreshExternalCatalog } from './external-catalog'
+import { externalCatalogSourceSchema } from '../content/external-catalog'
 import type { ContentFetcher } from './content-network'
 import { validateSourceUrl } from '../content/pipeline'
 import { recordContentLearningUse, runContentRefresh, selectAndPersistContentLessons, type ContentBudget, type ContentRefreshOptions, type PersistedContentSegment } from './content-worker'
@@ -16,7 +17,7 @@ const profileSchema = z.object({ targetDifficulty: z.number().min(0).max(1), fat
 const segmentId = z.string().regex(/^authentic-[a-f0-9]{64}$/u)
 const providerStatusPayload = z.object({ action: z.literal('provider-status') }).strict()
 // Job authority cannot select arbitrary owner actions, even if added later.
-const catalogRefreshPayload = z.object({ action: z.literal('catalog-refresh') }).strict()
+const catalogRefreshPayload = z.object({ action: z.literal('catalog-refresh'), sourceId: externalCatalogSourceSchema.optional() }).strict()
 const catalogJobHeader = 'X-Jove-Catalog-Job'
 const jobPayload = z.union([z.object({}).strict().transform(() => ({ action: 'refresh' as const })), providerStatusPayload, catalogRefreshPayload])
 const payload = z.discriminatedUnion('action', [
@@ -25,7 +26,7 @@ const payload = z.discriminatedUnion('action', [
   z.object({ action: z.literal('history'), segmentId, eventId: z.string().min(1).max(100), event: z.enum(['started','completed','skipped']) }).strict(),
   z.object({ action: z.literal('status') }).strict(),
   providerStatusPayload,
-  z.object({ action: z.literal('external-catalog') }).strict(),
+  z.object({ action: z.literal('external-catalog'), sourceId: externalCatalogSourceSchema.optional() }).strict(),
   catalogRefreshPayload,
   z.object({ action: z.literal('refresh') }).strict(),
 ])
@@ -132,8 +133,9 @@ export function createContentHandler(env: ServerEnvironment, dependencies: {
         const bytes = await boundedBody(request, 256)
         let raw: unknown
         try { raw = JSON.parse(new TextDecoder().decode(bytes)) } catch { throw new GatewayError(400, 'CATALOG_JOB_REQUEST', 'Invalid directory request.') }
-        if (!catalogRefreshPayload.safeParse(raw).success) throw new GatewayError(400, 'CATALOG_JOB_REQUEST', 'Invalid directory request.')
-        return jsonResponse(await refreshExternalCatalog(admin, { fetcher: dependencies.catalogFetcher, now, signal: request.signal }), headers)
+        const catalogJob = catalogRefreshPayload.safeParse(raw)
+        if (!catalogJob.success) throw new GatewayError(400, 'CATALOG_JOB_REQUEST', 'Invalid directory request.')
+        return jsonResponse(await refreshExternalCatalog(admin, { fetcher: dependencies.catalogFetcher, now, signal: request.signal, sourceId: catalogJob.data.sourceId }), headers)
       }
       const scheduled = request.headers.has('X-Jove-Content-Job')
       if (scheduled && request.headers.has('Origin')) throw new GatewayError(403, 'CONTENT_JOB_ORIGIN', 'Browser requests cannot act as the scheduler.')
@@ -146,9 +148,9 @@ export function createContentHandler(env: ServerEnvironment, dependencies: {
       if (!parsed.success) throw new GatewayError(400, scheduled ? 'CONTENT_JOB_REQUEST' : 'CONTENT_REQUEST', 'Invalid content request.')
       const body = parsed.data
       if (body.action === 'external-catalog') return jsonResponse(await readOrRefreshExternalCatalog(context.admin,
-        { fetcher: dependencies.catalogFetcher, now, signal: request.signal }), headers)
+        { fetcher: dependencies.catalogFetcher, now, signal: request.signal, sourceId: body.sourceId }), headers)
       if (body.action === 'catalog-refresh') return jsonResponse(await refreshExternalCatalog(context.admin,
-        { fetcher: dependencies.catalogFetcher, now, signal: request.signal }), headers)
+        { fetcher: dependencies.catalogFetcher, now, signal: request.signal, sourceId: body.sourceId }), headers)
       if (body.action === 'provider-status') return jsonResponse(await inspectContentProviderAccess({
         env, fetcher: dependencies.providerFetch, now, signal: request.signal,
       }), headers)
