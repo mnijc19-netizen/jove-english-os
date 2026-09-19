@@ -46,6 +46,77 @@ async function signIn() {
   await app.refresh(); state.cloud!.userId = 'owner-a'; await nextTick()
 }
 describe('Today automatic content coordination', () => {
+  async function assignedExternalDraft() {
+    const original = app.plan.tasks.find(task => task.kind === 'listen')!
+    await app.beginTask(original.id)
+    const session = { id: 'unavailable-draft', kind: 'listen', materialId: original.materialId!, stage: '1', startedAt: Date.now(),
+      draft: { taskId: original.id, answer: 'Keep my original answer', audioId: 'saved-original-audio', externalExpression: 'my expression' } }
+    await db.sessions.add(session)
+    return { original, session, before: (await db.plans.get(app.plan.id))! }
+  }
+  it('atomically replaces an inaccessible assignment without completing it, losing work or increasing daily time', async () => {
+    const { original, session, before } = await assignedExternalDraft()
+    const skills = await db.skills.toArray(), cards = await db.cards.toArray()
+    const next = await app.replaceUnavailableExternalLesson(session.id, original.materialId!, original.id)
+    expect(next?.path).toBe('/listen')
+    expect(next?.query.material).not.toBe(original.materialId)
+    const selected = await db.materials.get(next!.query.material!)
+    expect(selected?.externalStudy).toBeDefined(); expect(selected?.synthetic).toBe(false)
+    expect(selected?.externalStudy?.publisher).not.toBe((await db.materials.get(original.materialId!))?.externalStudy?.publisher)
+    const saved = (await db.plans.get(before.id))!
+    expect(saved.minutes).toBeLessThanOrEqual(before.minutes)
+    expect(saved.tasks.find(task => task.id === original.id)).toMatchObject({ optional: true, done: false, materialId: original.materialId })
+    expect(saved.tasks.find(task => task.id === next?.query.task)).toMatchObject({ done: false, materialId: next?.query.material })
+    expect(saved.tasks.filter(task => task.id !== original.id && task.id !== next?.query.task)).toEqual(before.tasks.filter(task => task.id !== original.id))
+    expect(await db.sessions.get(session.id)).toEqual(session)
+    expect(await db.skills.toArray()).toEqual(skills); expect(await db.cards.toArray()).toEqual(cards)
+    expect((await db.events.toArray()).filter(event => event.type === 'EXTERNAL_LINK_UNAVAILABLE')).toHaveLength(1)
+    expect((await db.events.toArray()).some(event => event.type === 'TASK_COMPLETED')).toBe(false)
+    await app.refresh()
+    expect(await app.replaceUnavailableExternalLesson(session.id, original.materialId!, original.id)).toEqual(next)
+    expect((await db.events.toArray()).filter(event => event.type === 'EXTERNAL_LINK_UNAVAILABLE')).toHaveLength(1)
+  })
+  it('rolls back access reports and assignment changes when saving the replacement fails', async () => {
+    const { original, session, before } = await assignedExternalDraft()
+    const events = await db.events.toArray()
+    const put = vi.spyOn(db.plans, 'put').mockRejectedValueOnce(new Error('storage unavailable'))
+    await expect(app.replaceUnavailableExternalLesson(session.id, original.materialId!, original.id)).rejects.toThrow()
+    put.mockRestore()
+    expect(await db.plans.get(before.id)).toEqual(before)
+    expect(await db.events.toArray()).toEqual(events)
+    expect(await db.sessions.get(session.id)).toEqual(session)
+  })
+  it('rejects account changes during replacement without publishing the report or plan', async () => {
+    const { original, session, before } = await assignedExternalDraft()
+    const events = await db.events.toArray(), add = db.events.add.bind(db.events)
+    const write = vi.spyOn(db.events, 'add').mockImplementation(event => add(event).then(id => {
+      if (event.type === 'EXTERNAL_LINK_UNAVAILABLE') state.cloud!.userId = 'changed-owner'
+      return id
+    }))
+    await expect(app.replaceUnavailableExternalLesson(session.id, original.materialId!, original.id)).rejects.toThrow()
+    write.mockRestore()
+    expect(await db.plans.get(before.id)).toEqual(before)
+    expect(await db.events.toArray()).toEqual(events)
+  })
+  it('rolls back a replacement cancelled while its transaction is still committing', async () => {
+    const { original, session, before } = await assignedExternalDraft()
+    const events = await db.events.toArray(), put = db.plans.put.bind(db.plans), controller = new AbortController()
+    const write = vi.spyOn(db.plans, 'put').mockImplementation(plan => put(plan).then(id => { controller.abort(); return id }))
+    await expect(app.replaceUnavailableExternalLesson(session.id, original.materialId!, original.id, controller.signal)).rejects.toThrow()
+    write.mockRestore()
+    expect(await db.plans.get(before.id)).toEqual(before)
+    expect(await db.events.toArray()).toEqual(events)
+    expect(await db.sessions.get(session.id)).toEqual(session)
+  })
+  it('keeps the original work when the only alternatives are too hard or synthetic', async () => {
+    const { original, session, before } = await assignedExternalDraft()
+    const events = await db.events.toArray()
+    await db.materials.bulkPut((await db.materials.toArray()).filter(m => m.id !== original.materialId && m.externalStudy).map(m => ({ ...m, difficulty: 1 })))
+    expect(await app.replaceUnavailableExternalLesson(session.id, original.materialId!, original.id)).toBeNull()
+    expect(await db.plans.get(before.id)).toEqual(before)
+    expect(await db.events.toArray()).toEqual(events)
+    expect(await db.sessions.get(session.id)).toEqual(session)
+  })
   it('loads both courses concurrently and retains a successful course when the other is empty', async () => {
     let release!: () => void
     services.catalog.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve([]) }))

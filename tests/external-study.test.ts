@@ -1,11 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { externalMaterials, externalPracticeReady, externalLessonCandidates } from '../src/content/external'
+import { externalMaterials, externalPracticeReady, externalLessonCandidates, unavailableExternalIds } from '../src/content/external'
 import { materialSchema } from '../src/db/schema'
 import { aggregateSkills, makePlan } from '../src/domain/engine'
 import { defaultProfile, type StudyEvent } from '../src/domain/types'
 import { demoMaterials } from '../src/content/materials'
 
 describe('publisher-linked guided lessons', () => {
+  it('treats access problems as temporary exclusions, never learning or site-wide proof', () => {
+    const now = Date.UTC(2026, 8, 20), material = externalMaterials[0]!
+    const report: StudyEvent = { id: 'unavailable', sessionId: 'draft', type: 'EXTERNAL_LINK_UNAVAILABLE',
+      source: 'self-report', timestamp: now, data: { materialId: material.id, issue: 'cannot-open', playbackObserved: false } }
+    expect([...unavailableExternalIds([report], now)]).toEqual([material.id])
+    expect(externalLessonCandidates(externalMaterials, [report], now).some(m => m.id === material.id)).toBe(false)
+    expect(externalLessonCandidates(externalMaterials, [report], now).length).toBeGreaterThan(0)
+    expect(unavailableExternalIds([report], now + 86400000).size).toBe(0)
+    expect(unavailableExternalIds([{ ...report, timestamp: now + 1 }], now).size).toBe(0)
+    expect(unavailableExternalIds([{ ...report, source: 'objective' }], now).size).toBe(0)
+    expect(aggregateSkills([report]).every(skill => skill.evidenceCount === 0)).toBe(true)
+  })
   it('stores only validated page metadata and original prompts, never media or copied text', () => {
     expect(externalMaterials).toHaveLength(4)
     expect(new Set(externalMaterials.map(m => m.id)).size).toBe(4)

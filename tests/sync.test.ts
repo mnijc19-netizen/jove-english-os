@@ -6,6 +6,7 @@ import { createClient } from '@supabase/supabase-js'
 import { db as repositoryDatabase, JoveDatabase, version1Stores } from '../src/db/db'
 import { defaultProfile, defaultSettings, type Chunk, type StudyEvent, type Material, type DailyPlan } from '../src/domain/types'
 import { makePlan } from '../src/domain/engine'
+import { externalMaterials } from '../src/content/external'
 import { planSchema } from '../src/db/schema'
 import { canonical, changedFields, eventOccurrenceKey, isPrivateAudio, parseOperation, projectOperations, withoutCacheAudioReferences, type RecordValue, type StoredOperation, type SyncOperation } from '../src/sync/protocol'
 import { SyncJournal, resolveEventAliases } from '../src/sync/journal'
@@ -660,6 +661,38 @@ describe('review regressions: fields, deletions and dependency closure', () => {
     expect((await db.profiles.get('main'))!.onboarded).toBe(true)
     expect((await db.settings.get('main'))!.value.theme).toBe('dark')
     expect(await journal.pending()).toEqual([])
+  })
+  it('keeps an explicit external alternative and original draft when a stale device resends the old plan', async () => {
+    const at = new Date(2026, 8, 20, 12).getTime(), materials = structuredClone(externalMaterials)
+    const profile = { ...defaultProfile(), createdAt: at - 1000, onboarded: true }
+    const initial = makePlan(profile, [], [], [], materials, undefined, at)
+    const old = initial.tasks.find(task => task.kind === 'listen')!
+    const draft = { id: 'original-external-attempt', kind: 'listen', materialId: old.materialId, startedAt: at,
+      stage: '1', draft: { taskId: old.id, answer: 'Unfinished original idea', audioId: 'kept-original-recording' } }
+    const report: StudyEvent = { id: 'external-access-problem', type: 'EXTERNAL_LINK_UNAVAILABLE', source: 'self-report', sessionId: draft.id,
+      timestamp: at + 1, data: { materialId: old.materialId!, taskId: old.id, issue: 'cannot-open', playbackObserved: false } }
+    const selected = makePlan(profile, [], [], [report], materials.filter(m => m.id !== old.materialId), undefined, at + 2).tasks.find(task => task.kind === 'listen')!
+    const next = { ...selected, id: `${initial.date}:listen:${selected.materialId}:alt:${draft.id}`, minutes: old.minutes }
+    const replacement = { ...initial, tasks: initial.tasks.flatMap(task => task.id === old.id ? [{ ...task, optional: true }, next] : [task]) }
+    expect(next.materialId).not.toBe(old.materialId)
+    const started = (task: typeof old, timestamp: number): StudyEvent => ({ id: `started:${task.id}`, type: 'TASK_STARTED',
+      source: 'objective', timestamp, data: { taskId: task.id, kind: 'listen', materialId: task.materialId! } })
+    const history = [...materials.map(row => op('materials', row as unknown as RecordValue)), op('plans', initial as unknown as RecordValue),
+      op('audioMetadata', { id: draft.draft.audioId, mimeType: 'audio/wav', createdAt: at, duration: 1, kind: 'recording', processed: false, label: 'Preserved recording' }),
+      op('sessions', draft, 2), op('events', started(old, at) as unknown as RecordValue, 3),
+      op('plans', replacement as unknown as RecordValue, 4, deviceA, initial as unknown as RecordValue),
+      op('events', report as unknown as RecordValue, 5), op('events', started(next, at + 2) as unknown as RecordValue, 6),
+      op('plans', initial as unknown as RecordValue, 8, deviceB)]
+    for (const input of [history, [...history].reverse()]) {
+      const projection = await projectOperations(input), merged = planSchema.parse(projection.records.plans[0])
+      expect(merged.tasks.find(task => task.id === old.id)).toMatchObject({ optional: true, done: false })
+      expect(merged.tasks.find(task => task.id === next.id)).toMatchObject({ done: false, materialId: next.materialId })
+      expect(projection.records.sessions.find(session => session.id === draft.id)).toEqual(draft)
+      expect(merged.minutes).toBeLessThanOrEqual(initial.minutes)
+      const planned = makePlan(profile, [], [], [report, started(old, at), started(next, at + 2)], materials, merged, at + 3)
+      expect(planned.tasks.find(task => task.kind === 'listen' && !task.optional)?.id).toBe(next.id)
+      expect(projection.records.events.some(event => event.type === 'TASK_COMPLETED')).toBe(false)
+    }
   })
   it('recomputes coupled plan minutes after concurrent valid task changes', async () => {
     const base = { id: 'plan', date: '2026-09-08', minutes: 90, focus: 'naturalListening', tasks: [{ id: 't', kind: 'listen', title: 'Listen', minutes: 90, reason: 'practice', done: false }], evidenceFingerprint: 'a', createdAt: now }

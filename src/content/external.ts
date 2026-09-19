@@ -43,6 +43,13 @@ function voaCoursePosition(material: Material): { course: string; position: numb
 }
 
 export const EXTERNAL_CATALOG_MAX_AGE = 90 * 86_400_000
+/** A learner's temporary access problem is not a publisher outage or skill result. */
+export function unavailableExternalIds(events: StudyEvent[], now: number): Set<string> {
+  return new Set(events.filter(event => event.type === 'EXTERNAL_LINK_UNAVAILABLE' && event.source === 'self-report'
+    && !!event.sessionId && Number.isFinite(event.timestamp) && event.timestamp <= now && event.timestamp > now - 86_400_000
+    && event.data?.issue === 'cannot-open' && event.data.playbackObserved === false
+    && typeof event.data.materialId === 'string' && !!event.data.materialId.trim()).map(event => String(event.data!.materialId)))
+}
 /** Catalog-only links expire for new assignments, not for saved work or static seeds. */
 export function externalCatalogFresh(material: Material, now: number): boolean {
   if (!/^external-voa-level[12]-/u.test(material.id)) return true
@@ -53,7 +60,8 @@ export function externalCatalogFresh(material: Material, now: number): boolean {
 
 /** Participation history selects new input; it never awards mastery or changes FSRS. */
 export function externalLessonCandidates(materials: Material[], events: StudyEvent[], now: number): Material[] {
-  const eligible = materials.filter(m => m.approved && m.externalStudy && !m.synthetic && externalCatalogFresh(m, now))
+  const unavailable = unavailableExternalIds(events, now)
+  const eligible = materials.filter(m => m.approved && m.externalStudy && !m.synthetic && !unavailable.has(m.id) && externalCatalogFresh(m, now))
   const ids = new Set(eligible.map(m => m.id))
   const lastPractice = new Map<string, number>()
   for (const event of events) {

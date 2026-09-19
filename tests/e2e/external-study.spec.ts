@@ -125,6 +125,33 @@ test('external lesson saves a guided draft without media downloads or invented a
   expect(Math.abs(title!.x-description!.x)).toBeLessThan(1)
 })
 
+test('an unavailable external lesson gets an automatic alternative without completing or erasing the original draft', async ({ page }) => {
+  await page.goto('#/')
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  // Open an assigned external task through its actual Today route.
+  await page.getByRole('button', { name: 'Start today’s practice', exact: true }).click()
+  // The first task can be Review on other fixtures; this fresh workspace starts listening.
+  await expect(page).toHaveURL(/#\/listen\?/u)
+  const originalUrl = page.url()
+  await expect(page.getByRole('button', { name: 'This lesson won’t open — choose an alternative' })).toBeVisible()
+  await page.locator('#external-summary').fill('Keep this unfinished thought even if the publisher page fails.')
+  await page.getByRole('button', { name: 'This lesson won’t open — choose an alternative' }).click()
+  await expect(page).not.toHaveURL(originalUrl)
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  const originalMaterial = new URL(originalUrl.replace('#', '')).searchParams.get('material')!
+  const sessions = await records(page, 'sessions') as unknown as StudySession[]
+  expect(sessions.some(session => session.materialId === originalMaterial && !session.completedAt
+    && session.draft.answer === 'Keep this unfinished thought even if the publisher page fails.')).toBe(true)
+  const events = await records(page, 'events') as unknown as StudyEvent[]
+  expect(events.filter(event => event.type === 'EXTERNAL_LINK_UNAVAILABLE')).toHaveLength(1)
+  expect(events.some(event => ['TASK_COMPLETED', 'EXTERNAL_LISTEN_REFLECTION'].includes(event.type))).toBe(false)
+  const replacementUrl = page.url()
+  await page.reload()
+  await expect(page).toHaveURL(replacementUrl)
+  await page.goto(originalUrl)
+  await expect(page.locator('#external-summary')).toHaveValue('Keep this unfinished thought even if the publisher page fails.')
+})
+
 test.describe('external spoken retell',()=>{
   test.use({captureMode:'synthetic'})
   // Windows WebKit has no audio APIs; Linux CI validates its real PCM recorder.

@@ -1,6 +1,6 @@
 import { skillNames, type DailyPlan, type Material, type Profile, type ReviewCard, type Skill, type SkillName, type StudyEvent, type PlanTask } from './types'
 import { startedTaskIds, planLongitudinal } from './longitudinal'
-import { externalLessonCandidates, externalCatalogFresh } from '../content/external'
+import { externalLessonCandidates, externalCatalogFresh, unavailableExternalIds } from '../content/external'
 
 // Scores, strengths, confidence and fatigue use 0..1, matching the shared UI/provider contract.
 const day = 86_400_000
@@ -138,7 +138,8 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
     return interest - Math.abs(m.difficulty - targetDifficulty) * 4 - exposure * 0.5
   }
   const approved = materials.filter(m => m.approved)
-  const availableMaterials = approved.filter(m => externalCatalogFresh(m, now))
+  const unavailable = unavailableExternalIds(ordered, now)
+  const availableMaterials = approved.filter(m => externalCatalogFresh(m, now) && !(m.externalStudy && unavailable.has(m.id)))
   const approachable = availableMaterials.filter(m => m.difficulty <= Math.min(1, targetDifficulty + 0.25))
   // Screened, approachable human speech leads normal listening. A hard authentic
   // recording does not displace a comprehensible bridge simply for being human.

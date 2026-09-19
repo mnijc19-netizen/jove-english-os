@@ -71,6 +71,7 @@ const material = computed(() => app.materials.find(m => m.id === materialId.valu
 const externalReady = computed(() => externalPracticeReady({ listened: draft.listened, answer: draft.answer,
   expression: draft.externalExpression, example: draft.externalExample, audioId: draft.audioId }));
 const externalLocked = computed(() => !!draft.externalReflection || !!completedAt.value);
+let externalReplacement: AbortController | undefined;
 const blobUrl = ref(""), hydrating = ref(true), restoreFailed = ref(false), localError = ref(""), working = ref(false), repeating = ref(false);
 const audioLoading = ref(false), audioError = ref(""), audioReload = ref(0), audioTransient = ref(false);
 const { busy, error, run, cancel } = useRequest();
@@ -563,6 +564,26 @@ function externalStep(next: number) {
   if (next === 1 && (!draft.listened || !draft.answer.trim()) || next === 2 && (!draft.externalExpression.trim() || !draft.externalExample.trim())) return;
   return safely(async () => { stage.value = next; await save(); });
 }
+function replaceExternalLesson() {
+  if (captureActive.value || externalLocked.value || !material.value?.externalStudy) return;
+  return safely(async () => {
+    const token = generation, sessionId = sid.value, id = materialId.value, taskId = draft.taskId;
+    const controller = new AbortController(); externalReplacement = controller;
+    let next;
+    try {
+      await save(); await flushEvidence();
+      if (controller.signal.aborted || token !== generation || disposed) return;
+      next = await app.replaceUnavailableExternalLesson(sessionId, id, taskId, controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      throw error;
+    }
+    finally { if (externalReplacement === controller) externalReplacement = undefined; }
+    if (controller.signal.aborted || token !== generation || disposed) return;
+    if (!next) { localError.value = 'No suitable alternative is available right now. Your draft and recording are saved; you can retry this source later or return to Today.'; return; }
+    await router.push(next);
+  });
+}
 function finish() {
   if (captureActive.value) return;
   return safely(async () => {
@@ -592,6 +613,7 @@ async function retrySave() {
   await safely(async () => { await save(); await flushEvidence(); });
 }
 async function beforeNavigation() {
+  externalReplacement?.abort();
   if (captureActive.value) { localError.value = "Finish or cancel the recording/assessment before leaving."; return false; }
   try { await flushListeningTime(); await save(); }
   catch {
@@ -644,6 +666,7 @@ onMounted(() => {
   }, 1000);
 });
 onBeforeUnmount(() => {
+  externalReplacement?.abort();
   disposed = true; generation++; repeating.value = false; cancel(); cancelLookup();
   window.removeEventListener("keydown", hotkey);
   clearInterval(listeningTimer);
@@ -670,6 +693,8 @@ onBeforeUnmount(() => {
       <h2>{{ material.title }}</h2>
       <p class="help-text">{{ material.externalStudy.publisher }} · {{ material.externalStudy.level }} · opens on the original website. Internet required for its audio.</p>
       <p>{{ material.externalStudy.mission }}</p>
+      <button class="text-button" :disabled="working || captureActive || externalLocked" @click="replaceExternalLesson">This lesson won’t open — choose an alternative</button>
+      <p class="help-text">Your current draft and recording stay saved. An access problem is not a completed lesson or a lower ability score.</p>
       <div class="step-strip"><span :class="{ active: stage === 0 }">01 · Listen</span><span :class="{ active: stage === 1 }">02 · Notice</span><span :class="{ active: stage === 2 }">03 · Retell</span></div>
       <div v-if="stage === 0" class="response-area">
       <h3>1 · Listen, then return</h3>

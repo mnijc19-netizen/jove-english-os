@@ -22,9 +22,9 @@ import {
   type Assessment,
 } from "../domain/types";
 import { demoMaterials } from "../content/materials";
-import { externalMaterials } from "../content/external";
+import { externalMaterials, externalLessonCandidates } from "../content/external";
 import { OpenRouterProvider } from "../ai/provider";
-import { profileSchema, settingsSchema } from "../db/schema";
+import { eventSchema, planSchema, profileSchema, settingsSchema } from "../db/schema";
 import { useCloud } from "./cloud";
 import { CloudProvider, routeProvider } from "../ai/cloud-provider";
 import { flushContentHistory, prepareContentAudio, refreshContentLessons, refreshExternalCourseCatalog } from "../cloud/content";
@@ -357,6 +357,64 @@ export const useApp = defineStore("app", () => {
     await beginTask(next.id);
     return taskPath(next);
   }
+  async function replaceUnavailableExternalLesson(sessionId: string, materialId: string, taskId: string, signal?: AbortSignal) {
+    const userId = useCloud().userId, owner = (await db.syncMeta.get('owner'))?.value;
+    const next = await db.transaction('rw', [db.plans, db.profiles, db.skills, db.cards, db.events, db.materials, db.sessions, db.syncMeta], async () => {
+      const assertOwner = async () => {
+        signal?.throwIfAborted();
+        if (useCloud().userId !== userId || (await db.syncMeta.get('owner'))?.value !== owner) throw new Error('Learning account changed');
+        signal?.throwIfAborted();
+      };
+      await assertOwner();
+      const session = await db.sessions.get(sessionId), now = Date.now(), date = new Date(now).toLocaleDateString('en-CA');
+      if (!session || session.kind !== 'listen' || session.materialId !== materialId || session.completedAt
+        || String(session.draft.taskId ?? '') !== taskId) throw new Error('Listening attempt changed');
+      const [profile, skills, cards, events, materials, previous] = await Promise.all([
+        db.profiles.get('main'), db.skills.toArray(), db.cards.toArray(), db.events.toArray(), db.materials.toArray(), db.plans.get(date),
+      ]);
+      if (!materials.some(m => m.id === materialId && m.externalStudy)) throw new Error('Not an external lesson');
+      const current = previous ?? makePlan(profile ?? defaultProfile(), skills, cards, events, materials, undefined, now);
+      const assigned = taskId ? current.tasks.find(task => task.id === taskId && task.materialId === materialId && task.kind === 'listen') : undefined;
+      if (taskId && (!assigned || assigned.done || events.some(event => event.type === 'TASK_COMPLETED' && event.data?.taskId === taskId))) throw new Error('Assignment changed');
+      const eventId = `${sessionId}:unavailable:${date}`, existing = events.find(event => event.id === eventId);
+      if (assigned?.optional && existing?.data?.replacementTaskId) {
+        const replacement = current.tasks.find(task => task.id === existing.data!.replacementTaskId && !task.done);
+        await assertOwner();
+        return replacement ? taskPath(replacement) : { path: '/', query: {} };
+      }
+      const report = eventSchema.parse({ id: eventId, type: 'EXTERNAL_LINK_UNAVAILABLE', source: 'self-report', timestamp: now,
+        sessionId, data: { materialId, taskId, issue: 'cannot-open', playbackObserved: false } });
+      const history = [...events, ...(existing ? [] : [report])];
+      const target = planLongitudinal({ profile: profile ?? defaultProfile(), skills, cards, events: history, materials, now }).adjustments.targetDifficulty;
+      const suitable = externalLessonCandidates(materials.filter(m => m.id !== materialId && m.difficulty <= Math.min(1, target + 0.25)), history, now);
+      const publisher = materials.find(m => m.id === materialId)?.externalStudy?.publisher;
+      const otherSource = suitable.filter(m => m.externalStudy?.publisher !== publisher);
+      const pool = otherSource.length ? otherSource : suitable;
+      if (!pool.length) return null;
+      // Select without unrelated active-task bindings, then preserve every other
+      // assignment exactly. Never fall back to a too-hard or synthetic lesson.
+      const selected = makePlan(profile ?? defaultProfile(), skills, cards, history, pool, undefined, now).tasks.find(task => task.kind === 'listen' && task.materialId);
+      if (!selected) return null;
+      const replacement = { ...selected, id: `${date}:listen:${selected.materialId}:alt:${sessionId}`, minutes: assigned?.minutes ?? selected.minutes };
+      const required = assigned && !assigned.optional;
+      const proposed = required ? { ...current, tasks: current.tasks.flatMap(task => task.id === taskId ? [{ ...task, optional: true }, replacement] : [task]) } : current;
+      if (proposed.tasks.length > 100) return null;
+      // These fixed non-scoring facts change no skill/card projection. Keep the
+      // report, assignment and start marker atomic; never complete the old task.
+      await assertOwner();
+      if (!existing) await db.events.add(eventSchema.parse({ ...report, data: { ...report.data, ...(required ? { replacementTaskId: replacement.id } : {}) } }));
+      if (required) {
+        await db.plans.put(planSchema.parse(proposed));
+        const startedId = `started:${replacement.id}`;
+        if (!await db.events.get(startedId)) await db.events.add(eventSchema.parse({ id: startedId, type: 'TASK_STARTED', source: 'objective',
+          timestamp: now, data: { taskId: replacement.id, kind: 'listen', materialId: replacement.materialId! } }));
+      }
+      await assertOwner();
+      return required ? taskPath(replacement) : { path: '/listen', query: { material: replacement.materialId! } };
+    });
+    await refresh();
+    return next;
+  }
   async function completeTask(
     kind: string,
     identity: { taskId?: string; materialId?: string; activity?: 'reading' | 'chunks' } = {},
@@ -469,6 +527,7 @@ export const useApp = defineStore("app", () => {
     completeTask,
     beginTask,
     continueAssignment,
+    replaceUnavailableExternalLesson,
     provider,
     generatedSpeech,
     contentState,
