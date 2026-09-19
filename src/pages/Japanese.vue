@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { db as english, createLanguageDatabase } from '../db/db'
 import { createJapaneseWorkspace, japanesePracticeDraft, type JapanesePracticeStep } from '../db/japanese'
@@ -9,8 +9,10 @@ import { readLanguageDay } from '../db/language-day'
 import type { Assessment, AudioAsset, DailyPlan, StudySession } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
 import { useRecordingUrl } from '../composables/useRecordingUrl'
+import { useJapaneseSpace } from '../stores/japanese-space'
 
 const route = useRoute(), router = useRouter()
+const space = useJapaneseSpace()
 const database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, english)
 const ready = ref(false), busy = ref(false), navigating = ref(false), error = ref(''), notice = ref(''), captureActive = ref(false)
 const assessment = shallowRef<Assessment>(), plan = shallowRef<DailyPlan | null>(null), session = shallowRef<StudySession>()
@@ -135,6 +137,12 @@ async function safeLeave(to: { fullPath: string }) {
   } catch { error.value = '输入尚未保存，暂未离开此页。请重试保存。'; return false }
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value) { event.preventDefault(); event.returnValue = '' } }
+async function openPage() { await space.ensure(); await learning.open(); await refresh(); await loadSession(route.query.session); ready.value = true }
+watch(() => space.revision, () => {
+  // Refresh recommendations, never replace an open/dirty answer with a remote
+  // draft. Its revision/repetition guard provides explicit conflict recovery.
+  if (ready.value && !session.value && !dirty.value && !busy.value && !navigating.value) void act(refresh)
+})
 onBeforeRouteLeave(safeLeave)
 onBeforeRouteUpdate(async to => {
   if (!await safeLeave(to)) return false
@@ -146,7 +154,7 @@ onBeforeRouteUpdate(async to => {
 })
 onMounted(() => {
   window.addEventListener('beforeunload', beforeUnload)
-  void act(async () => { await learning.open(); await refresh(); await loadSession(route.query.session); ready.value = true })
+  void act(openPage)
 })
 onBeforeUnmount(() => {
   disposed = true; ++navigationGeneration; clearTimeout(timer); window.removeEventListener('beforeunload', beforeUnload)
@@ -158,8 +166,9 @@ onBeforeUnmount(() => {
 <template>
   <div class="page japanese-page">
     <div class="page-heading"><div><p class="eyebrow">JAPANESE · 日语学习</p><h1 tabindex="-1">每天一点，真的用得上。</h1></div><RouterLink to="/today" class="text-button">返回英语</RouterLink></div>
-    <p class="help-text">开发预览：本页尚未开放到正式网站。日语云同步和 AI 反馈仍在接入。</p>
-    <p v-if="error" class="error" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="act(flush)">重试保存</button></p>
+    <p class="help-text">开发预览：本页尚未开放到正式网站。日语 AI 反馈和正式云端验收仍在接入。</p>
+    <p class="help-text" role="status">日语：{{ space.status }} <span v-if="space.problem"> · {{ space.problem }}</span></p>
+    <p v-if="error" class="error" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="act(ready ? flush : openPage)">{{ ready ? '重试保存' : '重试打开日语区' }}</button></p>
     <p v-if="!ready" role="status">正在打开独立的日语学习记录…</p>
     <template v-else>
       <p class="help-text" role="status">{{ notice }}</p>

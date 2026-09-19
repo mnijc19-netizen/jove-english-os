@@ -8,8 +8,10 @@ import { japaneseStarterLessons } from '../content/japanese'
 import type { AudioAsset, Chunk, Material, ReviewCard, StudySession } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
 import { useRecordingUrl } from '../composables/useRecordingUrl'
+import { useJapaneseSpace } from '../stores/japanese-space'
 
 const route = useRoute(), database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, english)
+const space = useJapaneseSpace()
 const session = shallowRef<StudySession>(), cards = shallowRef<ReviewCard[]>([]), chunks = shallowRef<Chunk[]>([]), materials = shallowRef<Material[]>([])
 const audio = shallowRef<AudioAsset[]>([]), busy = ref(false), active = ref(false), dirty = ref(false), error = ref(''), notice = ref('')
 const response = reactive({ response: '', audioId: '', heard: false })
@@ -97,6 +99,7 @@ async function safeLeave() {
   finally { busy.value = false }
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value) { event.preventDefault(); event.returnValue = '' } }
+async function openPage() { await space.ensure(); await learning.open(); await load(route.query.session) }
 onBeforeRouteLeave(safeLeave)
 onBeforeRouteUpdate(async to => {
   if (!await safeLeave()) return false
@@ -107,7 +110,7 @@ onBeforeRouteUpdate(async to => {
 })
 onMounted(() => {
   window.addEventListener('beforeunload', beforeUnload)
-  void act(async () => { await learning.open(); await load(route.query.session) })
+  void act(openPage)
 })
 onBeforeUnmount(() => {
   disposed = true; clearTimeout(timer); window.removeEventListener('beforeunload', beforeUnload)
@@ -119,7 +122,8 @@ onBeforeUnmount(() => {
   <div class="page">
     <div class="page-heading"><div><p class="eyebrow">JAPANESE · 延迟复习</p><h1 tabindex="-1">先想起来，再对照。</h1></div><RouterLink to="/ja" class="text-button">返回日语今日安排</RouterLink></div>
     <p class="help-text">中文帮助理解任务；认得汉字、听懂声音和自己说出来分别练。这里只根据自评安排复习，不给能力或发音分数。</p>
-    <p v-if="error" class="error" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="act(flush)">重试保存</button> <button v-if="session && item" class="text-button" :disabled="busy || active" @click="act(recover)">保留首答，略过已变动卡片</button></p>
+    <p class="help-text" role="status">日语：{{ space.status }} <span v-if="space.problem"> · {{ space.problem }}</span></p>
+    <p v-if="error" class="error" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="act(session ? flush : openPage)">{{ session ? '重试保存' : '重试打开日语区' }}</button> <button v-if="session && item" class="text-button" :disabled="busy || active" @click="act(recover)">保留首答，略过已变动卡片</button></p>
     <p class="help-text" role="status">{{ notice }}</p>
     <section v-if="session?.completedAt" class="panel ja-review-panel">
       <h2>这一小组已保存</h2><p>已保存本次回答。只更新已评分卡片的复习时间；有进度冲突的卡片保留另一份记录，不重复计分。剩余学习时间交给系统安排。</p>

@@ -7,7 +7,7 @@ import { allocateLanguageDay, languageDatabases, type LanguageDay } from '../dom
  * database is created merely by opening the English app. */
 export async function readLanguageDay(english: JoveDatabase, now: number, japanese?: JoveDatabase) {
   if (english.language !== 'en' || japanese && japanese.language !== 'ja') throw new Error('Wrong daily-plan language partition')
-  if (!japanese && !await Dexie.exists(languageDatabases.ja)) return null
+  if (!japanese && !(await Dexie.getDatabaseNames()).includes(languageDatabases.ja)) return null
   const other = japanese ?? createLanguageDatabase('ja')
   try {
     const read = (database: JoveDatabase) => database.transaction('r', database.profiles, database.events, database.cards, database.plans, database.syncMeta, async () => {

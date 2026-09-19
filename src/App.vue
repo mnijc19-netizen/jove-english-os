@@ -5,8 +5,10 @@ import { registerSW } from "virtual:pwa-register";
 import { useApp } from "./stores/app";
 import Icon from "./components/Icon.vue";
 import { useCloud } from "./stores/cloud";
+import { useJapaneseSpace } from "./stores/japanese-space";
 const cloud = useCloud();
 const japanesePreview = import.meta.env.DEV;
+const japanese = japanesePreview ? useJapaneseSpace() : null;
 const app = useApp(),
   route = useRoute(),
   menu = ref(false),
@@ -45,6 +47,10 @@ const nav = [
   "Progress",
 ];
 const page = computed(() => route.path.slice(1) || "today");
+const inJapanese = computed(() => route.path === '/ja' || route.path.startsWith('/ja/'));
+watch(() => app.ready, ready => {
+  if (ready && japanese) void japanese.startIfPresent(app.refresh).catch(() => { /* The separate Japanese status exposes the recoverable failure. */ });
+});
 const update = registerSW({
   onNeedReload: reloadAfterUpdate,
   onNeedRefresh: () => {
@@ -138,8 +144,11 @@ function focusPractice() {
         ></RouterLink
       >
       <p class="nav-label">YOUR WORKSPACE</p>
-      <RouterLink v-if="japanesePreview" to="/ja" class="nav-item">日语 · 开发预览</RouterLink>
-      <nav aria-label="Main navigation">
+      <div v-if="japanesePreview" class="language-links" aria-label="学习语言">
+        <RouterLink to="/today" :aria-current="!inJapanese ? 'true' : undefined" class="nav-item">English · 英语</RouterLink>
+        <RouterLink to="/ja" :aria-current="inJapanese ? 'true' : undefined" class="nav-item">日本語 · 日语预览</RouterLink>
+      </div>
+      <nav v-if="!inJapanese" aria-label="Main navigation">
         <RouterLink
           v-for="item in nav"
           :key="item"
@@ -152,10 +161,11 @@ function focusPractice() {
           ><span v-if="item === 'Today'" class="nav-dot"></span
         ></RouterLink>
       </nav>
+      <nav v-else aria-label="日语导航"><RouterLink to="/ja" class="nav-item"><Icon name="today" />今日任务与复习</RouterLink></nav>
       <div class="sidebar-bottom">
         <div class="local-note">
           <Icon name="shield" :size="18" /><span
-            >Your space. Your progress.<small role="status">{{ cloud.status }}</small></span
+            >Your space. Your progress.<small role="status">{{ inJapanese && japanese ? japanese.status : cloud.status }}</small></span
           >
         </div>
         <RouterLink to="/settings" class="nav-item"
@@ -167,7 +177,7 @@ function focusPractice() {
           }}</span>
           <div>
             <strong>{{ app.profile.name }}</strong
-            ><small>English, a little more natural.</small>
+            ><small>{{ inJapanese ? '日语，一点点用起来。' : 'English, a little more natural.' }}</small>
           </div>
           <button
             class="icon-button"

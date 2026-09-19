@@ -10,7 +10,8 @@ import { accountRequest, bindSyncAccess } from '../sync/access'
 import { protectedLocalChange } from '../sync/local-change'
 
 /** Exported to exercise the real store against isolated databases and SDK clients. */
-export function createCloudState(database: JoveDatabase = db, client: SupabaseClient | null = cloudClient, config: PublicCloudConfig = publicCloudConfig) {
+export function createCloudState(database: JoveDatabase = db, client: SupabaseClient | null = cloudClient, config: PublicCloudConfig = publicCloudConfig,
+  admitOwner: (owner: string) => Promise<void> = async () => {}) {
   const configured = !!client, userId = ref(''), email = ref(''), syncing = ref(false), problem = ref(''), lastSynced = ref(0)
   const online = ref(typeof navigator === 'undefined' || navigator.onLine !== false), pending = ref(0), accountBusy = ref(false), paused = ref(false)
   const hasMore = ref(false), deferred = ref(0), conflicts = ref(0), audioPending = ref(false), audioBlocked = ref(0)
@@ -36,6 +37,7 @@ export function createCloudState(database: JoveDatabase = db, client: SupabaseCl
       try {
         const access = await bindSyncAccess(client, id, config, async () => {
           check(generation, id)
+          await admitOwner(id)
           if (await journal.owner() !== id) throw new Error('Sync owner changed')
         })
         const result = await synchronize(journal, new SupabaseSyncRemote(access.client, access, database.language))
@@ -92,6 +94,7 @@ export function createCloudState(database: JoveDatabase = db, client: SupabaseCl
         if (session.error || !id) { if (generation === epoch) { userId.value = ''; email.value = ''; lastSynced.value = 0 } return }
         const access = await bindSyncAccess(client, id, config, async () => {
           if (generation !== epoch || paused.value) throw new Error('Account changed')
+          await admitOwner(id)
           const bound = (await database.syncMeta.get('owner'))?.value
           if (bound && bound !== id) throw new Error('This browser belongs to another account')
         })
@@ -163,6 +166,8 @@ export function createCloudState(database: JoveDatabase = db, client: SupabaseCl
     finally { localChange = undefined; if (!wasPaused && pauseRevision === ownPauseRevision) await resume() }
   }
   async function stop(): Promise<void> { cleanup?.(); cleanup = undefined; started = false; await pause() }
+  /** Await existing work only; sharing an account never starts a second login. */
+  async function settle(): Promise<void> { await adoption; await running }
   async function requestCode(address: string): Promise<boolean> {
     if (!client || accountBusy.value || !online.value) return false
     accountBusy.value = true; problem.value = ''
@@ -194,6 +199,6 @@ export function createCloudState(database: JoveDatabase = db, client: SupabaseCl
   }
   return { configured, userId, email, syncing, problem, lastSynced, pending, online, accountBusy, status, paused,
     hasMore, deferred, conflicts, audioPending, audioBlocked, cardAliases, start, syncNow, requestCode, verifyCode, signOut,
-    pause, resume, beforeLocalReset, withLocalDataChange, stop }
+    pause, resume, beforeLocalReset, withLocalDataChange, stop, settle }
 }
 export const useCloud = defineStore('cloud', () => createCloudState())

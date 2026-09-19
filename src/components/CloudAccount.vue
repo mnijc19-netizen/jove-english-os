@@ -2,7 +2,15 @@
 import { ref } from 'vue'
 import { useCloud } from '../stores/cloud'
 import Icon from './Icon.vue'
+import { useJapaneseSpace } from '../stores/japanese-space'
 const cloud = useCloud(), address = ref(''), code = ref(''), sent = ref(false)
+const japanese = import.meta.env.DEV ? useJapaneseSpace() : null
+async function signOut() { if (japanese) await japanese.signOut(); else await cloud.signOut() }
+async function syncJapanese() {
+  if (!japanese) return
+  try { if (japanese.ready) await japanese.syncNow(); else await japanese.ensure() }
+  catch { /* The separate Japanese problem/status contains the retry guidance. */ }
+}
 async function send() { sent.value = await cloud.requestCode(address.value) }
 async function verify() {
   try { if (await cloud.verifyCode(address.value, code.value)) sent.value = false }
@@ -27,7 +35,7 @@ async function verify() {
         <p v-if="cloud.conflicts" class="help-text">Different versions were found in {{ cloud.conflicts }} items. Both original histories are retained.</p>
         <p v-if="cloud.audioBlocked" class="help-text" role="alert">{{ cloud.audioBlocked }} recordings need attention: missing metadata, conflicting originals or insufficient local space. No local recording was replaced.</p>
         <button class="button secondary" :disabled="cloud.syncing || !cloud.online || cloud.paused" @click="cloud.syncNow">Sync now</button>
-        <button class="text-button" @click="cloud.signOut">Sign out on this device</button>
+        <button class="text-button" :disabled="japanese?.signingOut || cloud.accountBusy" @click="signOut">Sign out on this device</button>
         <p class="help-text">Signing out keeps your local learning and unfinished work on this browser. Use your own device.</p>
       </template>
       <form v-else @submit.prevent="sent ? verify() : send()">
@@ -42,6 +50,15 @@ async function verify() {
         <button v-if="sent" class="text-button" type="button" :disabled="cloud.accountBusy" @click="sent = false; code = ''">Use another email or request a new code</button>
       </form>
       <p v-if="cloud.problem" class="help-text" role="alert">{{ cloud.problem }}</p>
+      <div v-if="japanese?.ready || japanese?.problem" class="section">
+        <h3>日语学习同步</h3>
+        <p role="status">{{ japanese.status }}</p>
+        <p class="help-text">与英语使用同一账号，课程、练习、复习和录音分别保存。英语的“已同步”不代表日语也已完成。</p>
+        <p v-if="japanese.problem" class="help-text" role="alert">{{ japanese.problem }}</p>
+        <p v-if="japanese.pending || japanese.hasMore || japanese.audioPending" class="help-text">日语记录或录音仍在传输，原件保留在本机。</p>
+        <p v-if="japanese.deferred || japanese.audioBlocked" class="help-text" role="alert">仍有记录或录音需要恢复处理，暂不能宣称完全同步。</p>
+        <button class="button secondary" :disabled="japanese.syncing || japanese.opening || !japanese.online" @click="syncJapanese">同步日语记录</button>
+      </div>
     </div>
   </section>
 </template>
