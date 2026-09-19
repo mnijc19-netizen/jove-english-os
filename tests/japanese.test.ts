@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto'
 import { afterEach, describe, expect, it } from 'vitest'
-import { japaneseSource, japaneseStarterLessons, japaneseStarterMaterials } from '../src/content/japanese'
-import { kanaMorae, japanesePlacement, japanesePlacementItems, japaneseTextUnits, nextJapaneseLesson } from '../src/domain/japanese'
+import { japaneseSource, japaneseStarterLessons, japaneseStarterMaterials, japaneseLessons, japaneseMaterials } from '../src/content/japanese'
+import { kanaMorae, japanesePlacement, japanesePlacementItems, japaneseTextUnits, japaneseReadingSupport, nextJapaneseLesson } from '../src/domain/japanese'
 import { materialSchema } from '../src/db/schema'
 import { initializeJapanese } from '../src/db/japanese'
 import { createLearningRepository, exportBackup, restoreBackup } from '../src/db/repository'
@@ -17,8 +17,38 @@ function database(language: 'en' | 'ja') { const db = new JoveDatabase(`japanese
 const reflection = (id: string, timestamp = now): StudyEvent => ({ id: `reflection:${id}`, sessionId: `session:${id}`, timestamp,
   type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report', data: { materialId: id, listened: true, playbackObserved: false,
     comprehensionVerified: false, response: 'Meaning in my own words', expression: 'お願いします', example: 'もう一度お願いします。', audioId: 'retained-recording' } })
+function readingAttempt(id: string, timestamp: number, response = 'ガッコウ', prompted = false, scheduledRating = 3): StudyEvent[] {
+  return [{ id: `${id}:response`, type: 'REVIEW_RESPONSE', source: 'self-report', timestamp: timestamp - 1, sessionId: id, chunkId: 'word', modality: 'recall', prompted, data: { response } },
+    { id: `${id}:rating`, type: 'review', source: 'self-report', timestamp, sessionId: id, chunkId: 'word', modality: 'recall', prompted, data: { responseEventId: `${id}:response`, scheduledRating } }]
+}
 
 describe('Japanese-specific source and practice support', () => {
+  it('extends the preserved starter course through two ordered graded books with original support', () => {
+    const materials = japaneseMaterials()
+    expect(materials).toHaveLength(54)
+    expect(materials.slice(0, 18)).toEqual(japaneseStarterMaterials())
+    expect(new Set(materials.map(material => material.sourceUrl)).size).toBe(54)
+    for (const [index, material] of materials.entries()) {
+      expect(materialSchema.parse(material)).toEqual(material)
+      expect(kanaMorae(japaneseLessons[index]!.reading).length).toBeGreaterThan(0)
+    }
+    const starterHistory = materials.slice(0, 18).map((material, index) => reflection(material.id, now - 1000 + index))
+    expect(nextJapaneseLesson(materials, starterHistory, 0.525, now)?.id).toBe('ja-irodori-elementary01-1')
+    const elementaryHistory = materials.slice(0, 36).map((material, index) => reflection(material.id, now - 1000 + index))
+    expect(nextJapaneseLesson(materials, elementaryHistory, 0.7, now)?.id).toBe('ja-irodori-elementary02-1')
+    expect(materialSchema.safeParse({ ...materials[18], sourceUrl: 'https://www.irodori.jpf.go.jp/en/elementary03/audio/lesson01.html' }).success).toBe(false)
+  })
+  it('consolidates a difficult topic, steps back after repeated difficulty and respects unavailable links', () => {
+    const materials = japaneseMaterials(), target = materials[3]!
+    const hard = { ...reflection(target.id, now - 1), data: { ...reflection(target.id).data, effort: 'hard' } }
+    expect(nextJapaneseLesson(materials, [hard], 0.2, now)?.id).toBe(target.id)
+    expect(nextJapaneseLesson(materials, [{ ...hard, id: 'duplicate' }, hard], 0.2, now)?.id).toBe(target.id)
+    expect(nextJapaneseLesson(materials, [{ ...hard, id: 'earlier', sessionId: 'earlier-practice', timestamp: now - 86400000 }, hard], 0.2, now)?.id).toBe(materials[2]!.id)
+    const blocked: StudyEvent = { id: 'blocked', type: 'EXTERNAL_LINK_UNAVAILABLE', source: 'self-report', sessionId: 'practice', timestamp: now,
+      data: { materialId: target.id, issue: 'cannot-open', playbackObserved: false } }
+    expect(nextJapaneseLesson(materials, [hard, blocked], 0.2, now)?.id).not.toBe(target.id)
+    expect(nextJapaneseLesson(materials, [{ ...hard, timestamp: now + 1 }], 0.1, now)?.id).toBe(materials[0]!.id)
+  })
   it('provides 18 original guided tasks linked to the credited official publisher, without copied media', () => {
     const materials = japaneseStarterMaterials()
     expect(materials).toHaveLength(18)
@@ -44,6 +74,38 @@ describe('Japanese-specific source and practice support', () => {
     const words = japaneseTextUnits('明日は駅に行きます。')
     expect(words.unit).toBe('word'); expect(words.units.length).toBeGreaterThan(1)
   })
+  it('fades one expression only after two separated saved independent kana recalls, never kanji recognition', () => {
+    const first = readingAttempt('first', now - 2 * 86400000), second = readingAttempt('second', now - 86400000, 'がっこう。')
+    expect(japaneseReadingSupport('がっこう', ['word'], first, true, now).automatic).toBe(true)
+    expect(japaneseReadingSupport('がっこう', ['word'], [...first, ...second], true, now)).toMatchObject({ automatic: false, successfulDays: 2 })
+    for (const response of ['学校', 'gakkou', '读懂了', '学会了']) {
+      expect(japaneseReadingSupport('がっこう', ['word'], [...first, ...readingAttempt('second', now - 86400000, response)], true, now).automatic).toBe(true)
+    }
+    expect(japaneseReadingSupport('でんしゃ', ['other-word'], [...first, ...second], true, now).automatic).toBe(true)
+    expect(japaneseReadingSupport('がっこう', ['word'], [...first, ...second].map(event => ({ ...event, modality: 'recognition' })), true, now).automatic).toBe(true)
+  })
+  it('restores help after difficulty, rejects same-day priming, duplicates, future and incomplete receipts', () => {
+    const first = readingAttempt('first', now - 2 * 86400000), second = readingAttempt('second', now - 86400000)
+    const success = [...first, ...second]
+    expect(japaneseReadingSupport('がっこう', ['word'], [...success, ...readingAttempt('latest', now - 1, '', true, 1)], false, now).automatic).toBe(true)
+    expect(japaneseReadingSupport('がっこう', ['word'], [...first, ...readingAttempt('second', now - 2 * 86400000 + 1000)], true, now).automatic).toBe(true)
+    expect(japaneseReadingSupport('がっこう', ['word'], [...first, ...first], true, now).successfulDays).toBe(1)
+    expect(japaneseReadingSupport('がっこう', ['word'], [...first, ...readingAttempt('future', now + 1)], true, now).automatic).toBe(true)
+    expect(japaneseReadingSupport('がっこう', ['word'], success.filter(event => event.type === 'review'), true, now).automatic).toBe(true)
+    expect(japaneseReadingSupport('がっこう', ['word'], success, true, now + 91 * 86400000).automatic).toBe(true)
+  })
+  it('uses locked first-answer time, never delayed rating time, for spacing, expiry and ordering', () => {
+    const first = readingAttempt('first', now - 2 * 86400000)
+    const delayed = readingAttempt('second', now - 2 * 86400000 + 60000)
+    delayed[1]!.timestamp = now - 86400000
+    expect(japaneseReadingSupport('がっこう', ['word'], [...first, ...delayed], true, now).successfulDays).toBe(1)
+    const expired = readingAttempt('expired', now - 95 * 86400000)
+    expired[1]!.timestamp = now - 86400000
+    expect(japaneseReadingSupport('がっこう', ['word'], [...expired, ...first], true, now).successfulDays).toBe(1)
+    const oldDifficulty = readingAttempt('old-difficulty', now - 3 * 86400000, '', true, 1)
+    oldDifficulty[1]!.timestamp = now - 10
+    expect(japaneseReadingSupport('がっこう', ['word'], [...oldDifficulty, ...first, ...readingAttempt('second', now - 86400000)], true, now).automatic).toBe(false)
+  })
   it('uses text diagnosis to vary support while listening and speaking stay unknown', () => {
     const answers = Object.fromEntries(japanesePlacementItems.map(item => [item.id, item.answer]))
     expect(japanesePlacement(answers)).toMatchObject({ kanaSupport: false, conversationProbe: 9, listening: 'unknown', speaking: 'unknown', proficiency: 'unverified' })
@@ -56,7 +118,7 @@ describe('Japanese-specific source and practice support', () => {
     expect(nextJapaneseLesson(materials, [click], 0.1, now)?.id).toBe(first.id)
     expect(nextJapaneseLesson(materials, [reflection(first.id)], 0.1, now)?.id).toBe(second.id)
     expect(nextJapaneseLesson(materials, [{ ...reflection(first.id), data: { materialId: first.id, listened: true } }], 0.1, now)?.id).toBe(first.id)
-    expect(nextJapaneseLesson(materials, [], 0.1, now + 91 * 86400000)).toBeNull()
+    expect(nextJapaneseLesson(materials, [], 0.1, now + 91 * 86400000)?.id).toBe(first.id)
     expect(nextJapaneseLesson([{ ...first, language: 'en' }], [], 0.1, now)).toBeNull()
     const history = materials.map((material, index) => reflection(material.id, now - 1000 + index))
     expect(nextJapaneseLesson(materials, history, 1, now)?.id).toBe(first.id)
@@ -66,7 +128,7 @@ describe('Japanese-specific source and practice support', () => {
     const ja = database('ja'), en = database('en')
     await expect(initializeJapanese(en)).rejects.toThrow('own workspace')
     await initializeJapanese(ja)
-    expect(await ja.materials.count()).toBe(18); expect((await ja.profiles.get('main'))?.onboarded).toBe(false)
+    expect(await ja.materials.count()).toBe(54); expect((await ja.profiles.get('main'))?.onboarded).toBe(false)
     expect(await ja.events.count()).toBe(0)
     await ja.profiles.update('main', { goal: 'Preserve my own goal' }); await initializeJapanese(ja)
     expect((await ja.profiles.get('main'))?.goal).toBe('Preserve my own goal')

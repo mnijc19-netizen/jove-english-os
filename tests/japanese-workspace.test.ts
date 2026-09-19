@@ -85,6 +85,24 @@ describe('Japanese usable practice persistence', () => {
     await expect(learning.saveDiagnostic(skipped, true, now)).rejects.toThrow('账号')
     expect(await ja.events.count()).toBe(0)
   })
+  it('keeps original material edits and learns task load without changing proficiency or English plans', async () => {
+    const { learning, en, ja } = await setup()
+    await ja.materials.update('ja-irodori-starter-1', { title: 'My retained title' })
+    await learning.open()
+    expect((await ja.materials.get('ja-irodori-starter-1'))?.title).toBe('My retained title')
+    expect(await ja.materials.count()).toBe(54)
+    await learning.saveDiagnostic(skipped, true, now)
+    const session = await learning.start((await learning.today(now))!.tasks[0]!.id, now)
+    await ja.audio.bulkAdd([recording('original'), recording('retry')])
+    await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), listened: true, response: '问候', expression: 'おはよう',
+      example: 'おはようございます。', audioId: 'original', retryAudioId: 'retry', comparison: '继续练习', effort: 'hard' }, 'compare')
+    await learning.finish(session.id, now + 1000)
+    const tomorrow = (await learning.today(now + 86400000))!
+    expect(tomorrow.tasks.find(task => task.kind === 'listen')).toMatchObject({ materialId: 'ja-irodori-starter-1', reason: expect.stringContaining('吃力') })
+    expect((await ja.events.toArray()).filter(event => event.type === 'EXTERNAL_LISTEN_REFLECTION')[0]?.data?.effort).toBe('hard')
+    expect((await ja.skills.toArray()).every(skill => skill.evidenceCount === 0)).toBe(true)
+    expect(await en.plans.count()).toBe(0)
+  })
   it('counts a completed overnight draft once against the real completion day', async () => {
     const { learning, en, ja } = await setup()
     await learning.saveDiagnostic(skipped, true, now)

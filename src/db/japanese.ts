@@ -1,7 +1,7 @@
 import type { JoveDatabase } from './db'
 import { createLearningRepository } from './repository'
-import { japaneseStarterMaterials } from '../content/japanese'
-import { japanesePlacement, japanesePlacementItems, nextJapaneseLesson } from '../domain/japanese'
+import { japaneseMaterials } from '../content/japanese'
+import { japanesePlacement, japanesePlacementItems, japanesePracticeHistory, nextJapaneseLesson } from '../domain/japanese'
 import { readLanguageDay } from './language-day'
 import { assessmentSchema, planSchema, sessionSchema } from './schema'
 import type { DailyPlan, StudySession } from '../domain/types'
@@ -12,13 +12,14 @@ import { createJapaneseReview } from './japanese-review'
  * bootstrap. Does not overwrite setup, learned content, cards or saved work. */
 export async function initializeJapanese(database: JoveDatabase): Promise<void> {
   if (database.language !== 'ja') throw new Error('Japanese setup requires its own workspace')
-  await createLearningRepository(database).initialize(japaneseStarterMaterials())
+  await createLearningRepository(database).initialize(japaneseMaterials())
 }
 
 const text = z.string().max(10_000)
 export const japanesePracticeDraft = z.strictObject({
   taskId: text, revision: z.number().int().nonnegative(), listened: z.boolean(), response: text,
   expression: text, example: text, audioId: text, retryAudioId: text, comparison: text,
+  effort: z.enum(['hard', 'okay', 'easy']).optional(),
   audioUnavailable: z.boolean().optional(), missingAudioIds: z.array(text).optional(),
 })
 export type JapanesePracticeDraft = z.infer<typeof japanesePracticeDraft>
@@ -80,7 +81,8 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const events = await database.events.toArray(), materials = await database.materials.toArray()
       const placement = japanesePlacement(diagnostic.responses)
       // Curriculum exposure chooses a next task, not a higher proficiency score.
-      const completedIds = new Set(events.filter(event => event.type === 'EXTERNAL_LISTEN_REFLECTION').map(event => event.data?.materialId))
+      const history = japanesePracticeHistory(events, now)
+      const completedIds = new Set(history.map(event => event.data?.materialId))
       const practiced = materials.filter(material => completedIds.has(material.id))
       const target = Math.max(0.1 + (placement.conversationProbe - 1) * 0.025, ...practiced.map(material => material.difficulty))
       const probe = materials.find(material => material.id === `ja-irodori-starter-${placement.conversationProbe}`)
@@ -104,7 +106,9 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const lessonMinutes = Math.max(0, minutes - reviewMinutes)
       // Preserve task identity after starting; do not fill a finished day again.
       const task = previous ?? (!completed.some(task => task.kind === 'listen') && material ? { id: `${date}:ja:listen:${material.id}`, kind: 'listen' as const,
-        title: material.title, minutes, reason: '真人输入 → 回忆意思 → 自己表达 → 对照重说', materialId: material.id, done: false } : undefined)
+        title: material.title, minutes, reason: history.at(-1)?.data?.effort === 'hard'
+          ? '上次觉得吃力，今天先巩固熟悉话题；不急着加难度。'
+          : '真人输入 → 回忆意思 → 自己表达 → 对照重说', materialId: material.id, done: false } : undefined)
       const tasks = [...completed, ...(reviewTask && reviewMinutes > 0 ? [{ ...reviewTask, minutes: reviewMinutes }] : []),
         ...(task && lessonMinutes > 0 ? [{ ...task, minutes: lessonMinutes }] : [])]
       if (!tasks.length) return null
@@ -176,7 +180,8 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       // on the actual completion day, without moving it into today's plan.
       await repository.recordEvent({ id: `${sessionId}:reflection`, type: 'EXTERNAL_LISTEN_REFLECTION', timestamp: now, source: 'self-report', sessionId,
         data: { materialId: session.materialId, response: draft.response, expression: draft.expression, example: draft.example,
-          audioId: draft.retryAudioId, listened: true, playbackObserved: false, comprehensionVerified: false } })
+          audioId: draft.retryAudioId, listened: true, playbackObserved: false, comprehensionVerified: false,
+          ...(draft.effort ? { effort: draft.effort } : {}) } })
       await repository.recordEvent({ id: `${sessionId}:retry`, type: 'JAPANESE_COMPARE_RETRY', timestamp: now, source: 'self-report', sessionId,
         data: { materialId: session.materialId, audioId: draft.audioId, retryAudioId: draft.retryAudioId, comparison: draft.comparison, acousticAssessed: false } })
       const material = await database.materials.get(session.materialId)

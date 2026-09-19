@@ -1,5 +1,13 @@
 # Curated demo content and audio
 
+## Japanese graded publisher links — September20 development candidate
+
+`src/content/japanese.ts` contains54 original guided missions:18 preserved Starter tasks plus18 each for Elementary1 and Elementary2. The official [Elementary1 directory](https://www.irodori.jpf.go.jp/en/elementary01/pdf.html) and [Elementary2 directory](https://www.irodori.jpf.go.jp/en/elementary02/pdf.html), their playback links, and the [publisher's course/narration credits](https://www.irodori.jpf.go.jp/en/about.html) were inspected September19UTC. Book labels A1/A2 describe source organization, not app certification. Pre-Intermediate and extensive graded reading are not implemented by these54 missions.
+
+App titles, short examples, Chinese notes and transfer tasks are authored aids, not copied publisher scripts or promises that an exact sentence occurs in the audio. Store only approved links and text; no publisher media is bundled or cached. Specific sound notes direct attention to morae/long vowels/gemination and natural grouping; they are not automated pronunciation/pitch evaluation. Health/emergency scenarios teach communication, not diagnosis or safety procedures. Keep recorded narrator provenance distinct from individual-clip acoustic review.
+
+These are a finite editorial course reserve, not a frequently published catalog. Preserve original screening dates rather than replacing them with the opening date. As with static English starter links, age alone no longer deletes all Japanese tasks after90days. Active learner access reports still exclude the reported link from subsequent selection. An in-practice Japanese link-replacement action and scheduled Japanese source revalidation are still required; don't claim those from the existing English workflow.
+
 ## External-course continuation checkpoint — 2026-09-13
 
 The four existing publisher links remain the current external reserve. The planner now remembers valid submitted guided reflections across all available history, selects eligible unpractised lessons first, and revisits the oldest practice after exhaustion. This records participation, not verified comprehension or acoustic skill; it does not change FSRS scheduling or retarget an existing task. Recurring metadata delivery and broader graded coverage remain required.

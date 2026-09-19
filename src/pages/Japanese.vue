@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch 
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { db as english, createLanguageDatabase } from '../db/db'
 import { createJapaneseWorkspace, japanesePracticeDraft, type JapanesePracticeStep, type JapanesePracticeDraft } from '../db/japanese'
-import { japanesePlacement, japanesePlacementItems, kanaMorae } from '../domain/japanese'
-import { japaneseStarterLessons, japaneseSource } from '../content/japanese'
+import { japanesePlacement, japanesePlacementItems, japaneseReadingSupport, kanaMorae } from '../domain/japanese'
+import { japaneseLessons, japaneseLessonUrl, japaneseCourseNames, japaneseSource } from '../content/japanese'
 import { readLanguageDay } from '../db/language-day'
 import type { Assessment, AudioAsset, DailyPlan, StudySession } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
@@ -22,12 +22,14 @@ const audio = shallowRef<AudioAsset[]>([]), unfinished = shallowRef<StudySession
 const allowance = shallowRef<Awaited<ReturnType<typeof readLanguageDay>>>(null)
 const responses = reactive<Record<string, string>>({})
 const draft = reactive<JapanesePracticeDraft>({ taskId: '', revision: 0, listened: false, response: '', expression: '', example: '', audioId: '', retryAudioId: '', comparison: '' })
-const step = ref<JapanesePracticeStep>('listen'), showReading = ref(false), dirty = ref(false)
+const step = ref<JapanesePracticeStep>('listen'), readingOverride = ref<boolean>(), dirty = ref(false)
+const readingSupport = shallowRef<ReturnType<typeof japaneseReadingSupport>>()
+const readingVisible = computed(() => readingOverride.value ?? readingSupport.value?.automatic ?? (placement.value?.furigana === 'full'))
 let timer: ReturnType<typeof setTimeout> | undefined, disposed = false
 let navigationGeneration = 0, allowedNavigation = ''
 let saves: Promise<void> = Promise.resolve()
-const lesson = computed(() => japaneseStarterLessons.find(lesson => lesson.id === session.value?.materialId))
-const sourceUrl = computed(() => lesson.value ? `https://www.irodori.jpf.go.jp/en/starter/audio/lesson${String(lesson.value.position).padStart(2, '0')}.html` : '')
+const lesson = computed(() => japaneseLessons.find(lesson => lesson.id === session.value?.materialId))
+const sourceUrl = computed(() => lesson.value ? japaneseLessonUrl(lesson.value) : '')
 const placement = computed(() => assessment.value?.completedAt ? japanesePlacement(assessment.value.responses) : undefined)
 const task = computed(() => plan.value?.tasks.find(task => !task.done && !task.optional))
 const answerCount = computed(() => japanesePlacementItems.filter(item => responses[item.id]).length)
@@ -39,7 +41,7 @@ const nextEnabled = computed(() => step.value === 'listen' ? draft.listened && !
 async function refreshAudio() { audio.value = await database.audio.toArray() }
 function restore(saved: StudySession) {
   session.value = saved
-  delete draft.audioUnavailable; delete draft.missingAudioIds
+  delete draft.audioUnavailable; delete draft.missingAudioIds; delete draft.effort
   Object.assign(draft, japanesePracticeDraft.parse(saved.draft))
   step.value = (saved.completedAt ? 'compare' : saved.stage) as JapanesePracticeStep
   dirty.value = false
@@ -58,6 +60,13 @@ async function loadSession(id: unknown, generation = navigationGeneration) {
   const saved = await database.sessions.get(id)
   if (generation !== navigationGeneration || disposed) return
   if (!saved || saved.kind !== 'japanese-practice') throw new Error('没有找到这次日语练习。请返回今日任务。')
+  const reference = japaneseLessons.find(item => item.id === saved.materialId)
+  const chunks = reference ? await database.chunks.filter(chunk => chunk.sourceIds.includes(reference.id)).toArray() : []
+  const events = chunks.length ? await database.events.where('chunkId').anyOf(chunks.map(chunk => chunk.id)).toArray() : []
+  await learning.checkOwner()
+  if (generation !== navigationGeneration || disposed) return
+  readingOverride.value = undefined
+  readingSupport.value = reference ? japaneseReadingSupport(reference.reading, chunks.map(chunk => chunk.id), events, placement.value?.furigana === 'full', Date.now()) : undefined
   restore(saved)
 }
 async function act(action: () => Promise<void>) {
@@ -92,6 +101,12 @@ function flush(): Promise<void> {
 function changed() {
   dirty.value = true; notice.value = '正在保存…'; clearTimeout(timer)
   timer = setTimeout(() => { void flush().catch(failure => { error.value = failure.message }) }, 500)
+}
+function effortChanged() {
+  // Clearing an optional select must remove its key, not persist undefined in
+  // the JSON draft used by backups and sync.
+  if (!draft.effort) delete draft.effort
+  changed()
 }
 async function finishDiagnostic() {
   await flush()
@@ -195,11 +210,12 @@ onBeforeUnmount(() => {
           <h2>{{ task ? `今日练习：${task.title}` : '今天先到这里' }}</h2>
           <p v-if="task?.kind === 'review'">先做一小组到期复习：独立回答 → 对照参考 → 安排下次。之后再进行今日新情境练习。</p>
           <p v-else-if="task">① 听一段真人对话 → ② 回忆意思 → ③ 用自己的话回应 → ④ 对照后重说</p>
+          <p v-if="task" class="help-text">{{ task.reason }}</p>
           <p v-else>已完成今天的安排，或当天时间已用完。已有草稿仍然保留，不需要补做堆积的任务。</p>
           <button v-if="task" class="button primary" :disabled="busy || navigating" @click="act(start)">开始学习 · 约 {{ task.minutes }} 分钟</button>
           <p class="help-text">听力、口语仍待实际练习观察；认字不等于会说。{{ placement?.kanaSupport ? '需要时会显示假名读法和拍数提示。' : '读法提示默认收起，需要时可以展开。' }}</p>
         </section>
-        <section v-if="unfinished.length" class="section"><h2>接着上次的练习</h2><p v-for="saved in unfinished" :key="saved.id"><RouterLink :to="{ path: saved.kind === 'japanese-review' ? '/ja/review' : '/ja', query: { session: saved.id } }">{{ saved.kind === 'japanese-review' ? '日语延迟复习' : japaneseStarterLessons.find(lesson => lesson.id === saved.materialId)?.title }} · 继续草稿</RouterLink></p></section>
+        <section v-if="unfinished.length" class="section"><h2>接着上次的练习</h2><p v-for="saved in unfinished" :key="saved.id"><RouterLink :to="{ path: saved.kind === 'japanese-review' ? '/ja/review' : '/ja', query: { session: saved.id } }">{{ saved.kind === 'japanese-review' ? '日语延迟复习' : japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title }} · 继续草稿</RouterLink></p></section>
       </template>
       <section v-else-if="session.completedAt" class="panel ja-panel">
         <h2>这次练习已保存</h2><p>回答、原始录音和重说录音都已保留。参考词块已加入日语间隔复习；完成练习不等于已掌握。</p>
@@ -209,6 +225,7 @@ onBeforeUnmount(() => {
         <p v-if="draft.audioUnavailable" class="help-text" role="status">这个备份不含部分录音文件，文字回答和对照笔记仍保留。未完成的练习可重新录音继续；不会把缺失录音算作已验证的口语表现。</p>
         <p class="eyebrow">{{ { listen: '1 / 4 · 先听懂意思', notice: '2 / 4 · 留意表达', speak: '3 / 4 · 换个情境说', compare: '4 / 4 · 对照后重说' }[step] }}</p>
         <h2>{{ lesson.title }}</h2><p>{{ lesson.canDo }}</p>
+        <p class="help-text">{{ japaneseCourseNames[lesson.course] }} · 第 {{ lesson.position }} 课 · 教材等级不是你的能力成绩</p>
         <a :href="sourceUrl" target="_blank" rel="noopener noreferrer" class="button">打开原站真人音频 ↗</a>
         <p class="help-text">{{ japaneseSource.publisher }}。选这一课的一小段对话；先不看文字，必要时重复听。打开链接不会记为听懂或完成。</p>
         <fieldset :disabled="busy || navigating || captureActive" class="ja-response">
@@ -218,8 +235,9 @@ onBeforeUnmount(() => {
           </template>
           <template v-else-if="step === 'notice'">
             <p>以下是本站练习例句，不是原站逐字字幕：</p><p class="ja-phrase" lang="ja">{{ lesson.phrase }}</p><p>{{ lesson.meaningZh }}</p>
-            <button class="text-button" @click="showReading = !showReading">{{ showReading ? '收起读法' : '查看假名和拍数' }}</button>
-            <p v-if="showReading || placement?.furigana === 'full'" lang="ja">{{ lesson.reading }} · {{ kanaMorae(lesson.reading).join('・') }}</p>
+            <button class="text-button" :aria-expanded="readingVisible" @click="readingOverride = !readingVisible">{{ readingVisible ? '收起读法' : '查看假名和拍数' }}</button>
+            <p v-if="readingVisible" lang="ja">{{ lesson.reading }} · {{ kanaMorae(lesson.reading).join('・') }}</p>
+            <p v-if="readingSupport" class="help-text">{{ readingSupport.reason }}</p>
             <p>{{ lesson.grammarZh }}</p><p class="help-text">{{ lesson.soundZh }}</p>
             <label>选一个想用的日语表达<input v-model="draft.expression" lang="ja" maxlength="10000" @input="changed"></label>
             <label>换成自己的情况，说或写一句<textarea v-model="draft.example" lang="ja" maxlength="10000" rows="3" @input="changed" /></label>
@@ -228,6 +246,9 @@ onBeforeUnmount(() => {
             <p>{{ lesson.transferZh }}</p>
             <p v-if="step === 'compare'">回放自己的录音，再听原声。一次只改一个地方，然后完整重说。这里只保存练习，不给自动发音或音高分数。</p>
             <label v-if="step === 'compare'">这次准备调整什么？<textarea v-model="draft.comparison" maxlength="10000" rows="3" @input="changed" /></label>
+            <label v-if="step === 'compare'">这次的难度感觉（可不填，系统据此调整任务，不作能力评分）
+              <select v-model="draft.effort" @change="effortChanged"><option :value="undefined">暂不反馈</option><option value="hard">比较吃力，需要放慢</option><option value="okay">有挑战，基本跟得上</option><option value="easy">比较轻松</option></select>
+            </label>
           </template>
         </fieldset>
         <audio v-if="step === 'compare' && originalPlayback" :src="originalPlayback" controls aria-label="日语首次回答录音" />

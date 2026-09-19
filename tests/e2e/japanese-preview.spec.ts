@@ -54,6 +54,8 @@ test('Japanese guided practice saves two recordings and restores drafts without 
   await page.getByRole('button', { name: '保存并继续' }).click()
   await expect(page.getByLabel('日语首次回答录音')).toBeVisible()
   await page.getByRole('textbox', { name: '这次准备调整什么？' }).fill('注意长音，完整重说。')
+  await page.getByRole('combobox', { name: /这次的难度感觉/ }).selectOption('hard')
+  await page.getByRole('combobox', { name: /这次的难度感觉/ }).selectOption({ label: '暂不反馈' })
   await page.getByRole('button', { name: 'Record response', exact: true }).click()
   await expect(page.getByRole('status').filter({ hasText: '1s / 180s' })).toBeVisible()
   await page.getByRole('button', { name: 'Stop & save', exact: true }).click()
@@ -71,6 +73,52 @@ test('Japanese guided practice saves two recordings and restores drafts without 
       enAudio: await count('jove-english-os', 'audio'), enCards: await count('jove-english-os', 'cards') }
   })
   expect(counts).toEqual({ jaAudio: 2, jaCards: 6, enAudio: 0, enCards: 0 })
+})
+
+test('Japanese graded continuation and expression-specific reading help work after reload', async ({ page }) => {
+  await page.goto('#/ja')
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  const fixture = await page.evaluate(async () => {
+    const paths = ['/jove-english-os/src/db/db.ts', '/jove-english-os/src/db/japanese.ts', '/jove-english-os/src/domain/japanese.ts', '/jove-english-os/src/content/japanese.ts']
+    const [{ db, createLanguageDatabase }, { createJapaneseWorkspace }, { japanesePlacementItems }, { japaneseStarterLessons }] = await Promise.all(paths.map(path => import(path)))
+    const database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, db), now = Date.now()
+    await learning.open(); await learning.saveDiagnostic(Object.fromEntries(japanesePlacementItems.map((item: { id: string }) => [item.id, '跳过'])), true)
+    // Isolated historical fixtures, not learner evidence or publisher playback.
+    for (const [index, lesson] of japaneseStarterLessons.entries()) await database.events.put({ id: `fixture:${index}`, type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report',
+      sessionId: `historical:${index}`, timestamp: now - 3 * 86400000 + index, data: { materialId: lesson.id, response: 'Fixture', expression: 'Fixture', example: 'Fixture', audioId: 'fixture-history',
+        listened: true, playbackObserved: false, comprehensionVerified: false } })
+    // Only an unstarted fixture plan is removed, so actual planning picks the successor.
+    await database.plans.clear()
+    const plan = await learning.today(), task = plan.tasks.find((item: { kind: string }) => item.kind === 'listen'), session = await learning.start(task.id)
+    await learning.save(session.id, { ...session.draft, listened: true, response: '在介绍现在的工作' }, 'notice')
+    const material = await database.materials.get(task.materialId), chunk = await learning.repository.addChunk(material.chunks[0], material.id)
+    // Don't let these newly seeded review cards replace the tested bound task.
+    for (const card of await database.cards.toArray()) await database.cards.put({ ...card, card: { ...card.card, due: new Date(now + 86400000) } })
+    const result = { sessionId: session.id, materialId: task.materialId, chunkId: chunk.id, count: await database.materials.count() }
+    database.close(); return result
+  })
+  expect(fixture.count).toBe(54); expect(fixture.materialId).toBe('ja-irodori-elementary01-1')
+  await page.goto('#/ja?session=' + encodeURIComponent(fixture.sessionId)); await page.reload()
+  await expect(page.getByRole('heading', { name: '介绍现在的工作' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '打开原站真人音频 ↗' })).toHaveAttribute('href', 'https://www.irodori.jpf.go.jp/en/elementary01/audio/lesson01.html')
+  const hide = page.getByRole('button', { name: '收起读法', exact: true }), show = page.getByRole('button', { name: '查看假名和拍数', exact: true })
+  await hide.click(); await expect(show).toHaveAttribute('aria-expanded', 'false')
+  await show.click(); await expect(hide).toHaveAttribute('aria-expanded', 'true')
+  await page.evaluate(async chunkId => {
+    const path = '/jove-english-os/src/db/db.ts', { createLanguageDatabase } = await import(path)
+    const database = createLanguageDatabase('ja')
+    for (const [index, delay] of [2 * 86400000, 86400000].entries()) {
+      const id = `reading-fixture-${index}`, timestamp = Date.now() - delay
+      await database.events.bulkPut([{ id: `${id}:response`, type: 'REVIEW_RESPONSE', source: 'self-report', sessionId: id, chunkId, modality: 'recall', timestamp: timestamp - 1, prompted: false, data: { response: 'ホテルデハタライテイマス。' } },
+        { id: `${id}:rating`, type: 'review', source: 'self-report', sessionId: id, chunkId, modality: 'recall', timestamp, prompted: false, data: { responseEventId: `${id}:response`, scheduledRating: 3 } }])
+    }
+    database.close()
+  }, fixture.chunkId)
+  await page.reload()
+  await expect(show).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByText(/这句参考表达已在两次隔天复习中独立写出假名/)).toBeVisible()
+  await show.click(); await expect(hide).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
 test('Japanese switching waits for an in-flight stage save rather than displaying the previous session', async ({ page }) => {

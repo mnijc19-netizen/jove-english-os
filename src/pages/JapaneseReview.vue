@@ -4,7 +4,7 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute } from 'vue-router'
 import { db as english, createLanguageDatabase } from '../db/db'
 import { createJapaneseWorkspace } from '../db/japanese'
 import { japaneseReviewDraft } from '../db/japanese-review'
-import { japaneseStarterLessons } from '../content/japanese'
+import { japaneseLessons } from '../content/japanese'
 import type { AudioAsset, Chunk, Material, ReviewCard, StudySession } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
 import { useRecordingUrl } from '../composables/useRecordingUrl'
@@ -19,7 +19,7 @@ const draft = computed(() => session.value ? japaneseReviewDraft.parse(session.v
 const item = computed(() => draft.value?.items.find(item => !item.rating && !item.skipped))
 const card = computed(() => cards.value.find(card => card.id === item.value?.cardId))
 const chunk = computed(() => chunks.value.find(chunk => chunk.id === card.value?.chunkId))
-const lesson = computed(() => japaneseStarterLessons.find(lesson => chunk.value?.sourceIds.includes(lesson.id)))
+const lesson = computed(() => japaneseLessons.find(lesson => chunk.value?.sourceIds.includes(lesson.id)))
 const source = computed(() => materials.value.find(material => material.language === 'ja' && material.approved && chunk.value?.sourceIds.includes(material.id)))
 const oral = computed(() => card.value?.modality === 'speaking' || card.value?.modality === 'transfer')
 const modalityLabels = { recognition: '看表达，回忆意思', listening: '听原声，回忆意思', recall: '看意思，回忆日语', cloze: '完整表达一句话', speaking: '不看答案，开口表达', transfer: '换一个情境使用' }
@@ -134,6 +134,7 @@ onBeforeUnmount(() => {
       <p v-else-if="oral && item.revealed && !playback" class="help-text" role="status">这次首答的录音暂时不在本机，可以等同步后再回放。若现在继续，系统会较早安排再练，不将缺失原件当作已验证的口语表现。</p>
       <p class="eyebrow">{{ modalityLabels[card.modality] }} · {{ draft!.items.filter(item => item.rating || item.skipped).length + 1 }} / {{ draft!.items.length }}</p>
       <h2 :lang="card.modality === 'recognition' ? 'ja' : 'zh'">{{ prompt }}</h2>
+      <p v-if="card.modality === 'recall'" class="help-text">想得到读法时，可用假名写出完整表达（助词仍按「は／へ／を」书写）。汉字或其他自然说法也可保留，但不会据此认定已记住参考句的读法；这里不评发音。</p>
       <template v-if="card.modality === 'listening'">
         <a v-if="source?.sourceUrl" :href="source.sourceUrl" target="_blank" rel="noopener noreferrer" class="button">打开原站真人音频 ↗</a>
         <label class="row"><input v-model="response.heard" type="checkbox" :disabled="busy || item.revealed" @change="changed">我实际听过原声，再回来作答</label>
