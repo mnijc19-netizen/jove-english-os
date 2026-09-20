@@ -88,8 +88,8 @@ export function japaneseReadingSupport(reading: string, chunkIds: string[], even
 /** A finished practice selects the next lesson; it never certifies proficiency.
  * The caller supplies Japanese diagnostic difficulty, never English scores. */
 export function japaneseCoursePosition(id: string): number | null {
-  const match = /^ja-irodori-(starter|elementary01|elementary02)-([1-9]|1[0-8])$/u.exec(id)
-  return match ? ({ starter: 0, elementary01: 18, elementary02: 36 }[match[1]!] ?? 0) + Number(match[2]) : null
+  const match = /^ja-irodori-(starter|elementary01|elementary02|pre-intermediate)-([1-9]|1[0-8])$/u.exec(id)
+  return match ? ({ starter: 0, elementary01: 18, elementary02: 36, 'pre-intermediate': 54 }[match[1]!] ?? 0) + Number(match[2]) : null
 }
 /** Same strict reflection contract for both curriculum ordering and its ceiling.
  * Unconfirmed clicks, malformed imports and future events cannot raise either. */

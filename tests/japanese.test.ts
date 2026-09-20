@@ -12,7 +12,7 @@ import { changedFields, type RecordValue } from '../src/sync/protocol'
 import type { StudyEvent } from '../src/domain/types'
 import { japaneseWrittenExercises } from '../src/content/japanese-reading'
 
-const now = Date.UTC(2026, 8, 20), databases: JoveDatabase[] = []
+const now = Date.UTC(2026, 8, 20, 4), databases: JoveDatabase[] = []
 afterEach(async () => { for (const db of databases.splice(0)) await db.delete() })
 function database(language: 'en' | 'ja') { const db = new JoveDatabase(`japanese-test-${crypto.randomUUID()}`, language); databases.push(db); return db }
 const reflection = (id: string, timestamp = now): StudyEvent => ({ id: `reflection:${id}`, sessionId: `session:${id}`, timestamp,
@@ -24,11 +24,11 @@ function readingAttempt(id: string, timestamp: number, response = 'ガッコウ'
 }
 
 describe('Japanese-specific source and practice support', () => {
-  it('extends the preserved starter course through two ordered graded books with original support', () => {
+  it('extends the preserved starter course through three ordered graded books with original support', () => {
     const materials = japaneseMaterials()
-    expect(materials).toHaveLength(54)
+    expect(materials).toHaveLength(72)
     expect(materials.slice(0, 18)).toEqual(japaneseStarterMaterials())
-    expect(new Set(materials.map(material => material.sourceUrl)).size).toBe(54)
+    expect(new Set(materials.map(material => material.sourceUrl)).size).toBe(72)
     for (const [index, material] of materials.entries()) {
       expect(materialSchema.parse(material)).toEqual(material)
       expect(kanaMorae(japaneseLessons[index]!.reading).length).toBeGreaterThan(0)
@@ -37,6 +37,11 @@ describe('Japanese-specific source and practice support', () => {
     expect(nextJapaneseLesson(materials, starterHistory, 0.525, now)?.id).toBe('ja-irodori-elementary01-1')
     const elementaryHistory = materials.slice(0, 36).map((material, index) => reflection(material.id, now - 1000 + index))
     expect(nextJapaneseLesson(materials, elementaryHistory, 0.7, now)?.id).toBe('ja-irodori-elementary02-1')
+    const bridgeHistory = materials.slice(0, 54).map((material, index) => reflection(material.id, now - 1000 + index))
+    expect(nextJapaneseLesson(materials, bridgeHistory, 0.89, now)?.id).toBe('ja-irodori-pre-intermediate-1')
+    expect(nextJapaneseLesson(materials, bridgeHistory, 0.1, now)?.id).not.toMatch(/pre-intermediate/)
+    expect(materials.slice(54).every(material => material.difficulty <= 1 && !material.authenticPlayback)).toBe(true)
+    expect(materialSchema.safeParse({ ...materials[54], sourceUrl: 'https://www.irodori.jpf.go.jp/en/pre-intermediate/audio/lesson19.html' }).success).toBe(false)
     expect(materialSchema.safeParse({ ...materials[18], sourceUrl: 'https://www.irodori.jpf.go.jp/en/elementary03/audio/lesson01.html' }).success).toBe(false)
   })
   it('consolidates a difficult topic, steps back after repeated difficulty and respects unavailable links', () => {

@@ -10,9 +10,10 @@ export const japaneseSource = {
   credits: 'https://www.irodori.jpf.go.jp/en/about.html',
   checkedAt: Date.UTC(2026, 8, 19, 19, 22),
   gradedCheckedAt: Date.UTC(2026, 8, 19, 21, 38),
+  bridgeCheckedAt: Date.UTC(2026, 8, 20, 3),
 } as const
 export interface JapaneseLesson {
-  id: string; position: number; course: 'starter' | 'elementary01' | 'elementary02'; title: string; canDo: string
+  id: string; position: number; course: 'starter' | 'elementary01' | 'elementary02' | 'pre-intermediate'; title: string; canDo: string
   phrase: string; reading: string; meaningZh: string
   grammarZh: string; soundZh: string; transferZh: string
 }
@@ -99,25 +100,48 @@ const elementary2: LessonContent[] = [
   { title: '谈逐渐会做的事', canDo: '说明以前和现在的差别，并给出具体例子。', phrase: '一人で買い物ができるようになりました。', reading: 'ひとりでかいものができるようになりました', meaningZh: '我渐渐能独自购物了。', grammarZh: '「ようになった」表达变化；说明真实能完成的任务，不用课程完成数代替能力。', soundZh: '在熟悉表达里减少逐字停顿，再用新例子检验是否真能说出。', transferZh: '讲一项你有实际证据的变化，并说仍需要帮助的地方。' },
   { title: '讨论下一步打算', canDo: '表达计划、原因和仍未确定的部分。', phrase: '来年、新しい仕事を探そうと思っています。', reading: 'らいねんあたらしいしごとをさがそうとおもっています', meaningZh: '我打算明年找一份新工作。', grammarZh: '「意向形＋と思っている」表达计划；已决定、正在考虑和愿望的确定程度不一样。', soundZh: '先讲清计划，再连上理由，不为追求快而吞掉词尾。', transferZh: '换一个未来计划，说明理由、一个不确定因素并听取建议。' },
 ]
+// Original bridge tasks matched to the publisher's nine everyday topic pairs.
+// These examples are app-authored aids, not quotations from the linked audio.
+const preIntermediate: LessonContent[] = [
+  { title: '把不熟悉的兴趣问清楚', canDo: '请对方解释陌生的活动，再用自己的话确认。', phrase: 'ボルダリングって、どんなスポーツですか。', reading: 'ぼるだりんぐってどんなすぽーつですか', meaningZh: '抱石是一种什么样的运动？', grammarZh: '口语「って」可提出话题；不等于所有场合都能代替「は」，正式场合可说「というのは」。', soundZh: '外来语也按日语拍子听，「スポーツ」的长音不要缩短。', transferZh: '换一种你不了解的活动，追问一个具体细节，再确认自己理解的规则。' },
+  { title: '推荐节目并回应不同喜好', canDo: '用理由推荐一部作品，并接受对方的不同偏好。', phrase: 'このドラマは話が分かりやすいので、おすすめです。', reading: 'このどらまははなしがわかりやすいのでおすすめです', meaningZh: '这部电视剧情节容易理解，所以推荐给你。', grammarZh: '「动词ます形去ます＋やすい」描述容易做；「ので」连接理由，不要照搬中文的词序。', soundZh: '「分かりやすいので」先作为一个意义组听，再连接推荐部分。', transferZh: '对方说不喜欢这种题材，换一个推荐并解释原因。' },
+  { title: '说明搬家准备的进度', canDo: '说明已完成和未完成的事情，并商量帮助。', phrase: '引っ越しの準備はだいたい終わりました。', reading: 'ひっこしのじゅんびはだいたいおわりました', meaningZh: '搬家的准备大致完成了。', grammarZh: '已完成用过去式；仍没做完可接「まだ～ていません」，别把“大致完成”说成全部结束。', soundZh: '「ひっこし」的促音和「じゅんび」的拨音分别占一拍。', transferZh: '换成准备旅行，说明一件已办好和一件需要帮忙的事。' },
+  { title: '描述设备问题并约处理时间', canDo: '说明具体异常，并礼貌地提出检查请求。', phrase: 'お湯が出ないんですが、見てもらえますか。', reading: 'おゆがでないんですがみてもらえますか', meaningZh: '没有热水，能请您看一下吗？', grammarZh: '「んですが」交代情况并引出请求；「てもらえますか」询问能否请对方做，不是命令。', soundZh: '先说清异常，再停顿提出请求；不要吞掉「ない」而把意思说反。', transferZh: '模拟另一个家电故障，说明从何时开始，再确认上门时间。' },
+  { title: '一起商量餐厅的条件', canDo: '提出条件、听取不同意见并达成选择。', phrase: '静かに話せる店がいいんですが。', reading: 'しずかにはなせるみせがいいんですが', meaningZh: '我想选一家能安静聊天的店。', grammarZh: '「話せる」是可能表达；修饰店的条件放在名词前，不机械套用中文“的”。', soundZh: '听出对方是在提出偏好还是已决定，注意句尾而非只抓名词。', transferZh: '对方更在意价格，综合两个条件商量另一家店。' },
+  { title: '分享做饭习惯与省事办法', canDo: '说明日常习惯，给出一个具体做法和理由。', phrase: '忙しい日は、前の日に作っておきます。', reading: 'いそがしいひはまえのひにつくっておきます', meaningZh: '忙的时候，我会提前一天做好。', grammarZh: '「ておく」表示为之后做准备；本例不是把某物放在某处。', soundZh: '原声可能把「ておく」说得较紧凑；先辨认完整形式，不刻意吞音。', transferZh: '解释另一项提前准备的习惯，并回答朋友的一个追问。' },
+  { title: '把初次见面延续成交流', canDo: '表达继续联系的愿望，并给对方留出选择。', phrase: '機会があれば、またお話ししたいです。', reading: 'きかいがあればまたおはなししたいです', meaningZh: '有机会的话，希望还能再聊聊。', grammarZh: '「ば」提出条件；表达愿望不等于已经约好，应再确认双方是否方便。', soundZh: '「きかい」与「きっかけ」意思有关联，但读音和用法不同；留意后者的促音。', transferZh: '在另一种社交活动后提出一个轻松的后续邀请，回应对方暂时没空。' },
+  { title: '礼貌加入正在进行的交流', canDo: '先征求同意，再自然加入谈话。', phrase: 'ここに座ってもよろしいですか。', reading: 'ここにすわってもよろしいですか', meaningZh: '我可以坐在这里吗？', grammarZh: '「てもよろしいですか」较礼貌；熟人间可用「てもいい？」。不能把敬体越复杂当成越自然。', soundZh: '听清问许可的句尾，使用友好的节奏；不靠中文四声读「よろしい」。', transferZh: '分别向陌生人和熟人询问能否加入，按关系调整说法。' },
+  { title: '讲清学习兴趣的来由', canDo: '说明一件经历如何引发了自己的兴趣。', phrase: '友達に誘われたのがきっかけです。', reading: 'ともだちにさそわれたのがきっかけです', meaningZh: '朋友的邀请是契机。', grammarZh: '「誘われた」表达自己受到邀请；「の」把这件事作为一个整体，不是中文所有格。', soundZh: '「きっかけ」有促音；在叙述里保留它，再连上后续经历。', transferZh: '换成一种新爱好，讲出契机、后来的行动和现在的感受。' },
+  { title: '说明自己的学习做法', canDo: '描述一项实际习惯，并用具体例子说明。', phrase: '聞いた内容を、自分の言葉で説明するようにしています。', reading: 'きいたないようをじぶんのことばでせつめいするようにしています', meaningZh: '我会尽量用自己的话解释听到的内容。', grammarZh: '「ようにしている」表达有意识维持的做法；不要把“努力这样做”说成“已经全部学会”。', soundZh: '长句按内容／方法／习惯分组，不必一口气说完。', transferZh: '给出最近一次练习的真实例子，说清一个仍需要帮助的地方。' },
+  { title: '对可疑信息提出核实请求', canDo: '说明疑点并向合适的人请求确认。', phrase: 'このメール、本物かどうか確認したいです。', reading: 'このめーるほんものかどうかかくにんしたいです', meaningZh: '我想确认这封邮件是不是真的。', grammarZh: '「かどうか」把“是否”嵌入句子；本练习只练核实表达，不判定真实邮件安全性。', soundZh: '先听清要核实的对象，再留意肯定／否定及保留意见。', transferZh: '模拟收到一条可疑通知，用日语说明疑点并请求核实，不提供真实账号或密码。' },
+  { title: '求助时把关键信息说清楚', canDo: '在模拟求助中说明地点和情况，并回应确认。', phrase: '救急車をお願いします。場所は駅の前です。', reading: 'きゅうきゅうしゃをおねがいしますばしょはえきのまえです', meaningZh: '请派救护车来，地点在车站前。', grammarZh: '短句先交代请求和地点；这是语言演练，真实紧急情况遵从当地急救人员指引。', soundZh: '「きゅうきゅうしゃ」先听后分拍再连读；地点与数字要说清，别追求快。', transferZh: '在虚构地点演练说明情况，请对方复述地点后再确认；不进行医学判断。' },
+  { title: '祝贺并回应别人的好消息', canDo: '根据关系祝贺、追问近况并回应邀请。', phrase: 'ご結婚、おめでとうございます。', reading: 'ごけっこんおめでとうございます', meaningZh: '恭喜结婚。', grammarZh: '常用祝贺表达可作为词块使用；对同事和好友的后续提问要考虑关系和隐私。', soundZh: '「けっこん」的促音与拨音都保留；语气自然，不按汉字逐字重读。', transferZh: '换成朋友升职的消息，祝贺并问一个合适的问题。' },
+  { title: '说明人际困扰并听取建议', canDo: '先讲事实和感受，再表达希望怎样改变。', phrase: '友達との約束について、ちょっと相談したいんですが。', reading: 'ともだちとのやくそくについてちょっとそうだんしたいんですが', meaningZh: '关于和朋友的约定，我想商量一下。', grammarZh: '日语「約束」主要指约定，不按中文“约束”理解；「について」标出商量的话题。', soundZh: '「ちょっと」的促音要听清；委婉不等于把关键词说得听不见。', transferZh: '用虚构的小分歧说明事实，再复述对方建议并说出自己的选择。' },
+  { title: '协商旅行行程与取舍', canDo: '说明希望、限制和理由，比较两个安排。', phrase: '時間があれば、港にも寄ってみたいです。', reading: 'じかんがあればみなとにもよってみたいです', meaningZh: '如果有时间，我也想顺路去港口看看。', grammarZh: '「てみたい」表达想尝试；「にも」补充一个地点，不代表必须去。', soundZh: '把条件和愿望分开听，留意「寄って」的促音。', transferZh: '遇到下雨或时间减少，重新安排两个地点并说明舍弃的理由。' },
+  { title: '有顺序地分享旅行经历', canDo: '说清发生了什么、感受和意外之处。', phrase: '道に迷いましたが、親切な人に助けてもらいました。', reading: 'みちにまよいましたがしんせつなひとにたすけてもらいました', meaningZh: '虽然迷了路，但有位热心人帮了我。', grammarZh: '「が」在这里连接转折；「てもらう」从接受帮助的一方叙述。', soundZh: '给转折留一个自然停顿，再连上结果；不把助词都读成重音。', transferZh: '讲另一次虚构出行的意外，说明问题、帮助和结果。' },
+  { title: '听懂工作步骤并确认责任', canDo: '复述操作顺序，确认不明确的分工。', phrase: '最初に注文を確認して、それから料理を運びます。', reading: 'さいしょにちゅうもんをかくにんしてそれからりょうりをはこびます', meaningZh: '先确认点单，再上菜。', grammarZh: '日语「注文」是点单／订购，不按中文“注文”猜意思；顺序词需要和实际动作一起理解。', soundZh: '听清「最初に」「それから」及关键动作，不只记住熟悉汉字。', transferZh: '换一个简单工作任务，复述两步顺序，再确认哪一步由自己负责。' },
+  { title: '说明求职经历与工作条件', canDo: '用具体经历说明优势，并礼貌确认工作要求。', phrase: '接客の経験を、この仕事で生かしたいです。', reading: 'せっきゃくのけいけんをこのしごとでいかしたいです', meaningZh: '我想把接待顾客的经验用于这份工作。', grammarZh: '用真实例子说明经验，不只堆抽象优点；确认条件时可说「～について伺ってもよろしいですか」。', soundZh: '「せっきゃく」含促音和拗音，先听真人示范；完整说清经历和目标。', transferZh: '针对另一份虚构工作，说一段真实能力介绍，并询问一个工作条件。' },
+]
 function courseLessons(content: LessonContent[], course: JapaneseLesson['course']): JapaneseLesson[] {
   return content.map((lesson, index) => ({ ...lesson, course, position: index + 1, id: `ja-irodori-${course}-${index + 1}` }))
 }
 export const japaneseStarterLessons = courseLessons(lessons, 'starter')
-export const japaneseLessons = [...japaneseStarterLessons, ...courseLessons(elementary1, 'elementary01'), ...courseLessons(elementary2, 'elementary02')]
-export const japaneseCourseNames = { starter: '入门 · A1 教材', elementary01: '初级 1 · A2 教材', elementary02: '初级 2 · A2 教材' } as const
+export const japaneseLessons = [...japaneseStarterLessons, ...courseLessons(elementary1, 'elementary01'), ...courseLessons(elementary2, 'elementary02'), ...courseLessons(preIntermediate, 'pre-intermediate')]
+export const japaneseCourseNames = { starter: '入门 · A1 教材', elementary01: '初级 1 · A2 教材', elementary02: '初级 2 · A2 教材', 'pre-intermediate': '初中级衔接 · A2/B1 教材' } as const
 export function japaneseLessonUrl(lesson: JapaneseLesson): string {
   return `https://www.irodori.jpf.go.jp/en/${lesson.course}/audio/lesson${String(lesson.position).padStart(2, '0')}.html`
 }
 function materialsFor(selected: JapaneseLesson[]): Material[] {
   return selected.map(lesson => ({
     id: lesson.id, language: 'ja', title: lesson.title, topic: '生活日语', difficulty: lesson.course === 'starter' ? 0.1 + (lesson.position - 1) * 0.025
+      : lesson.course === 'pre-intermediate' ? 0.9 + (lesson.position - 1) * 0.005
       : (lesson.course === 'elementary01' ? 0.53 : 0.72) + (lesson.position - 1) * 0.01,
     duration: 0, transcript: '', sentences: [], sourceKind: 'url', sourceLabel: japaneseSource.publisher,
     sourceUrl: japaneseLessonUrl(lesson),
     license: 'Publisher playback links only; app examples and prompts are original, not publisher transcripts.', synthetic: false, approved: true,
-    question: lesson.canDo, answer: '', keywords: [], createdAt: lesson.course === 'starter' ? japaneseSource.checkedAt : japaneseSource.gradedCheckedAt,
+    question: lesson.canDo, answer: '', keywords: [], createdAt: lesson.course === 'starter' ? japaneseSource.checkedAt : lesson.course === 'pre-intermediate' ? japaneseSource.bridgeCheckedAt : japaneseSource.gradedCheckedAt,
     chunks: [{ text: lesson.phrase, meaningEn: '', meaningZh: lesson.meaningZh, example: lesson.phrase }],
-    externalStudy: { publisher: japaneseSource.publisher, level: lesson.course === 'starter' ? 'beginner' : 'intermediate', mission: `先听原站的一段对话，再说明意思。${lesson.canDo}随后录音：${lesson.transferZh}`, checkedAt: lesson.course === 'starter' ? japaneseSource.checkedAt : japaneseSource.gradedCheckedAt },
+    externalStudy: { publisher: japaneseSource.publisher, level: lesson.course === 'starter' ? 'beginner' : 'intermediate', mission: `先听原站的一段对话，再说明意思。${lesson.canDo}随后录音：${lesson.transferZh}`, checkedAt: lesson.course === 'starter' ? japaneseSource.checkedAt : lesson.course === 'pre-intermediate' ? japaneseSource.bridgeCheckedAt : japaneseSource.gradedCheckedAt },
   }))
 }
 export function japaneseStarterMaterials(): Material[] {
