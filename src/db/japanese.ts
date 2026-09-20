@@ -1,9 +1,10 @@
 import type { JoveDatabase } from './db'
+import Dexie from 'dexie'
 import { createLearningRepository } from './repository'
 import { japaneseMaterials } from '../content/japanese'
 import { japanesePlacement, japanesePlacementItems, japanesePracticeHistory, nextJapaneseLesson } from '../domain/japanese'
 import { readLanguageDay } from './language-day'
-import { assessmentSchema, planSchema, sessionSchema } from './schema'
+import { assessmentSchema, eventSchema, planSchema, sessionSchema } from './schema'
 import type { DailyPlan, StudySession } from '../domain/types'
 import { z } from 'zod'
 import { createJapaneseReview } from './japanese-review'
@@ -11,6 +12,7 @@ import { createJapaneseDialogue } from './japanese-dialogue'
 import { createJapaneseReading } from './japanese-reading'
 import { japaneseReadingMaterials, japaneseWrittenExercises } from '../content/japanese-reading'
 import { nextJapaneseReading, nextJapaneseKana } from '../domain/japanese-reading'
+import { unavailableExternalIds } from '../content/external'
 
 /** Called only by an explicitly enabled Japanese workspace, never by English
  * bootstrap. Does not overwrite setup, learned content, cards or saved work. */
@@ -205,6 +207,55 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       return next
     })
   }
+  async function replaceUnavailable(sessionId: string, now = Date.now()): Promise<StudySession | null> {
+    await today(now)
+    await checkOwner()
+    return database.transaction('rw', database.tables, async () => {
+      await Dexie.waitFor(Dexie.ignoreTransaction(sharedFence))
+      await fence()
+      const session = await database.sessions.get(sessionId)
+      if (!session || session.kind !== 'japanese-practice' || !session.materialId || session.completedAt) throw new Error('当前练习已改变，请返回日语今日安排。')
+      const draft = japanesePracticeDraft.parse(session.draft), date = new Date(now).toLocaleDateString('en-CA')
+      const plan = await database.plans.get(date), assigned = plan?.tasks.find(task => task.id === draft.taskId && task.kind === 'listen' && task.materialId === session.materialId)
+      if (!plan || !assigned || assigned.done) throw new Error('这份草稿不在今天的安排中，原稿仍保留；请返回今日任务。')
+      const reportId = `${sessionId}:unavailable:${date}`, previous = await database.events.get(reportId)
+      if (previous) return typeof previous.data?.replacementSessionId === 'string'
+        ? await database.sessions.get(previous.data.replacementSessionId) ?? null : null
+      if (assigned.optional) throw new Error('这份练习已不在必做安排中，原稿仍保留。')
+      const report = eventSchema.parse({ id: reportId, type: 'EXTERNAL_LINK_UNAVAILABLE', source: 'self-report', timestamp: now,
+        sessionId, data: { materialId: session.materialId, taskId: assigned.id, issue: 'cannot-open', playbackObserved: false } })
+      const materials = await database.materials.toArray(), events = await database.events.toArray()
+      const currentMaterial = materials.find(material => material.id === session.materialId)
+      if (!currentMaterial?.externalStudy || currentMaterial.language !== 'ja') throw new Error('这不是可替换的日语原站课程。')
+      const history = [...events, report], unavailable = unavailableExternalIds(history, now)
+      const publisherFailures = new Map<string, number>()
+      for (const material of materials) if (material.externalStudy && unavailable.has(material.id)) {
+        const publisher = material.externalStudy.publisher
+        publisherFailures.set(publisher, (publisherFailures.get(publisher) ?? 0) + 1)
+      }
+      // After two distinct failures from one publisher, stop rotating through
+      // its entire library. Use other saved practice without claiming listening.
+      const alternative = nextJapaneseLesson(materials.filter(material => material.id !== session.materialId
+        && (publisherFailures.get(material.externalStudy?.publisher ?? '') ?? 0) < 2), history, currentMaterial.difficulty, now)
+      const replacement = alternative ? { ...assigned, id: `${date}:ja:listen:${alternative.id}`, title: alternative.title,
+        materialId: alternative.id, reason: '原站暂时打不开，换一课难度相近的真人练习；原来的草稿和录音仍保留。' } : null
+      if (replacement && plan.tasks.some(task => task.id === replacement.id)) throw new Error('替代任务已存在，请返回今日安排继续。')
+      const next = replacement ? sessionSchema.parse({ id: `ja-practice:${replacement.id}`, kind: 'japanese-practice', materialId: replacement.materialId,
+        startedAt: now, stage: 'listen', draft: { taskId: replacement.id, revision: 0, listened: false, response: '', expression: '', example: '', audioId: '', retryAudioId: '', comparison: '' } }) : null
+      const tasks = plan.tasks.flatMap(task => task.id === assigned.id ? [{ ...task, optional: true }, ...(replacement ? [replacement] : [])] : [task])
+      const updated = planSchema.parse({ ...plan, tasks, minutes: tasks.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0) })
+      await Dexie.waitFor(Dexie.ignoreTransaction(sharedFence))
+      await fence()
+      await database.events.add(eventSchema.parse({ ...report, data: { ...report.data, ...(next ? { replacementSessionId: next.id } : {}) } }))
+      await database.plans.put(updated)
+      if (next && replacement) {
+        await database.sessions.add(next)
+        await database.events.add(eventSchema.parse({ id: `${next.id}:started`, type: 'TASK_STARTED', source: 'objective', sessionId: next.id,
+          timestamp: now, data: { taskId: replacement.id, materialId: replacement.materialId!, minutes: replacement.minutes } }))
+      }
+      return next
+    })
+  }
   async function finish(sessionId: string, now = Date.now()) {
     await checkOwner()
     return database.transaction('rw', database.tables, async () => {
@@ -250,5 +301,5 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       return complete
     })
   }
-  return { database, repository, review, dialogue, reading, open, checkOwner, saveDiagnostic, today, start, save, finish, diagnosticId }
+  return { database, repository, review, dialogue, reading, open, checkOwner, saveDiagnostic, today, start, save, replaceUnavailable, finish, diagnosticId }
 }

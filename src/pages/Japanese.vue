@@ -148,6 +148,18 @@ async function complete() {
   if (!session.value || captureActive.value) return
   await flush(); restore(await learning.finish(session.value.id)); await refresh()
 }
+async function replaceUnavailable() {
+  if (!session.value || captureActive.value || coachActive.value) return
+  await flush()
+  const replacement = await learning.replaceUnavailable(session.value.id)
+  if (disposed) return
+  await refresh()
+  if (disposed) return
+  const destination = { path: '/ja', ...(replacement ? { query: { session: replacement.id } } : {}) }
+  allowedNavigation = router.resolve(destination).fullPath
+  try { await router.push(destination) } finally { allowedNavigation = '' }
+  notice.value = replacement ? '已换一课；上一课的草稿和录音仍保留，可随时继续。' : '暂时没有合适的替代真人课。已保留原稿，可继续今天其他练习；不会把访问失败算作学完。'
+}
 async function safeLeave(to: { fullPath: string }) {
   if (navigating.value) return false
   if (busy.value && to.fullPath !== allowedNavigation) { notice.value = '正在保存，请稍后再切换。'; return false }
@@ -210,13 +222,13 @@ onBeforeUnmount(() => {
       <template v-else-if="!session">
         <section class="panel ja-panel">
           <p v-if="allowance" class="help-text">英日共用每天 {{ allowance.totalMinutes }} 分钟 · 日语当前安排 {{ allowance.allowances.ja.remaining }} 分钟。这是任务预算，不是计时成绩。</p>
-          <h2>{{ task ? `今日练习：${task.title}` : '今天先到这里' }}</h2>
+          <h2>{{ task ? `今日练习：${task.title}` : '暂时没有新的必做任务' }}</h2>
           <p v-if="task?.kind === 'review'">先做一小组到期复习：独立回答 → 对照参考 → 安排下次。之后再进行今日新情境练习。</p>
           <p v-else-if="task?.kind === 'speak'">围绕今天的情境连续回应三轮；先保持交流，结束后挑一处改进并完整重说。</p>
           <p v-else-if="task?.kind === 'learn'">{{ task.materialId?.startsWith('ja-kana-') ? '① 听原站示范 → ② 联系字形 → ③ 保存首答 → ④ 对照后再练' : '① 阅读短篇 → ② 理解与读法分开答 → ③ 对照 → ④ 安排回顾' }}</p>
           <p v-else-if="task">① 听一段真人对话 → ② 回忆意思 → ③ 用自己的话回应 → ④ 对照后重说</p>
           <p v-if="task" class="help-text">{{ task.reason }}</p>
-          <p v-else>已完成今天的安排，或当天时间已用完。已有草稿仍然保留，不需要补做堆积的任务。</p>
+          <p v-else>系统不会为了填满时间强塞任务。已有草稿仍然保留；原站打不开或暂无合适材料，不会记为已经学会。</p>
           <button v-if="task" class="button primary" :disabled="busy || navigating" @click="act(start)">开始学习 · 约 {{ task.minutes }} 分钟</button>
           <p class="help-text">听力、口语仍待实际练习观察；认字不等于会说。{{ placement?.kanaSupport ? '需要时会显示假名读法和拍数提示。' : '读法提示默认收起，需要时可以展开。' }}</p>
         </section>
@@ -233,6 +245,8 @@ onBeforeUnmount(() => {
         <p class="help-text">{{ japaneseCourseNames[lesson.course] }} · 第 {{ lesson.position }} 课 · 教材等级不是你的能力成绩</p>
         <a :href="sourceUrl" target="_blank" rel="noopener noreferrer" class="button">打开原站真人音频 ↗</a>
         <p class="help-text">{{ japaneseSource.publisher }}。选这一课的一小段对话；先不看文字，必要时重复听。打开链接不会记为听懂或完成。</p>
+        <button class="text-button" :disabled="busy || navigating || captureActive || coachActive" @click="act(replaceUnavailable)">原站打不开，自动换一课</button>
+        <p class="help-text">原来的回答和录音会保留；替代课沿用这项任务的时间，不额外加量，也不降低能力记录。</p>
         <fieldset :disabled="busy || navigating || captureActive" class="ja-response">
           <template v-if="step === 'listen'">
             <label class="ja-choice"><input v-model="draft.listened" type="checkbox" @change="changed">我已经实际听过一段原声</label>

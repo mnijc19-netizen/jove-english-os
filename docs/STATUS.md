@@ -2,6 +2,18 @@
 
 ## Latest checkpoint — September20 local
 
+### Japanese unavailable-link recovery — September20 DEV candidate
+
+- Added “原站打不开，自动换一课” to the saved guided practice. Flush the current answer first, then atomically retain its session/audio, mark only its assignment optional and create one replacement using the same planned minutes. Repeated reports return the same replacement. Access failure is a self-report, never listening completion, lost ability, or a completed task.
+- Uses the existing editorial difficulty band (up to current+0.15, not a promise of identical/calibrated difficulty). After two distinct failures from a publisher within24hours, stop rotating through that publisher and return to other saved work; no network probing/retry loop or fabricated listening fallback. No alternative leaves the original recoverable. Empty Today no longer claims work must have been completed.
+-11 workspace tests pass, including original/recording retention, idempotence, bounded publisher fallback, no out-of-band replacement and owner-change refusal. The first owner test failed because its fixture used `key` instead of the actual `id` primary key; corrected the fixture, not the owner fence. Typecheck/scoped lint and actual local Chromium desktop/mobile journeys pass: drafts survive reload/replacement, two reports stop rotation, no false score/completion, no overflow or uncaught error. Independent review reports no P1/P2 and clarified the provisional difficulty-band wording.
+- This new DEV-only slice is not part of release candidate `d0a36db`; Japanese remains hidden. Broader ongoing content/revalidation, live-provider and actual owner-device acceptance remain open.
+
+### English production candidate — September20 deployment in progress
+
+- Backend maintenance candidate `fe8e1b2` full CI35482364576 passed, including cold local migrations, real Auth/Storage, Deno, multi-profile Chromium/WebKit and the unchanged full browser gate; feature-branch deployment was skipped. Final English candidate `d0a36db236422af69008df9e60905173f8f57f7c` adds the scoped Chinese guidance and directory classification. It was fast-forwarded to main; CI35483198597 must pass the existing full gates before Pages deployment. Do not call it publicly shipped merely from this push.
+- Fresh exact code readback: ai19 is1,816,514bytes/SHA256 `4d8eb017b748d665bdf8e677761d86eaf2f4ff6d5075a088588c7b874160cabf`; content18/speech18 are1,812,789bytes/SHA256 `852ec856bf8309b6058393450c41f22004dd91fb59d2db1d322b80ce5e03d25a`. Downloaded entrypoints match reviewed source, all three anonymous handlers return401/SIGN_IN, and the exact-SHA24hour release hold follows the20-migration readback. Fresh public desktop/mobile profiles retain old-production drafts while awaiting explicit PWA update; successful production upgrade readback remains pending.
+
 ### Native-Chinese English guidance — September20 local candidate
 
 - Today now explains the automatically selected next English task in Chinese, including its actual planned minutes and short actionable steps; reading and chunk study stay distinct. Added15/30-minute choices to the existing planner without changing default preferences, saved task IDs or evidence. This is workload control, not an optimal-dose claim or an additional daily obligation.
