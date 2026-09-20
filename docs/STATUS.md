@@ -4,6 +4,12 @@
 
 The production-release evidence below supersedes older candidate-only/public-release-pending notes in the chronological sections that follow. Japanese remains a separate unfinished development scope.
 
+### English compatibility release — September20 delivered
+
+- Main6724f0eaf1dd307bfaf32e4bb409ec7b69ea945c passed CI35485376886 verification **and deployment**; GitHub Pages deployment6548517164 at03:17UTC binds that exact SHA. No duplicate feature-branch matrix was dispatched. All21-migration/Auth/Storage/Deno/Chromium/WebKit/app-browser gates passed in this one release workflow.
+- Actual public desktop/mobile isolated profiles saved drafts on `index-5bzqNOQG.js`, accepted Update now and reached `index-BrkzxZ9C.js`. Drafts survived update and reload; external lessons, Chinese guidance,15-minute day and cloud configuration remained available, Japanese stayed hidden, and neither profile had overflow or uncaught errors. Ignored evidence: `.work/continuing-compat-release-20260920-{desktop,mobile}.png` and `-result.json`. These are synthetic local-learning profiles, not real-owner Auth or physical phones.
+- BBC automatic client import is still **off** (repository enable variable absent). Its hosted49-entry reserve and the independent52/30 VOA refresh are verified above. Asked the owner to save and update Android/iPhone/desktop before activation; no acknowledgement is assumed. The earlier isolated-owner-login request also remains unanswered, so real-owner AI/sync acceptance is still open. New Japanese72-task commit1d77cdf is local only and was not included in this public compatibility release. Overall multilingual completion is not claimed.
+
 ### Japanese bridge curriculum — September20 LOCAL ONLY, after English candidate
 
 - Added18 original Chinese-guided tasks linked to the official Irodori Pre-Intermediate A2/B1 book, extending the finite reserve from54to72. Covers explanation/clarification, constraints/negotiation, reporting problems, social interaction, study habits, simulated help-seeking and workplace communication. Japanese readings in words, mora/long-vowel/gemination attention, register, conditionals and Chinese false-friend cautions are task-specific; original prompts/examples are not publisher transcript claims. Emergencies are communication simulations, not medical/safety instructions.
