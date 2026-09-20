@@ -127,6 +127,19 @@ function persistence(afterClaim?: () => void) {
 const fetched = (text = html) => ({ status: 200, contentType: 'text/html', body: new TextEncoder().encode(text), finalUrl: EXTERNAL_CATALOG_URL,
   etag: null, lastModified: null, retryAfter: null, dnsPinning: 'injected' as const })
 describe('independent no-model catalog worker', () => {
+  it.each([
+    ['PGRST000', 'EXTERNAL_CATALOG_CONNECTION'], ['PGRST003', 'EXTERNAL_CATALOG_BUSY'],
+    ['53300', 'EXTERNAL_CATALOG_BUSY'], ['57014', 'EXTERNAL_CATALOG_BUSY'],
+    ['PGRST202', 'EXTERNAL_CATALOG_SCHEMA'], ['42501', 'EXTERNAL_CATALOG_PERMISSION'],
+    ['22023', 'EXTERNAL_CATALOG_INVALID'], ['sensitive-unknown', 'EXTERNAL_CATALOG'],
+  ])('categorizes a failed RPC %s without exposing upstream detail or fetching a publisher', async (code, expected) => {
+    const admin = { rpc: vi.fn(async () => ({ data: null, error: { code, message: 'private fixture', details: 'private fixture' } })) } as unknown as SupabaseClient
+    const fetcher = vi.fn<ContentFetcher>()
+    await expect(refreshExternalCatalog(admin, { fetcher })).rejects.toMatchObject({ code: expected, status: 503,
+      message: 'The course directory is temporarily unavailable. Saved practice is unchanged.' })
+    expect(admin.rpc).toHaveBeenCalledOnce()
+    expect(fetcher).not.toHaveBeenCalled()
+  })
   it('binds intermediate source to every RPC and only its exact publisher directory', async () => {
     const db = persistence(), fetcher = vi.fn<ContentFetcher>(async () => ({ ...fetched(intermediateHtml),
       finalUrl: 'https://learningenglish.voanews.com/p/6765.html' }))

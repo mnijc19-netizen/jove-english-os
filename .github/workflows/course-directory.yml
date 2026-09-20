@@ -16,7 +16,8 @@ jobs:
   refresh:
     if: github.repository == 'mnijc19-netizen/jove-english-os' && github.ref == 'refs/heads/main' && vars.JOVE_CATALOG_SCHEDULE_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    # Five sequential 30-second source deadlines plus checkout/setup overhead.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:

@@ -13,7 +13,8 @@ export function directoryJobDiagnostics(error) {
 }
 async function backendFailureCode(response) {
   if (!response.body) return undefined
-  const allowed = new Set(['EXTERNAL_CATALOG', 'EXTERNAL_CATALOG_REFRESH', 'CATALOG_JOB_AUTH',
+  const allowed = new Set(['EXTERNAL_CATALOG', 'EXTERNAL_CATALOG_REFRESH', 'EXTERNAL_CATALOG_CONNECTION',
+    'EXTERNAL_CATALOG_BUSY', 'EXTERNAL_CATALOG_SCHEMA', 'EXTERNAL_CATALOG_PERMISSION', 'EXTERNAL_CATALOG_INVALID', 'CATALOG_JOB_AUTH',
     'CATALOG_JOB_AUTHORITY', 'CATALOG_JOB_REQUEST', 'CONFIGURATION'])
   const reader = response.body.getReader(), chunks = []
   let timer, size = 0
@@ -71,7 +72,13 @@ export async function refreshCourseDirectory(token, fetcher = fetch, sourceId = 
 }
 
 export async function refreshCourseDirectories(token, fetcher = fetch) {
-  const results = await Promise.allSettled(sources.map(source => refreshCourseDirectory(token, fetcher, source)))
+  // Five small metadata jobs share a free database. Avoid a simultaneous RPC
+  // burst; each keeps its own deadline, no retry, and independent outcome.
+  const results = []
+  for (const source of sources) {
+    try { results.push({ status: 'fulfilled', value: await refreshCourseDirectory(token, fetcher, source) }) }
+    catch (reason) { results.push({ status: 'rejected', reason }) }
+  }
   if (results.some(result => result.status === 'rejected')) throw new DirectoryJobError('One or more course directories failed; successful refreshes remain saved.',
     results.flatMap((result, index) => result.status === 'rejected' ? directoryJobDiagnostics(result.reason)
       : [{ sourceId: sources[index], code: 'SUCCESS_OR_NOT_DUE' }]))

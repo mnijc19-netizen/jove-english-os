@@ -23,7 +23,17 @@ const source: ContentSource = {
 }
 async function rpc(admin: SupabaseClient, action: string, args: Record<string, unknown> = {}) {
   const result = await admin.rpc('external_catalog_worker', { action, args })
-  if (result.error) throw new GatewayError(503, 'EXTERNAL_CATALOG', 'The course directory is temporarily unavailable. Saved practice is unchanged.')
+  if (result.error) {
+    // Fixed categories only: upstream messages/details can contain SQL or data.
+    // https://docs.postgrest.org/en/stable/references/errors.html
+    const raw = result.error.code
+    const code = ['PGRST000', 'PGRST001', 'PGRST002'].includes(raw) ? 'EXTERNAL_CATALOG_CONNECTION'
+      : ['PGRST003', '53300', '57014'].includes(raw) ? 'EXTERNAL_CATALOG_BUSY'
+      : ['PGRST202', 'PGRST205', '42883', '42P01'].includes(raw) ? 'EXTERNAL_CATALOG_SCHEMA'
+      : raw === '42501' ? 'EXTERNAL_CATALOG_PERMISSION'
+      : raw === '22023' ? 'EXTERNAL_CATALOG_INVALID' : 'EXTERNAL_CATALOG'
+    throw new GatewayError(503, code, 'The course directory is temporarily unavailable. Saved practice is unchanged.')
+  }
   return result.data
 }
 export async function readExternalCatalog(admin: SupabaseClient, sourceId: ExternalCatalogSource = EXTERNAL_CATALOG_SOURCE) {

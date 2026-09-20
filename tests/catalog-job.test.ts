@@ -26,6 +26,23 @@ describe('directory-only scheduler client', () => {
     await expect(refreshCourseDirectories(token, fetcher)).rejects.toThrow('successful refreshes remain saved')
     expect(fetcher).toHaveBeenCalledTimes(5)
   })
+  it('waits for each source response body before starting the next, with no concurrent requests or retries', async () => {
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const fetcher = vi.fn(async () => new Response(new ReadableStream({
+      async start(controller) {
+        await pending
+        controller.enqueue(new TextEncoder().encode('{"refreshed":false,"reason":"not-due-or-running"}'))
+        controller.close()
+      },
+    })))
+    const result = refreshCourseDirectories(token, fetcher)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(fetcher).toHaveBeenCalledOnce()
+    release()
+    await expect(result).resolves.toContain('not due')
+    expect(fetcher).toHaveBeenCalledTimes(5)
+  })
   it('rejects a valid snapshot result for the wrong requested course', async () => {
     await expect(refreshCourseDirectory(token, async () => Response.json({ refreshed: true, lessons: 52,
       sourceId: 'voa-level1', revision: 'a'.repeat(64) }), 'voa-level2')).rejects.toThrow('valid outcome')
@@ -75,7 +92,8 @@ describe('directory-only scheduler client', () => {
     }
     expect(directoryJobDiagnostics(Object.assign(new Error(token), { diagnostics: token }))).toEqual([{ code: 'UNCLASSIFIED' }])
   })
-  it.each(['EXTERNAL_CATALOG', 'EXTERNAL_CATALOG_REFRESH', 'CATALOG_JOB_AUTH', 'CONFIGURATION'])('retains only the known backend category %s, never its body or message', async backendCode => {
+  it.each(['EXTERNAL_CATALOG', 'EXTERNAL_CATALOG_REFRESH', 'EXTERNAL_CATALOG_CONNECTION', 'EXTERNAL_CATALOG_BUSY',
+    'EXTERNAL_CATALOG_SCHEMA', 'EXTERNAL_CATALOG_PERMISSION', 'EXTERNAL_CATALOG_INVALID', 'CATALOG_JOB_AUTH', 'CONFIGURATION'])('retains only the known backend category %s, never its body or message', async backendCode => {
     let failure: unknown
     try { await refreshCourseDirectory(token, async () => Response.json({ error: { code: backendCode, message: `secret-${token}`, details: token }, arbitrary: token }, { status: 503 })) }
     catch (error) { failure = error }
