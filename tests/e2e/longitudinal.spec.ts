@@ -25,6 +25,25 @@ async function put(page: Page, table: string, values: unknown[]) {
   }), { table, values })
 }
 
+test('Chinese next-task guidance keeps a short day automatic and survives reload', async ({ page }) => {
+  await page.goto('#/today')
+  await page.getByRole('button', { name: '15 min', exact: true }).click()
+  await expect.poll(async () => (await rows<Profile>(page, 'profiles'))[0]?.dailyMinutes).toBe(15)
+  const guide = page.getByRole('region', { name: '下一项学习指引' })
+  await expect(guide).toBeVisible()
+  await expect(guide.locator('li')).toHaveCount(3)
+  await expect(guide).toContainText('不用反复硬听到疲惫')
+  expect((await rows<StudyEvent>(page, 'events')).every(event => event.score === undefined)).toBe(true)
+  await page.reload()
+  await expect(page.getByRole('button', { name: '15 min', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(guide).toBeVisible()
+  await page.screenshot({ path: test.info().outputPath('chinese-next-task.png'), fullPage: true })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.getByRole('button', { name: 'Start today’s practice', exact: true }).click()
+  await expect(page).toHaveURL(/#\/(listen|learn|review|speak|progress)/)
+  await expect.poll(async () => (await rows<DailyPlan>(page, 'plans')).some(plan => plan.minutes <= 15 && plan.tasks.some(task => task.minutes > 0))).toBe(true)
+})
+
 test('route focus cannot interrupt an editor after navigation has rendered', async ({ page }) => {
   await page.goto('#/'); await page.getByRole('heading', { level: 1 }).waitFor()
   const now = await page.evaluate(() => Date.now())

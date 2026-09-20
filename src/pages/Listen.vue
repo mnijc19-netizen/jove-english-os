@@ -699,6 +699,7 @@ onBeforeUnmount(() => {
       <div v-if="stage === 0" class="response-area">
       <h3>1 · Listen, then return</h3>
       <p>Use the first short conversation, or about one minute of a longer lesson. Keep its script closed for your first listen.</p>
+      <p class="help-text" lang="zh-CN">先听第一段短对话，尽量不看字幕。回来写下“谁在做什么、想达到什么目的”，可以用中文，不必逐字听写。实在听不出，就诚实写下听到的部分；下一步再核对，不用反复硬听。</p>
       <a class="button primary" :href="material.sourceUrl" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open today's listening lesson ↗</a>
       <p class="help-text">The recording stays with the publisher. Jove cannot observe its playback or whether captions were shown; opening this link earns no ability score.</p>
       <label><input v-model="draft.listened" type="checkbox" :disabled="externalLocked || working" /> I listened and have returned (self-report).</label>
@@ -709,6 +710,7 @@ onBeforeUnmount(() => {
       <div v-if="stage === 1" class="response-area">
       <h3>2 · Check and use one expression</h3>
       <p>Now check the publisher's script or explanation. Pick one useful expression and use it in a different situation.</p>
+      <p class="help-text" lang="zh-CN">现在再看原站文本，核对刚才漏听或误解的地方。只选一个日常能用的表达，写出中文意思，再用英语写一个自己的新情境句；意思填好后系统会安排复习。注意英语的主语、时态和词序，不逐字翻译中文。</p>
       <label for="external-expression">Expression you noticed</label>
       <input id="external-expression" v-model="draft.externalExpression" maxlength="100" :readonly="externalLocked" />
       <label for="external-example">Your own new sentence</label>
@@ -720,6 +722,7 @@ onBeforeUnmount(() => {
       <div v-if="stage >= 2" class="response-area">
       <h3>3 · Close the script and retell</h3>
       <p>Explain the situation aloud in 2–4 sentences. Play your recording back, notice one thing to improve, and try again. No automatic pronunciation score.</p>
+      <p class="help-text" lang="zh-CN">关掉原文，用 2–4 句英语说清楚。先录一遍，再回听；一次只改一个最影响理解的地方，然后完整重说。模仿真人的意群和重音，不用中文谐音标注发音；这里只保留练习记录，不给虚假的口音分数。</p>
       <Recorder
         label="External lesson retell" :saved-audio-id="savedAudioId" :disabled="working || externalLocked"
         @active="shadowCaptureActive = $event" @recorded="externalRecorded" />
@@ -773,6 +776,7 @@ onBeforeUnmount(() => {
         /></div>
         <div v-if="stage === 0" class="response-area">
           <h3>How much did you catch?</h3>
+          <p class="help-text" lang="zh-CN">先不看原文，听后说清大意；下面可以用中文回答。听不清也如实记录，不必猜满分。先保存这一遍，再看解释或重听，才能分清独立听懂与提示后的理解。</p>
           <div class="choice-row">
             <button
               v-for="n in [0, 25, 50, 75, 100]"

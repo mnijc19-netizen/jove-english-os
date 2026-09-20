@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyCard } from 'ts-fsrs'
-import { aggregateSkills, makePlan, nextAssignedTask, skillLabel, taskPath } from '../src/domain/engine'
-import { defaultProfile, skillNames, type Material, type Profile, type ReviewCard, type SkillName, type StudyEvent } from '../src/domain/types'
+import { aggregateSkills, englishTaskGuide, makePlan, nextAssignedTask, skillLabel, taskPath } from '../src/domain/engine'
+import { defaultProfile, skillNames, type Material, type PlanTask, type Profile, type ReviewCard, type SkillName, type StudyEvent } from '../src/domain/types'
 
 const now = new Date(2026, 8, 7, 12).getTime()
 const profile: Profile = { ...defaultProfile(), createdAt: now, interests: ['Technology'] }
@@ -13,6 +13,29 @@ const material = (id: string, topic = 'Technology', approved = true): Material =
 const event = (id: string, skill: SkillName, score: number, extra: Partial<StudyEvent> = {}): StudyEvent => ({ id, type: 'test', timestamp: now, skill, score, source: 'objective', ...extra })
 const card = (id: string): ReviewCard => ({ id, chunkId: id, modality: 'recognition', card: createEmptyCard(now - 1), contextIds: [] })
 const find = (events: StudyEvent[], skill: SkillName) => aggregateSkills(events).find(s => s.id === skill)!
+
+describe('Chinese procedure guidance and short-day admission', () => {
+  it.each(['review','listen','learn','shadow','speak','repair','retell','assessment'] as const)('guides %s without modifying its saved task or identity', kind => {
+    const task: PlanTask = { id: `today:${kind}`, kind, title: 'Saved original title', minutes: 15, reason: 'Saved reason', done: false }
+    const snapshot = structuredClone(task), guide = englishTaskGuide(task)
+    expect(guide.title).toMatch(/[\u3400-\u9fff]/)
+    expect(guide.steps.length).toBeGreaterThanOrEqual(2)
+    expect(task).toEqual(snapshot)
+  })
+  it('keeps reading and chunk retrieval instructions distinct', () => {
+    const task: PlanTask = { id: 'today:learn:reading', kind: 'learn', title: '', minutes: 5, reason: '', done: false }
+    expect(englishTaskGuide(task).title).toContain('读懂')
+    expect(englishTaskGuide({ ...task, id: 'today:learn:chunks' }).title).toContain('表达')
+    expect(englishTaskGuide({ ...task, id: 'legacy:learn' })).toEqual(englishTaskGuide({ ...task, id: 'today:learn:chunks' }))
+  })
+  it.each([15,30])('respects a chosen %i-minute short day with no new required backlog', dailyMinutes => {
+    const plan = makePlan({ ...profile, onboarded: true, dailyMinutes }, [], [], [], [material('short-day')], undefined, now)
+    expect(plan.minutes).toBeLessThanOrEqual(dailyMinutes)
+    expect(plan.tasks.filter(task => !task.optional).reduce((sum, task) => sum + task.minutes, 0)).toBeLessThanOrEqual(dailyMinutes)
+    expect(plan.tasks.every(task => task.minutes > 0)).toBe(true)
+    expect(nextAssignedTask(plan)).toBeDefined()
+  })
+})
 
 describe('distinct assigned reading and deliberate language', () => {
   const learner = { ...profile, onboarded: true }

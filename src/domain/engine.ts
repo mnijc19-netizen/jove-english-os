@@ -95,6 +95,28 @@ export function taskActivity(task: Pick<PlanTask, 'kind'> & Partial<Pick<PlanTas
   return task.kind === 'learn' ? task.id?.endsWith(':reading') ? 'reading' : 'chunks' : task.kind
 }
 
+/** Procedure guidance in the learner's first language, never lesson answers or
+ * extra ability evidence. Keep reading and deliberate recall distinct. */
+export function englishTaskGuide(task: PlanTask): { title: string; steps: readonly string[] } {
+  const activity = taskActivity(task)
+  if (activity === 'reading') return { title: '读懂一小段，再用自己的话表达', steps: [
+    '先通读抓主旨，不必每个词都查。', '卡住时再用提示；合上原文，写出重点。', '保存后继续下一项，系统会安排后续练习。',
+  ] }
+  if (activity === 'chunks') return { title: '把有用表达变成自己能用的话', steps: [
+    '先理解表达的意思和用法；后续复习时再独立回想。', '放进一个与你有关的新句子，不逐字套中文。', '系统安排间隔复习；看懂不等于已经会说。',
+  ] }
+  return {
+    listen: { title: '先听懂意思，再开口复述', steps: ['先听一小段，不急着看字幕。', '写下听到的意思，中文也可以；再核对原文。', '抓一个有用表达，关掉原文再用英语说。'] },
+    review: { title: '不看答案，试着从记忆中取出来', steps: ['先独立回想，再显示答案。', '忘了就选真实难度，不靠眼熟判断掌握。', '只做系统选出的这一小组，不用清空积压。'] },
+    shadow: { title: '听清节奏，再跟读一小句', steps: ['先确认意思，再听示范的重音和意群；真人材料优先。', '录下、回放、对比；一次只改一个地方。', '最后脱离文字说出来，不用汉字给英语标音。'] },
+    speak: { title: '先自己说，再修正一处', steps: ['先想清要表达什么，用英语录下第一遍。', '核对反馈，一次选一个最影响理解的问题。', '完整重说；暂时没有 AI 也可以保存并回听。'] },
+    repair: { title: '修正一个问题，然后完整重说', steps: ['回顾上次最影响理解的问题。', '需要时看提示，然后离开范例重说整段。', '保留两次录音，后续再看能否独立用出来。'] },
+    retell: { title: '离开原文，讲清楚一件事', steps: ['先回想人物、事情和结果。', '关掉原文，用自己的英语组织句子。', '录下后回听；背出原句不等于能应对新情境。'] },
+    assessment: { title: '看看现在能独立完成什么', steps: ['先独立作答，不提前看参考答案。', '听懂、读懂和说出来分别记录。', '不会的地方是下次排课依据，不是考试失败。'] },
+    learn: { title: '按当前任务练习', steps: ['跟着页面顺序完成，遇到困难可以用提示。', '先保存自己的尝试，再核对。'] },
+  }[task.kind]
+}
+
 export function taskPath(task: PlanTask): { path: string; query: Record<string, string> } {
   return {
     path: task.kind === 'shadow' ? '/listen' : ['repair', 'retell'].includes(task.kind) ? '/speak'

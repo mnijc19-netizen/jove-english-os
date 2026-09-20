@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useApp } from "../stores/app";
-import { nextAssignedTask, skillLabel, taskPath } from "../domain/engine";
+import { englishTaskGuide, nextAssignedTask, skillLabel, taskPath } from "../domain/engine";
 import Icon from "../components/Icon.vue";
 import type { PlanTask } from "../domain/types";
 import { planRecovery, selectMeaningfulReviews } from "../domain/longitudinal";
@@ -24,6 +24,7 @@ const requiredTasks = computed(() => app.plan.tasks.filter(task => !task.optiona
 const optionalTasks = computed(() => app.plan.tasks.filter(task => task.optional));
 const completed = computed(() => requiredTasks.value.filter((t) => t.done).length);
 const next = computed(() => nextAssignedTask(app.plan));
+const nextGuide = computed(() => next.value ? englishTaskGuide(next.value) : null);
 const path = taskPath;
 const material = computed(
   () =>
@@ -102,6 +103,7 @@ async function start(task: PlanTask) {
           /></span>
         </div>
         <p class="muted">Your focus · {{ skillLabel(app.plan.focus) }}</p>
+        <p class="help-text">具体学什么和先后顺序已由系统安排。你只需告诉系统可用时间和精力；短一点也可以，不必每天做满所有项目。</p>
         <p v-if="app.contentState === 'loading'" class="help-text" role="status">Preparing suitable lessons and short audio. Your saved practice stays available.</p>
         <p v-else-if="app.contentState === 'empty'" class="help-text" role="status">Publisher lessons open at their source; your guided practice and progress stay here. Saved local lessons are also available.</p>
         <p v-else-if="app.contentState === 'error'" class="help-text" role="status">New lessons or audio could not finish loading. Your saved work is safe.
@@ -115,7 +117,7 @@ async function start(task: PlanTask) {
         <p v-if="app.sharedDay" class="help-text">两种语言共用今天的 {{ app.sharedDay.totalMinutes }} 分钟；英语还可安排 {{ app.sharedDay.allowances.en.remaining }} 分钟，日语 {{ app.sharedDay.allowances.ja.remaining }} 分钟。切换语言不会增加任务量。</p>
         <div class="time-options" aria-label="Practice duration">
           <button
-            v-for="minutes in [45, 90, 150]"
+            v-for="minutes in [15, 30, 45, 90, 150]"
             :key="minutes"
             :class="{ selected: app.profile.dailyMinutes === minutes }"
             :aria-pressed="app.profile.dailyMinutes === minutes"
@@ -139,6 +141,11 @@ async function start(task: PlanTask) {
             ></i>
           </div>
         </div>
+        <section v-if="next && nextGuide" class="next-practice-guide" aria-label="下一项学习指引" lang="zh-CN">
+          <h3>{{ nextGuide.title }} · 约 {{ next.minutes }} 分钟</h3>
+          <ol><li v-for="step in nextGuide.steps" :key="step">{{ step }}</li></ol>
+          <p class="help-text">点击下方开始按钮即可。卡住先保留自己的尝试，再用提示；不用反复硬听到疲惫。</p>
+        </section>
         <button
           v-if="next"
           class="button primary wide"

@@ -82,6 +82,8 @@ test('external lesson saves a guided draft without media downloads or invented a
   expect(await manifest.json()).toMatchObject({ name: 'Jove Language OS', short_name: 'Jove Language',
     start_url: '/jove-english-os/', scope: '/jove-english-os/' })
   await expect(page.getByRole('heading', { name:'Welcome: introduce yourself' })).toBeVisible()
+  await expect(page.getByText('先听第一段短对话', { exact: false })).toBeVisible()
+  await expect(page.getByText('现在再看原站文本', { exact: false })).toHaveCount(0)
   const link=page.getByRole('link',{name:"Open today's listening lesson ↗"})
   await expect(link).toHaveAttribute('href','https://learningenglish.voanews.com/a/lets-learn-english-lesson-one/3111026.html')
   await expect(link).toHaveAttribute('rel','noopener noreferrer')
@@ -90,6 +92,7 @@ test('external lesson saves a guided draft without media downloads or invented a
   await page.getByRole('checkbox',{name:/I listened and have returned/}).check()
   await page.locator('#external-summary').fill('Two neighbors introduce themselves.')
   await page.getByRole('button',{name:'Continue to notice an expression'}).click()
+  await expect(page.getByText('现在再看原站文本', { exact: false })).toBeVisible()
   await page.locator('#external-expression').fill('Nice to meet you')
   await page.locator('#external-example').fill('Nice to meet you, Sam. I work in design.')
   await page.getByRole('button',{name:'Continue to spoken retell'}).click()

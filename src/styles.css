@@ -772,8 +772,17 @@ textarea:focus {
   color: var(--accent);
   margin-right: 10px;
 }
+.next-practice-guide {
+  margin: 1rem 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+.next-practice-guide h3 { font-size: 1rem; }
+.next-practice-guide ol { padding-left: 1.4rem; line-height: 1.7; }
+.next-practice-guide li + li { margin-top: .3rem; }
 .time-options {
   display: flex;
+  flex-wrap: wrap;
   gap: 7px;
 }
 .time-options button {
