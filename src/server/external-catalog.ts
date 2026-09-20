@@ -8,6 +8,7 @@ import { digestRequest, GatewayError } from './gateway'
 import { BBC_CATALOG_LIMIT, BBC_CATALOG_URL, parseBbcCatalog } from '../content/external-bbc-catalog'
 import { TADOKU_LIMIT, TADOKU_URL, TADOKU_GUIDE, parseTadokuCatalog } from '../content/tadoku-catalog'
 import { ENGLISH_READING_LIMIT, englishReadingDirectory, englishReadingLevels, parseEnglishReadingDirectory } from '../content/english-reading-catalog'
+import { IRODORI_LIMIT, irodoriCourses, irodoriDirectory, parseIrodoriDirectory } from '../content/irodori-catalog'
 
 // Exact publisher directories only: no audio/transcript/model routes.
 const source: ContentSource = {
@@ -68,20 +69,23 @@ export async function refreshExternalCatalog(admin: SupabaseClient, options: Cat
   const bbc = sourceId === 'bbc-six-minute'
   const tadoku = sourceId === 'ja-tadoku'
   const reading = sourceId === 'en-bc-reading'
+  const irodori = sourceId === 'ja-irodori'
   const course = sourceId === 'voa-level1' || sourceId === 'voa-level2' ? externalCatalogCourses[sourceId] : undefined
-  const url = course?.url ?? (tadoku ? TADOKU_URL : reading ? englishReadingDirectory('A1') : BBC_CATALOG_URL)
+  const url = course?.url ?? (tadoku ? TADOKU_URL : reading ? englishReadingDirectory('A1') : irodori ? irodoriDirectory('starter') : BBC_CATALOG_URL)
   const scopedArgs = sourceId === EXTERNAL_CATALOG_SOURCE ? {} : { sourceId }
-  const publisher = tadoku ? 'NPO 多言語多読' : reading ? 'British Council' : bbc ? 'BBC Learning English' : source.publisher
-  const courseSource: ContentSource = { ...source, id: sourceId, name: tadoku ? 'Free Tadoku Books directory' : reading ? 'British Council graded reading directories' : bbc ? 'BBC 6 Minute English episode directory' : `VOA ${course!.level} course directory`,
-    feedUrl: url, homepage: url, publisher, declaredLanguage: tadoku ? 'ja' : 'en', verifiedAt: tadoku || reading ? Date.UTC(2026, 8, 20, 4) : source.verifiedAt,
+  const publisher = tadoku ? 'NPO 多言語多読' : reading ? 'British Council' : irodori ? '日本国际交流基金 · いろどり' : bbc ? 'BBC Learning English' : source.publisher
+  const directories = reading ? englishReadingLevels.map(englishReadingDirectory) : irodori ? irodoriCourses.map(irodoriDirectory) : [url]
+  const courseSource: ContentSource = { ...source, id: sourceId, name: tadoku ? 'Free Tadoku Books directory' : reading ? 'British Council graded reading directories' : irodori ? 'Irodori reviewed course directories' : bbc ? 'BBC 6 Minute English episode directory' : `VOA ${course!.level} course directory`,
+    feedUrl: url, homepage: url, publisher, declaredLanguage: tadoku || irodori ? 'ja' : 'en', verifiedAt: tadoku || reading || irodori ? Date.UTC(2026, 8, 20, 4) : source.verifiedAt,
     supply: bbc || tadoku ? 'continuing-feed' : source.supply,
-    notes: [reading ? 'Five CEFR-labelled directories. Attributed full lesson-page links only, no copied articles, exercises or media. No endorsement.'
+    notes: [irodori ? 'Four finite course directories. Only72 existing lesson-page links; directory presence is not a new content or acoustic-quality review.'
+      : reading ? 'Five CEFR-labelled directories. Attributed full lesson-page links only, no copied articles, exercises or media. No endorsement.'
       : tadoku ? 'Original publisher books for extensive reading only; no texts, translations, audio or tests.'
       : bbc ? 'Official named-presenter series; British listening extension, not an American pronunciation model.'
       : `Official ${course!.lessons}-lesson ${course!.level} archive; link-only.`],
     rights: { ...source.rights, attribution: publisher, evidenceUrls: reading ? [url, 'https://www.britishcouncil.org/terms'] : tadoku ? [url, TADOKU_GUIDE] : [url] },
     urls: { feed: bbc ? [{ origin: new URL(url).origin, pathPrefix: new URL(url).pathname }] : [],
-      page: bbc ? [] : (reading ? englishReadingLevels.map(englishReadingDirectory) : [url]).map(page => ({ origin: new URL(page).origin, pathPrefix: new URL(page).pathname })), audio: [], transcript: [] } }
+      page: bbc ? [] : directories.map(page => ({ origin: new URL(page).origin, pathPrefix: new URL(page).pathname })), audio: [], transcript: [] } }
   const claim = await rpc(admin, 'claim', scopedArgs)
   if (!claim?.leaseToken) return { refreshed: false, reason: 'not-due-or-running' }
   try {
@@ -89,7 +93,7 @@ export async function refreshExternalCatalog(admin: SupabaseClient, options: Cat
     const fetcher = options.fetcher ?? createContentFetcher()
     async function fetchDirectory(directory: string) {
       const response = await fetcher({ url: directory, source: courseSource, role: bbc ? 'feed' : 'page',
-        maxBytes: reading ? ENGLISH_READING_LIMIT : tadoku ? TADOKU_LIMIT : bbc ? BBC_CATALOG_LIMIT : EXTERNAL_CATALOG_LIMIT,
+        maxBytes: reading ? ENGLISH_READING_LIMIT : irodori ? IRODORI_LIMIT : tadoku ? TADOKU_LIMIT : bbc ? BBC_CATALOG_LIMIT : EXTERNAL_CATALOG_LIMIT,
         exactUrls: [directory], timeoutMs: 20000, signal: options.signal })
       const contentTypes = bbc ? ['application/rss+xml', 'application/xml', 'text/xml'] : ['text/html']
       if (response.status !== 200 || !contentTypes.includes(response.contentType) || response.finalUrl !== directory) throw new Error('CATALOG_FETCH')
@@ -97,13 +101,14 @@ export async function refreshExternalCatalog(admin: SupabaseClient, options: Cat
     }
     // One complete snapshot or retain the previous one: a failed level must not
     // erase its readers or make the remaining levels appear to be the full catalog.
-    const pages = await Promise.all((reading ? englishReadingLevels.map(englishReadingDirectory) : [url]).map(fetchDirectory))
+    const pages = await Promise.all(directories.map(fetchDirectory))
     options.signal?.throwIfAborted()
     const text = pages[0]!
-    const entries = sourceId === 'ja-tadoku' ? parseTadokuCatalog(text)
+    const entries = sourceId === 'ja-irodori' ? pages.flatMap((page, index) => parseIrodoriDirectory(page, irodoriCourses[index]!))
+      : sourceId === 'ja-tadoku' ? parseTadokuCatalog(text)
       : sourceId === 'en-bc-reading' ? pages.flatMap((page, index) => parseEnglishReadingDirectory(page, englishReadingLevels[index]!))
       : sourceId === 'bbc-six-minute' ? parseBbcCatalog(text, (options.now ?? Date.now)()) : parseExternalCatalogPage(text, sourceId)
-    const catalog = externalCatalogSchema.parse({ version: 1, sourceId, language: tadoku ? 'ja' : 'en',
+    const catalog = externalCatalogSchema.parse({ version: 1, sourceId, language: tadoku || irodori ? 'ja' : 'en',
       checkedAt: (options.now ?? Date.now)(), revision: await digestRequest(JSON.stringify(entries)), entries })
     materialFromExternalCatalog(catalog) // Reject legacy ID rebinding before committing.
     options.signal?.throwIfAborted()

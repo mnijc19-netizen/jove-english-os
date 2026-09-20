@@ -101,7 +101,7 @@ export const authenticPlaybackSchema = z.strictObject({
 export const materialSchema = z.strictObject({
   language: z.enum(['en', 'ja']).optional(),
   externalStudy: z.strictObject({ publisher: short, level: z.enum(['beginner', 'intermediate', 'advanced']),
-    mission: z.string().min(1).max(1000), checkedAt: timestampSchema }).optional(),
+    mission: z.string().min(1).max(1000), checkedAt: timestampSchema, directoryCheckedAt: timestampSchema.optional() }).optional(),
   externalReading: z.discriminatedUnion('publisher', [
     z.strictObject({ publisher: z.literal('NPO 多言語多読'), level: z.enum(['Start', '0', '1', '2', '3', '4', '5']), checkedAt: timestampSchema }),
     z.strictObject({ publisher: z.literal('British Council'), level: z.enum(['A1', 'A2', 'B1', 'B2', 'C1']), checkedAt: timestampSchema }),

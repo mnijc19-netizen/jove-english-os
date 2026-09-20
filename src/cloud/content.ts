@@ -128,13 +128,33 @@ export async function refreshContentLessons(profile: ContentProfile, signal?: Ab
 }
 
 /** Separate page-only delivery; failed acoustic selection cannot block this catalog. */
-export function refreshExternalCourseCatalog(signal?: AbortSignal, sourceId: Exclude<ExternalCatalogSource, 'ja-tadoku'> = 'voa-level1'): Promise<Material[]> {
-  if (sourceId === ('ja-tadoku' as string)) throw invalid()
+export function refreshExternalCourseCatalog(signal?: AbortSignal, sourceId: Exclude<ExternalCatalogSource, 'ja-tadoku' | 'ja-irodori'> = 'voa-level1'): Promise<Material[]> {
+  if (['ja-tadoku', 'ja-irodori'].includes(sourceId)) throw invalid()
   return refreshCatalogInto(db, sourceId, signal)
 }
 export function refreshJapaneseReadingCatalog(database: JoveDatabase, signal?: AbortSignal): Promise<Material[]> {
   if (database.language !== 'ja') throw invalid()
   return refreshCatalogInto(database, 'ja-tadoku', signal)
+}
+export function refreshJapaneseCourseCatalog(database: JoveDatabase, signal?: AbortSignal): Promise<Material[]> {
+  if (database.language !== 'ja') throw invalid()
+  return refreshCatalogInto(database, 'ja-irodori', signal)
+}
+export async function refreshJapaneseCatalogs(database: JoveDatabase, signal?: AbortSignal) {
+  if (database.language !== 'ja') throw invalid()
+  const materials: Material[] = [], failed: string[] = []
+  for (const source of ['ja-irodori', 'ja-tadoku'] as const) {
+    signal?.throwIfAborted()
+    try {
+      const added = await refreshCatalogInto(database, source, signal)
+      if (!added.length) failed.push(source)
+      materials.push(...added)
+    } catch {
+      signal?.throwIfAborted()
+      failed.push(source) // one unavailable publisher must not block the other
+    }
+  }
+  return { materials, failed }
 }
 async function refreshCatalogInto(database: JoveDatabase, sourceId: ExternalCatalogSource, signal?: AbortSignal): Promise<Material[]> {
   externalCatalogSourceSchema.parse(sourceId)
@@ -161,9 +181,15 @@ async function refreshCatalogInto(database: JoveDatabase, sourceId: ExternalCata
             if (previous.sourceUrl !== material.sourceUrl || !previous[metadata]) throw invalid()
             if (previous.externalReading && (previous.externalReading.level !== material.externalReading?.level
               || previous.externalReading.publisher !== material.externalReading?.publisher)) throw invalid()
-            // Only source freshness advances; all learner-authored fields and creation time stay intact.
-            const checkedAt = Math.max(previous[metadata]!.checkedAt, response.catalog!.checkedAt)
-            await database.materials.update(previous.id, metadata === 'externalReading' ? { 'externalReading.checkedAt': checkedAt } : { 'externalStudy.checkedAt': checkedAt })
+            // Directory maintenance does not re-screen narrator/content quality.
+            if (sourceId === 'ja-irodori') {
+              if (previous.language !== 'ja' || previous.externalStudy?.publisher !== material.externalStudy?.publisher) throw invalid()
+              await database.materials.update(previous.id, { 'externalStudy.directoryCheckedAt': Math.max(previous.externalStudy!.directoryCheckedAt ?? 0, response.catalog!.checkedAt) })
+            } else {
+              // Only source freshness advances; all learner-authored fields and creation time stay intact.
+              const checkedAt = Math.max(previous[metadata]!.checkedAt, response.catalog!.checkedAt)
+              await database.materials.update(previous.id, metadata === 'externalReading' ? { 'externalReading.checkedAt': checkedAt } : { 'externalStudy.checkedAt': checkedAt })
+            }
           } else await database.materials.add(material)
           context.assertLive(); checkAbort(scoped)
         }

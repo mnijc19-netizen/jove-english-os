@@ -3,7 +3,8 @@ import Dexie from 'dexie'
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, JoveDatabase } from '../src/db/db'
-import { contentAudioIsTransient, materialFromContentLesson, prepareContentAudio, refreshContentLessons, refreshExternalCourseCatalog, refreshJapaneseReadingCatalog, flushContentHistory } from '../src/cloud/content'
+import { contentAudioIsTransient, materialFromContentLesson, prepareContentAudio, refreshContentLessons, refreshExternalCourseCatalog, refreshJapaneseReadingCatalog, refreshJapaneseCourseCatalog, refreshJapaneseCatalogs, flushContentHistory } from '../src/cloud/content'
+import { japaneseLessons, japaneseLessonUrl, japaneseMaterials } from '../src/content/japanese'
 import { externalMaterials, externalLessonCandidates, EXTERNAL_CATALOG_MAX_AGE } from '../src/content/external'
 import { defaultProfile, defaultSettings, type StudyEvent } from '../src/domain/types'
 import { demoMaterials } from '../src/content/materials'
@@ -50,6 +51,8 @@ function externalCatalog() {
       url: externalMaterials.find(m => m.id === legacy[i + 1])?.sourceUrl ?? `https://learningenglish.voanews.com/a/lesson-${i + 1}/${9000000 + i}.html` })) }
 }
 let fetcher: ReturnType<typeof vi.fn>
+const japaneseCatalog = () => ({ version: 1, sourceId: 'ja-irodori', language: 'ja', checkedAt: Date.now(), revision: 'f'.repeat(64),
+  entries: japaneseLessons.map(lesson => ({ course: lesson.course, position: lesson.position, url: japaneseLessonUrl(lesson) })) })
 beforeEach(async () => {
   await db.delete(); await db.open()
   auth.session = { user: { id: 'content-owner-a' }, access_token: 'fixture-jwt-a' }
@@ -82,6 +85,41 @@ describe('automatic authenticated lesson delivery', () => {
     fetcher.mockImplementation(async () => { await db.syncMeta.put({ id: 'owner', value: 'wrong-owner' }); return json({ catalog }) })
     await expect(refreshExternalCourseCatalog(undefined, 'en-bc-reading')).rejects.toThrow()
     expect(await db.materials.toArray()).toEqual(before)
+  })
+  it('refreshes Japanese directory presence without rewriting screening dates, learner edits, identity or English', async () => {
+    const ja = new JoveDatabase(`catalog-irodori-${crypto.randomUUID()}`, 'ja'), catalog = japaneseCatalog()
+    try {
+      await ja.syncMeta.put({ id: 'owner', value: auth.session!.user.id })
+      await ja.materials.bulkPut(japaneseMaterials())
+      const first = japaneseLessons[0]!.id
+      await ja.materials.update(first, { title: '我的日语标题', approved: false })
+      const before = await ja.materials.get(first)
+      fetcher.mockResolvedValue(json({ catalog }))
+      expect(await refreshJapaneseCourseCatalog(ja)).toHaveLength(72)
+      const after = await ja.materials.get(first)
+      expect(after?.externalStudy?.directoryCheckedAt).toBe(catalog.checkedAt)
+      expect({ ...after, externalStudy: before!.externalStudy }).toEqual(before)
+      expect(after?.externalStudy?.checkedAt).toBe(before?.externalStudy?.checkedAt)
+      expect(await db.materials.count()).toBe(0)
+      const saved = await ja.materials.toArray()
+      fetcher.mockImplementation(async () => { await db.syncMeta.put({ id: 'owner', value: 'changed-owner' }); return json({ catalog }) })
+      await expect(refreshJapaneseCourseCatalog(ja)).rejects.toThrow()
+      expect(await ja.materials.toArray()).toEqual(saved)
+      expect(() => refreshJapaneseCourseCatalog(db)).toThrow()
+    } finally { await ja.delete() }
+  })
+  it('keeps successful Japanese course maintenance when the independent book publisher fails, without retries', async () => {
+    const ja = new JoveDatabase(`catalog-partial-${crypto.randomUUID()}`, 'ja'), catalog = japaneseCatalog()
+    try {
+      await ja.syncMeta.put({ id: 'owner', value: auth.session!.user.id })
+      fetcher.mockImplementation(async (_url, init) => JSON.parse(String(init.body)).sourceId === 'ja-irodori' ? json({ catalog }) : json({ error: 'fixture failure' }, 503))
+      const result = await refreshJapaneseCatalogs(ja)
+      expect(result.materials).toHaveLength(72); expect(result.failed).toEqual(['ja-tadoku'])
+      expect(fetcher).toHaveBeenCalledTimes(2); expect(await ja.materials.count()).toBe(72)
+      const controller = new AbortController(); controller.abort()
+      await expect(refreshJapaneseCatalogs(ja, controller.signal)).rejects.toThrow()
+      expect(fetcher).toHaveBeenCalledTimes(2)
+    } finally { await ja.delete() }
   })
   it('imports original Japanese books only into the same-owner Japanese database, preserving edits and English', async () => {
     const ja = new JoveDatabase(`catalog-ja-${crypto.randomUUID()}`, 'ja')

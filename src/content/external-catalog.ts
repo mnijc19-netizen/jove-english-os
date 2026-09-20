@@ -4,11 +4,12 @@ import type { Material } from '../domain/types'
 import { bbcCatalogSchema, materialFromBbcCatalog } from './external-bbc-catalog'
 import { tadokuCatalogSchema, materialFromTadokuCatalog } from './tadoku-catalog'
 import { englishReadingCatalogSchema, materialFromEnglishReadingCatalog } from './english-reading-catalog'
+import { irodoriCatalogSchema, materialFromIrodoriCatalog } from './irodori-catalog'
 
 export const EXTERNAL_CATALOG_URL = 'https://learningenglish.voanews.com/p/5644.html'
 export const EXTERNAL_CATALOG_SOURCE = 'voa-level1'
 export const EXTERNAL_CATALOG_LIMIT = 256 * 1024
-export const externalCatalogSourceSchema = z.enum(['voa-level1', 'voa-level2', 'bbc-six-minute', 'ja-tadoku', 'en-bc-reading'])
+export const externalCatalogSourceSchema = z.enum(['voa-level1', 'voa-level2', 'bbc-six-minute', 'ja-tadoku', 'en-bc-reading', 'ja-irodori'])
 export type ExternalCatalogSource = z.infer<typeof externalCatalogSourceSchema>
 type VoaCatalogSource = 'voa-level1' | 'voa-level2'
 export const externalCatalogCourses = {
@@ -32,7 +33,7 @@ const voaCatalogSchema = z.strictObject({
   checkedAt: z.number().int().nonnegative().max(253402300799999), revision: z.string().regex(/^[a-f0-9]{64}$/u),
   entries: z.array(z.strictObject({ position: z.number().int().min(1).max(52), url: urlSchema })).max(52),
 }).refine(catalog => entriesSchema(externalCatalogCourses[catalog.sourceId].lessons).safeParse(catalog.entries).success)
-export const externalCatalogSchema = z.union([voaCatalogSchema, bbcCatalogSchema, tadokuCatalogSchema, englishReadingCatalogSchema])
+export const externalCatalogSchema = z.union([voaCatalogSchema, bbcCatalogSchema, tadokuCatalogSchema, englishReadingCatalogSchema, irodoriCatalogSchema])
 export type ExternalCatalog = z.infer<typeof externalCatalogSchema>
 
 /** Exact publisher-course adapter. Only numbers and page URLs leave the parser. */
@@ -63,6 +64,7 @@ const legacyIds: Record<number, string> = { 1: 'external-voa-welcome', 3: 'exter
 export function materialFromExternalCatalog(catalog: ExternalCatalog): Material[] {
   const checked = externalCatalogSchema.parse(catalog)
   if (checked.sourceId === 'ja-tadoku') return materialFromTadokuCatalog(checked)
+  if (checked.sourceId === 'ja-irodori') return materialFromIrodoriCatalog(checked)
   if (checked.sourceId === 'en-bc-reading') return materialFromEnglishReadingCatalog(checked)
   if (checked.sourceId === 'bbc-six-minute') return materialFromBbcCatalog(checked)
   const course = externalCatalogCourses[checked.sourceId]

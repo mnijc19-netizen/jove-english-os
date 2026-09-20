@@ -1,5 +1,11 @@
 # Authentic content pipeline
 
+## Current metadata maintenance — September21
+
+The deployed scheduler serializes five independent sources (VOA Level1/2, BBC, Tadoku, British Council reading), without retries or paid APIs. Each request has a30-second deadline; fixed RPC error categories distinguish known connection/resource/schema/permission/validation errors without logging upstream messages. One source failure does not discard a successful sibling. Actual release/job evidence and browser-import gates are recorded in `STATUS.md`.
+
+The local sixth-source candidate checks Irodori's [Starter](https://www.irodori.jpf.go.jp/en/starter/pdf.html), [Elementary1](https://www.irodori.jpf.go.jp/en/elementary01/pdf.html), [Elementary2](https://www.irodori.jpf.go.jp/en/elementary02/pdf.html) and [Pre-Intermediate](https://www.irodori.jpf.go.jp/en/pre-intermediate/pdf.html) directories. It requires all18 existing per-lesson HTML playback links in each actual lesson section, not just global navigation. All72 identities must match before an atomic snapshot replaces the prior one. It never fetches the PDF/audio archives, derives new courses or changes authored language-specific instruction. Directory confirmation is stored separately as `directoryCheckedAt`, preserving the earlier content/voice screening date. Browser imports are Japanese-only and owner-fenced; course/book maintenance exposes partial failure. The six-source workflow retains a five-minute ceiling for six30-second deadlines plus setup. This candidate needs migration24/runtime delivery before the scheduler source is published; it does not enable Japanese publicly.
+
 ## Page-only catalog refresh — September14 candidate
 
 The admitted VOA Level1 directory contains52 numbered publisher links with original in-site practice prompts, not copied video/audio/transcripts. `src/server/external-catalog.ts` maintains its validated snapshot and independent lease/backoff. Authenticated directory reads use an existing fresh snapshot or attempt one due refresh; a failed replacement retains the previous readable reserve. Source limits, complete-directory validation and legacy identities remain enforced.

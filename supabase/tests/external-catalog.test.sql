@@ -169,4 +169,33 @@ begin
   assert public.external_catalog_worker('read','{"sourceId":"en-bc-reading"}')=remembered, 'failed reading refresh destroyed last good snapshot';
 end $$;
 reset role;
+set local role service_role;
+do $$
+declare token text; snapshot jsonb; remembered jsonb; english jsonb;
+begin
+  english := public.external_catalog_worker('read','{"sourceId":"en-bc-reading"}');
+  token := public.external_catalog_worker('claim','{"sourceId":"ja-irodori"}')->>'leaseToken';
+  assert token is not null, 'Japanese course lease missing';
+  select jsonb_build_object('version',1,'sourceId','ja-irodori','language','ja','checkedAt',9999999999999,'revision',repeat('f',64),
+    'entries',jsonb_agg(jsonb_build_object('course',course,'position',position,
+      'url','https://www.irodori.jpf.go.jp/en/'||course||'/audio/lesson'||lpad(position::text,2,'0')||'.html'))) into snapshot
+    from unnest(array['starter','elementary01','elementary02','pre-intermediate']) course cross join generate_series(1,18) position;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-irodori','leaseToken',token,'catalog',jsonb_set(snapshot,'{language}','"en"')));
+    raise exception 'English course rebinding accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-irodori','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries,0,url}','"https://evil.example/lesson"')));
+    raise exception 'foreign playback accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-irodori','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries}',(snapshot->'entries')-0)));
+    raise exception 'incomplete Japanese course accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-irodori','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries,1}',snapshot->'entries'->0)));
+    raise exception 'duplicate lesson accepted'; exception when invalid_parameter_value then null; end;
+  assert public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-irodori','leaseToken',token,'catalog',snapshot))='true'::jsonb, 'Japanese courses not saved';
+  remembered := public.external_catalog_worker('read','{"sourceId":"ja-irodori"}');
+  assert jsonb_array_length(remembered->'entries')=72 and (remembered->>'checkedAt')::bigint<9999999999999, 'Japanese course snapshot invalid';
+  assert public.external_catalog_worker('read','{"sourceId":"en-bc-reading"}')=english, 'Japanese course maintenance changed English';
+  update public.external_course_catalog set next_attempt_at=now()-interval '1 second' where source_id='ja-irodori';
+  token := public.external_catalog_worker('claim','{"sourceId":"ja-irodori"}')->>'leaseToken';
+  perform public.external_catalog_worker('fail',jsonb_build_object('sourceId','ja-irodori','leaseToken',token));
+  assert public.external_catalog_worker('read','{"sourceId":"ja-irodori"}')=remembered, 'failed course maintenance destroyed last good snapshot';
+end $$;
+reset role;
 select 'external-catalog-sql-passed' as result;

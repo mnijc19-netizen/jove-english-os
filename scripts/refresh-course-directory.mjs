@@ -2,7 +2,7 @@
 import { pathToFileURL } from 'node:url'
 
 const endpoint = 'https://lnkxdwzdcrtlucaezhkd.supabase.co/functions/v1/content'
-const sources = ['voa-level1', 'voa-level2', 'bbc-six-minute', 'ja-tadoku', 'en-bc-reading']
+const sources = ['voa-level1', 'voa-level2', 'bbc-six-minute', 'ja-tadoku', 'en-bc-reading', 'ja-irodori']
 class DirectoryJobError extends Error {
   constructor(message, diagnostics) { super(message); this.diagnostics = diagnostics }
 }
@@ -35,7 +35,7 @@ async function backendFailureCode(response) {
 }
 export async function refreshCourseDirectory(token, fetcher = fetch, sourceId = 'voa-level1') {
   if (!sources.includes(sourceId)) throw new Error('Unknown directory source.')
-  const lessons = sourceId === 'voa-level1' ? 52 : sourceId === 'voa-level2' ? 30 : undefined
+  const lessons = sourceId === 'voa-level1' ? 52 : sourceId === 'voa-level2' ? 30 : sourceId === 'ja-irodori' ? 72 : undefined
   const failure = (code, message, status, backendCode) => new DirectoryJobError(message, [{ sourceId, code,
     ...(status === undefined ? {} : { status }), ...(backendCode === undefined ? {} : { backendCode }) }])
   if (typeof token !== 'string' || !/^[a-f0-9]{64}$/u.test(token)) throw failure('CREDENTIAL', 'Directory job credential is not configured.')
@@ -72,7 +72,7 @@ export async function refreshCourseDirectory(token, fetcher = fetch, sourceId = 
 }
 
 export async function refreshCourseDirectories(token, fetcher = fetch) {
-  // Five small metadata jobs share a free database. Avoid a simultaneous RPC
+  // Small metadata jobs share a free database. Avoid a simultaneous RPC
   // burst; each keeps its own deadline, no retry, and independent outcome.
   const results = []
   for (const source of sources) {

@@ -39,7 +39,7 @@ export interface AuthenticPlayback {
 }
 export interface Material {
   language?: 'en' | 'ja';
-  externalStudy?: { publisher: string; level: 'beginner' | 'intermediate' | 'advanced'; mission: string; checkedAt: number };
+  externalStudy?: { publisher: string; level: 'beginner' | 'intermediate' | 'advanced'; mission: string; checkedAt: number; directoryCheckedAt?: number };
   externalReading?: { publisher: 'NPO 多言語多読'; level: 'Start' | '0' | '1' | '2' | '3' | '4' | '5'; checkedAt: number }
     | { publisher: 'British Council'; level: 'A1' | 'A2' | 'B1' | 'B2' | 'C1'; checkedAt: number };
   authenticPlayback?: AuthenticPlayback;

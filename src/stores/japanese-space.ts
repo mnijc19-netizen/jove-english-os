@@ -4,7 +4,7 @@ import { defineStore } from 'pinia'
 import { db as englishDatabase, createLanguageDatabase, type JoveDatabase } from '../db/db'
 import { initializeJapanese } from '../db/japanese'
 import { createCloudState, useCloud } from './cloud'
-import { refreshJapaneseReadingCatalog } from '../cloud/content'
+import { refreshJapaneseCatalogs } from '../cloud/content'
 
 type CloudState = ReturnType<typeof createCloudState>
 type SharedAccount = Pick<CloudState, 'settle' | 'signOut'> & { ownerId: () => string }
@@ -13,7 +13,7 @@ type SharedAccount = Pick<CloudState, 'settle' | 'signOut'> & { ownerId: () => s
  * DB handle; leaving it cannot close this background synchronization handle. */
 export function createJapaneseSpace(english: JoveDatabase, sharedAccount: SharedAccount,
   database = createLanguageDatabase('ja'), makeCloud: (database: JoveDatabase, guard: (owner: string) => Promise<void>) => CloudState
-    = (database, guard) => createCloudState(database, undefined, undefined, guard), refreshCatalog = refreshJapaneseReadingCatalog) {
+    = (database, guard) => createCloudState(database, undefined, undefined, guard), refreshCatalog = refreshJapaneseCatalogs) {
   if (english.language !== 'en' || database.language !== 'ja') throw new Error('Invalid language spaces')
   let epoch = 0
   const signingOut = ref(false)
@@ -29,11 +29,12 @@ export function createJapaneseSpace(english: JoveDatabase, sharedAccount: Shared
     if (!ready.value || !cloud.configured || !sharedAccount.ownerId() || catalogPending || Date.now() - catalogAttempt < 6 * 3600000) return
     catalogAttempt = Date.now(); catalogAbort = new AbortController()
     const generation = epoch
-    catalogPending = refreshCatalog(database, catalogAbort.signal).then(async materials => {
+    catalogPending = refreshCatalog(database, catalogAbort.signal).then(async ({ materials, failed }) => {
       if (generation !== epoch) return
-      catalogProblem.value = materials.length ? '' : '完整原版读物目录尚未就绪，先使用已核验的备用链接。'; revision.value++; await afterDownload()
+      catalogProblem.value = failed.length || !materials.length ? '部分日语课程或读物目录暂未更新；已保存的课程、书签和草稿仍保留。' : ''
+      revision.value++; await afterDownload()
     }).catch(() => {
-      if (generation === epoch) catalogProblem.value = '原版读物目录暂未更新，已有读物和草稿仍保留。系统稍后再试。'
+      if (generation === epoch) catalogProblem.value = '日语目录暂未更新，已有课程、读物和草稿仍保留。系统稍后再试。'
     }).finally(() => { catalogPending = undefined; catalogAbort = undefined })
   }
   const status = computed(() => initializationError.value ? 'Japanese setup needs attention' : opening.value ? 'Opening Japanese sync'
