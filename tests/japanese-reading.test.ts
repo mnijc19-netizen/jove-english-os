@@ -169,7 +169,16 @@ describe('Japanese original reading and independently recorded word reading', ()
     await ja.sessions.put(finished(0, now + 2 * day + 10))
     await en.events.add({ id: 'english-third-day', type: 'TASK_COMPLETED', source: 'objective', timestamp: now + 3 * day, data: { taskId: 'english-third', minutes: 30 } })
     const third = (await learning.today(now + 3 * day))!
-    expect(third.minutes).toBe(15); expect(third.tasks.some(t => t.kind === 'speak')).toBe(true); expect(third.tasks.some(t => t.kind === 'learn')).toBe(false)
+    expect(third.minutes).toBe(15); expect(third.tasks.some(t => t.materialId?.startsWith('ja-tadoku-'))).toBe(true)
+    expect(third.tasks.some(t => t.kind === 'speak')).toBe(false)
+    const bookTask = third.tasks.find(t => t.materialId?.startsWith('ja-tadoku-'))!
+    const bookSession = await learning.start(bookTask.id, now + 3 * day)
+    expect(bookSession.kind).toBe('japanese-extensive')
+    // A completed original-book slot rotates back to conversation; neither
+    // the book assignment nor completion is a claim of comprehension.
+    await ja.sessions.put({ ...bookSession, completedAt: now + 3 * day + 10, stage: 'completed' })
+    const fourth = (await learning.today(now + 4 * day))!
+    expect(fourth.tasks.some(t => t.kind === 'speak')).toBe(true)
   })
 })
 

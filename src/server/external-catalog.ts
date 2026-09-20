@@ -6,6 +6,7 @@ import type { ContentSource } from '../content/pipeline-types'
 import { createContentFetcher, type ContentFetcher } from './content-network'
 import { digestRequest, GatewayError } from './gateway'
 import { BBC_CATALOG_LIMIT, BBC_CATALOG_URL, parseBbcCatalog } from '../content/external-bbc-catalog'
+import { TADOKU_LIMIT, TADOKU_URL, TADOKU_GUIDE, parseTadokuCatalog } from '../content/tadoku-catalog'
 
 // Exact publisher directories only: no audio/transcript/model routes.
 const source: ContentSource = {
@@ -54,15 +55,18 @@ export async function refreshExternalCatalog(admin: SupabaseClient, options: Cat
   options.signal?.throwIfAborted()
   const sourceId = externalCatalogSourceSchema.parse(options.sourceId ?? EXTERNAL_CATALOG_SOURCE)
   const bbc = sourceId === 'bbc-six-minute'
-  const course = bbc ? undefined : externalCatalogCourses[sourceId]
-  const url = course?.url ?? BBC_CATALOG_URL
+  const tadoku = sourceId === 'ja-tadoku'
+  const course = sourceId === 'voa-level1' || sourceId === 'voa-level2' ? externalCatalogCourses[sourceId] : undefined
+  const url = course?.url ?? (tadoku ? TADOKU_URL : BBC_CATALOG_URL)
   const scopedArgs = sourceId === EXTERNAL_CATALOG_SOURCE ? {} : { sourceId }
-  const courseSource: ContentSource = { ...source, id: sourceId, name: bbc ? 'BBC 6 Minute English episode directory' : `VOA ${course!.level} course directory`,
-    feedUrl: url, homepage: url, publisher: bbc ? 'BBC Learning English' : source.publisher,
-    supply: bbc ? 'continuing-feed' : source.supply,
-    notes: [bbc ? 'Official named-presenter series; British listening extension, not an American pronunciation model.'
+  const publisher = tadoku ? 'NPO 多言語多読' : bbc ? 'BBC Learning English' : source.publisher
+  const courseSource: ContentSource = { ...source, id: sourceId, name: tadoku ? 'Free Tadoku Books directory' : bbc ? 'BBC 6 Minute English episode directory' : `VOA ${course!.level} course directory`,
+    feedUrl: url, homepage: url, publisher, declaredLanguage: tadoku ? 'ja' : 'en', verifiedAt: tadoku ? Date.UTC(2026, 8, 20, 4) : source.verifiedAt,
+    supply: bbc || tadoku ? 'continuing-feed' : source.supply,
+    notes: [tadoku ? 'Original publisher books for extensive reading only; no texts, translations, audio or tests.'
+      : bbc ? 'Official named-presenter series; British listening extension, not an American pronunciation model.'
       : `Official ${course!.lessons}-lesson ${course!.level} archive; link-only.`],
-    rights: { ...source.rights, attribution: bbc ? 'BBC Learning English' : source.rights.attribution, evidenceUrls: [url] },
+    rights: { ...source.rights, attribution: publisher, evidenceUrls: tadoku ? [url, TADOKU_GUIDE] : [url] },
     urls: { feed: bbc ? [{ origin: new URL(url).origin, pathPrefix: new URL(url).pathname }] : [],
       page: bbc ? [] : [{ origin: new URL(url).origin, pathPrefix: new URL(url).pathname }], audio: [], transcript: [] } }
   const claim = await rpc(admin, 'claim', scopedArgs)
@@ -70,13 +74,14 @@ export async function refreshExternalCatalog(admin: SupabaseClient, options: Cat
   try {
     options.signal?.throwIfAborted()
     const response = await (options.fetcher ?? createContentFetcher())({ url, source: courseSource, role: bbc ? 'feed' : 'page',
-      maxBytes: bbc ? BBC_CATALOG_LIMIT : EXTERNAL_CATALOG_LIMIT, exactUrls: [url], timeoutMs: 20000, signal: options.signal })
+      maxBytes: tadoku ? TADOKU_LIMIT : bbc ? BBC_CATALOG_LIMIT : EXTERNAL_CATALOG_LIMIT, exactUrls: [url], timeoutMs: 20000, signal: options.signal })
     options.signal?.throwIfAborted()
     const contentTypes = bbc ? ['application/rss+xml', 'application/xml', 'text/xml'] : ['text/html']
     if (response.status !== 200 || !contentTypes.includes(response.contentType) || response.finalUrl !== url) throw new Error('CATALOG_FETCH')
     const text = new TextDecoder('utf-8', { fatal: true }).decode(response.body)
-    const entries = sourceId === 'bbc-six-minute' ? parseBbcCatalog(text, (options.now ?? Date.now)()) : parseExternalCatalogPage(text, sourceId)
-    const catalog = externalCatalogSchema.parse({ version: 1, sourceId, language: 'en',
+    const entries = sourceId === 'ja-tadoku' ? parseTadokuCatalog(text)
+      : sourceId === 'bbc-six-minute' ? parseBbcCatalog(text, (options.now ?? Date.now)()) : parseExternalCatalogPage(text, sourceId)
+    const catalog = externalCatalogSchema.parse({ version: 1, sourceId, language: tadoku ? 'ja' : 'en',
       checkedAt: (options.now ?? Date.now)(), revision: await digestRequest(JSON.stringify(entries)), entries })
     materialFromExternalCatalog(catalog) // Reject legacy ID rebinding before committing.
     options.signal?.throwIfAborted()

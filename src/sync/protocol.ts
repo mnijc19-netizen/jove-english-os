@@ -222,9 +222,10 @@ function mergePlanAssignments(plan: DailyPlan, history: StoredOperation[], evide
   return { ...plan, tasks: result, minutes: result.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0) }
 }
 
-const readingKind = (kind: unknown) => kind === 'reading' || kind === 'reading-recovery' || kind === 'japanese-reading'
+const readingKind = (kind: unknown) => kind === 'reading' || kind === 'reading-recovery' || kind === 'japanese-reading' || kind === 'japanese-extensive'
 const committedReading = (row: RecordValue) => row.kind === 'japanese-reading'
-  ? typeof (row.draft as Record<string, unknown>).lockedAt === 'number' : row.stage === 'saved'
+  ? typeof (row.draft as Record<string, unknown>).lockedAt === 'number' : row.kind === 'japanese-extensive'
+    ? row.stage === 'completed' && typeof (row.draft as Record<string, unknown>).savedAt === 'number' : row.stage === 'saved'
 function readingSnapshot(row: RecordValue): RecordValue {
   const copy = structuredClone(row)
   delete (copy.draft as Record<string, unknown>).syncReadingConflicts
@@ -232,6 +233,8 @@ function readingSnapshot(row: RecordValue): RecordValue {
 }
 function readingSubmission(row: RecordValue): string {
   const draft = row.draft as Record<string, unknown>
+  if (row.kind === 'japanese-extensive') return canonical([row.materialId, row.startedAt, draft.book, draft.bookmark, draft.note,
+    draft.effort, draft.minutesRead, draft.spentMinutes, draft.outcome, draft.switched, draft.savedAt])
   if (row.kind === 'japanese-reading') return canonical([row.materialId, row.startedAt, draft.meaning, draft.kana, draft.helped, draft.seen, draft.lockedAt, draft.sourcePractice ?? ''])
   return canonical([row.materialId, row.startedAt, draft.passage ?? '', draft.submittedResponse ?? '',
     draft.retell ?? '', draft.audioId ?? '', draft.audioSeconds ?? 0, draft.observationAt ?? 0, draft.activeMs ?? 0,
@@ -239,6 +242,7 @@ function readingSubmission(row: RecordValue): string {
 }
 function readingWork(row: RecordValue): string {
   const draft = row.draft as Record<string, unknown>
+  if (row.kind === 'japanese-extensive') return readingSubmission(row)
   if (row.kind === 'japanese-reading') return canonical([readingSubmission(row), draft.note ?? '', draft.effort ?? 'okay'])
   return canonical([readingSubmission(row), draft.response ?? '', draft.checkedSections ?? [], draft.unknownTokens ?? [], draft.lookupTokens ?? []])
 }
@@ -247,6 +251,14 @@ function readingWork(row: RecordValue): string {
  * replacing a different nonempty response does not. */
 function includesReadingWork(earlier: RecordValue, later: RecordValue): boolean {
   if (earlier.materialId !== later.materialId || earlier.startedAt !== later.startedAt) return false
+  if (earlier.kind === 'japanese-extensive') {
+    if (later.kind !== earlier.kind) return false
+    if (committedReading(earlier)) return committedReading(later) && readingSubmission(earlier) === readingSubmission(later)
+    const a = earlier.draft as Record<string, unknown>, b = later.draft as Record<string, unknown>
+    return canonical(a.book) === canonical(b.book) && (!a.bookmark || a.bookmark === b.bookmark) && (!a.note || a.note === b.note)
+      && Number(a.minutesRead) <= Number(b.minutesRead) && Number(a.spentMinutes) <= Number(b.spentMinutes)
+      && canonical(a.switched) === canonical(b.switched)
+  }
   if (earlier.kind === 'japanese-reading') {
     const a = earlier.draft as Record<string, unknown>, b = later.draft as Record<string, unknown>
     if (a.note && a.note !== b.note || a.helped && !b.helped || a.sourcePractice && a.sourcePractice !== b.sourcePractice) return false
@@ -276,6 +288,13 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
   const puts = history.filter(op => op.kind === 'put' && readingKind(op.payload.record?.kind))
   const attested = (op: StoredOperation) => {
     const row = op.payload.record!, draft = row.draft as Record<string, unknown>
+    if (row.kind === 'japanese-extensive') return all.some(e => {
+      const event = e.payload.record, data = event?.data as Record<string, unknown> | undefined
+      return e.entityType === 'events' && event?.type === 'JAPANESE_EXTENSIVE_READING' && event.source === 'self-report'
+        && event.sessionId === row.id && event.timestamp === draft.savedAt && !!data
+        && data.materialId === (draft.book as Record<string, unknown>)?.materialId
+        && ['bookmark', 'note', 'effort', 'minutesRead', 'outcome'].every(key => data[key] === draft[key])
+    })
     if (row.kind === 'japanese-reading') return all.some(e => {
       const event = e.payload.record, data = event?.data as Record<string, unknown> | undefined
       return e.entityType === 'events' && event?.type === 'JAPANESE_READING_LOCK' && event.sessionId === row.id && event.timestamp === draft.lockedAt
@@ -297,7 +316,7 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
   // Japanese first answers are locked BEFORE feedback. Keep the earliest whole
   // completed snapshot on that branch; an offline unsubmitted draft cannot
   // replace its answers or completion marker through field-level merging.
-  const completedJapanese = compatible.find(op => op.payload.record!.kind === 'japanese-reading' && op.payload.record!.completedAt)
+  const completedJapanese = compatible.find(op => ['japanese-reading', 'japanese-extensive'].includes(String(op.payload.record!.kind)) && op.payload.record!.completedAt)
   const selected = completedJapanese ?? compatible.at(-1) ?? puts.at(-1)!
   const primary = readingSnapshot(selected.payload.record!)
   const copies: RecordValue[] = [], ids: string[] = [], conflicted: string[] = [], inactive: string[] = []
@@ -311,12 +330,13 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
     if (!latest || puts.some(op => compare(op, latest) > 0 && includesReadingWork(latest.payload.record!, op.payload.record!))) { inactive.push(id); continue }
     const row = readingSnapshot(latest.payload.record!)
     const draft = row.draft as Record<string, unknown>
-    const changedWork = row.kind === 'japanese-reading' ? !!draft.note || !!draft.helped || !!draft.sourcePractice || ['meaning', 'kana'].some(key => Array.isArray(draft[key]) && (draft[key] as unknown[]).some(Boolean))
+    const changedWork = row.kind === 'japanese-extensive' ? !!draft.note || !!draft.bookmark || Number(draft.minutesRead) > 0 || Number(draft.spentMinutes) > 0 || Array.isArray(draft.switched) && draft.switched.length > 0
+      : row.kind === 'japanese-reading' ? !!draft.note || !!draft.helped || !!draft.sourcePractice || ['meaning', 'kana'].some(key => Array.isArray(draft[key]) && (draft[key] as unknown[]).some(Boolean))
       : !!draft.response || !!draft.retell || !!draft.audioId || Number(draft.activeMs) > 0
     if (!changedWork) { inactive.push(id); continue }
     const sourceVersion = await eventOccurrenceKey(row)
     const root = (primary.draft as Record<string, unknown>).syncRecovery as Record<string, unknown> | undefined
-    const copy = { ...row, id, kind: row.kind === 'japanese-reading' ? 'japanese-reading-conflict' : 'reading-conflict', draft: { ...draft,
+    const copy = { ...row, id, kind: row.kind === 'japanese-extensive' ? 'japanese-extensive-conflict' : row.kind === 'japanese-reading' ? 'japanese-reading-conflict' : 'reading-conflict', draft: { ...draft,
       syncRecovery: { sourceSessionId: primary.id, rootSessionId: root?.rootSessionId ?? primary.id, sourceDeviceId: device, sourceVersion } } }
     // Explicit operations for a copy (including a tombstone) always outrank a
     // generated seed. User continuations normally use another stable session ID.

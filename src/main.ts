@@ -14,6 +14,7 @@ const router = createRouter({
       { path: '/ja/review', component: () => import('./pages/JapaneseReview.vue') },
       { path: '/ja/talk', component: () => import('./pages/JapaneseDialogue.vue') },
       { path: '/ja/read', component: () => import('./pages/JapaneseReading.vue') },
+      { path: '/ja/books', component: () => import('./pages/JapaneseBooks.vue') },
     ] : []),
     { path: "/", redirect: "/today" },
     { path: "/today", component: () => import("./pages/Today.vue") },

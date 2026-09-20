@@ -52,8 +52,5 @@ export function japaneseReadingMaterials(exercises = japaneseReadings): Material
 }
 // Publisher explicitly allows attributed links, not adapted tests/translations.
 // Do not copy these books into prompts, caches, quizzes or audio stores.
-export const japaneseExtensiveReading = [
-  { title: '何を飲みますか？', level: 'Start', url: 'https://tadoku.org/japanese/book/6447/' },
-  { title: 'カラスと水さし', level: '0', url: 'https://tadoku.org/japanese/book/7347/' },
-] as const
-export const tadokuGuide = 'https://tadoku.org/japanese/en/free-books-en/note-en/'
+// Continuing original-book links and the offline starter reserve are defined
+// separately in tadoku-catalog.ts; they never become these short-text quizzes.

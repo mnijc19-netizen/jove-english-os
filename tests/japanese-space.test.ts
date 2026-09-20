@@ -11,6 +11,7 @@ import { createClient } from '@supabase/supabase-js'
 import type { StoredOperation, SyncOperation } from '../src/sync/protocol'
 import { japaneseMaterials } from '../src/content/japanese'
 import { japaneseWrittenExercises } from '../src/content/japanese-reading'
+import { tadokuStarterMaterials } from '../src/content/tadoku-catalog'
 
 const databases: JoveDatabase[] = [], states: ReturnType<typeof createJapaneseSpace>[] = []
 const clouds: ReturnType<typeof createCloudState>[] = []
@@ -47,7 +48,7 @@ describe('shared-account Japanese lifecycle', () => {
     expect(start).not.toHaveBeenCalled()
     release(); await Promise.all([first, second])
     expect(start).toHaveBeenCalledOnce()
-    expect((await ja.materials.toArray()).map(m => m.id).sort()).toEqual([...japaneseMaterials(), ...japaneseWrittenExercises].map(m => m.id).sort())
+    expect((await ja.materials.toArray()).map(m => m.id).sort()).toEqual([...japaneseMaterials(), ...japaneseWrittenExercises, ...tadokuStarterMaterials()].map(m => m.id).sort())
     expect(state.ready.value).toBe(true)
     expect(state.status.value).toBe('Saved on this device')
   })

@@ -40,6 +40,7 @@ export interface AuthenticPlayback {
 export interface Material {
   language?: 'en' | 'ja';
   externalStudy?: { publisher: string; level: 'beginner' | 'intermediate' | 'advanced'; mission: string; checkedAt: number };
+  externalReading?: { publisher: 'NPO 多言語多読'; level: 'Start' | '0' | '1' | '2' | '3' | '4' | '5'; checkedAt: number };
   authenticPlayback?: AuthenticPlayback;
   id: string; title: string; topic: string; difficulty: number; duration: number;
   transcript: string; translation?: string; sentences: string[]; audioPath?: string; audioId?: string;

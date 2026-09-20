@@ -9,6 +9,7 @@ import type { AudioAsset } from '../src/domain/types'
 import { readLanguageDay } from '../src/db/language-day'
 import { japaneseMaterials } from '../src/content/japanese'
 import { japaneseWrittenExercises } from '../src/content/japanese-reading'
+import { tadokuStarterMaterials } from '../src/content/tadoku-catalog'
 
 const databases: JoveDatabase[] = [], now = Date.UTC(2026, 8, 20, 4)
 afterEach(async () => { for (const database of databases.splice(0)) await database.delete() })
@@ -150,7 +151,7 @@ describe('Japanese usable practice persistence', () => {
     await ja.materials.update('ja-irodori-starter-1', { title: 'My retained title' })
     await learning.open()
     expect((await ja.materials.get('ja-irodori-starter-1'))?.title).toBe('My retained title')
-    expect(await ja.materials.count()).toBe(japaneseMaterials().length + japaneseWrittenExercises.length)
+    expect(await ja.materials.count()).toBe(japaneseMaterials().length + japaneseWrittenExercises.length + tadokuStarterMaterials().length)
     await learning.saveDiagnostic(skipped, true, now)
     const session = await learning.start((await learning.today(now))!.tasks[0]!.id, now)
     await ja.audio.bulkAdd([recording('original'), recording('retry')])

@@ -102,6 +102,7 @@ export const materialSchema = z.strictObject({
   language: z.enum(['en', 'ja']).optional(),
   externalStudy: z.strictObject({ publisher: short, level: z.enum(['beginner', 'intermediate', 'advanced']),
     mission: z.string().min(1).max(1000), checkedAt: timestampSchema }).optional(),
+  externalReading: z.strictObject({ publisher: z.literal('NPO 多言語多読'), level: z.enum(['Start', '0', '1', '2', '3', '4', '5']), checkedAt: timestampSchema }).optional(),
   authenticPlayback: authenticPlaybackSchema.optional(),
   id, title: short, topic: short, difficulty: proportion, duration: z.number().min(0).max(1_000_000),
   transcript: text, translation: text.optional(), sentences: strings, audioPath: audioPath.optional(), audioId: id.optional(),
@@ -117,6 +118,11 @@ export const materialSchema = z.strictObject({
           url.hostname === 'www.bbc.co.uk' && /^\/learningenglish\/english\/features\/6-minute-english_20\d{2}\/ep-\d{6}$/u.test(url.pathname))
     } catch { return false }
   })()), 'External lessons require a publisher page, not copied transcripts or certified playback')
+  .refine(m => !m.externalReading || (m.language === 'ja' && !m.externalStudy && !m.authenticPlayback && !m.audioPath && !m.audioId
+    && !m.synthetic && !m.transcript && !m.sentences.length && !m.translation && !m.answer && !m.question && !m.chunks.length
+    && m.sourceKind === 'url' && /^ja-tadoku-[1-9][0-9]{0,7}$/u.test(m.id)
+    && m.sourceUrl === `https://tadoku.org/japanese/book/${m.id.slice('ja-tadoku-'.length)}/`),
+  'Extensive reading keeps original publisher books separate from tests and listening evidence')
 export const sessionSchema = z.strictObject({
   id, kind: short, materialId: id.optional(), startedAt: timestampSchema, completedAt: timestampSchema.optional(), stage: short, draft: z.record(safeKey, json),
 }).refine(s => s.completedAt === undefined || s.completedAt >= s.startedAt, 'Session ends before it starts')

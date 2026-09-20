@@ -4,7 +4,6 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute } from 'vue-router'
 import { db as english, createLanguageDatabase } from '../db/db'
 import { createJapaneseWorkspace } from '../db/japanese'
 import { japaneseReadingDraft, japaneseReadingResult, type JapaneseReadingDraft } from '../domain/japanese-reading'
-import { japaneseExtensiveReading, tadokuGuide } from '../content/japanese-reading'
 import { kanaSource } from '../content/japanese-kana'
 import { useJapaneseSpace } from '../stores/japanese-space'
 import type { StudySession } from '../domain/types'
@@ -14,7 +13,6 @@ const state = shallowRef<Awaited<ReturnType<typeof learning.reading.read>>>(), d
 const busy = ref(false), dirty = ref(false), error = ref(''), notice = ref(''), retained = ref('')
 const reading = computed(() => state.value?.reading), locked = computed(() => draft.value?.lockedAt !== undefined)
 const results = computed(() => reading.value && draft.value ? japaneseReadingResult(reading.value, draft.value) : undefined)
-const recommendation = computed(() => japaneseExtensiveReading[reading.value?.band ? 1 : 0]!)
 let timer: ReturnType<typeof setTimeout> | undefined, disposed = false, generation = 0, saves: Promise<void> = Promise.resolve()
 function restore(saved: StudySession) {
   if (!state.value) return
@@ -139,10 +137,8 @@ onBeforeUnmount(() => {
       <template v-else><h3>{{ reading.kana ? '这次基础练习已保存' : '这次阅读已保存' }}</h3><p>下次回顾不早于 {{ new Date(draft.dueAt!).toLocaleDateString() }}，会结合当天总时间安排，不会把复习堆成欠债。</p><RouterLink to="/ja" class="button primary">继续今日安排</RouterLink></template>
     </section>
     <section v-if="state?.session.completedAt && !reading?.kana" class="panel reading-panel">
-      <h2>有余力时，轻松多读一点</h2>
-      <p>推荐从《{{ recommendation.title }}》（出版社 Level {{ recommendation.level }}）开始。只看原版，不必翻译每一句，也没有读后测验；太难或没兴趣就换一本。</p>
-      <div class="row wrap"><a :href="recommendation.url" target="_blank" rel="noopener noreferrer" class="button secondary">打开推荐原版</a><a href="https://tadoku.org/japanese/en/free-books-en/" target="_blank" rel="noopener noreferrer" class="text-button">不合适？换一本免费读物</a></div>
-      <p class="help-text">来源：NPO 多言語多読 · 外链，不下载托管；打开链接不算完成阅读或听力证据。<a :href="tadokuGuide" target="_blank" rel="noopener noreferrer">出版社使用说明</a></p>
+      <h2>短篇练理解，原版轻松多读</h2>
+      <p>系统会在后续日程中穿插原版多读，并自动选书、保留书签。只看原版，不加翻译或读后测验；太难或没兴趣可以换一本，不必今天再加一轮。</p>
     </section>
   </div>
 </template>

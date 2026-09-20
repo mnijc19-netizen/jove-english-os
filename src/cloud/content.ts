@@ -1,6 +1,7 @@
 import { z } from 'zod'
+import Dexie from 'dexie'
 import { cloudClient, createAuthFence, publicCloudConfig } from './client'
-import { db } from '../db/db'
+import { db, type JoveDatabase } from '../db/db'
 import { AudioBudgetUnavailableError, withAudioBudget } from '../db/audio'
 import { authenticPlaybackSchema, materialSchema } from '../db/schema'
 import type { AuthenticPlayback, Material, StudyEvent } from '../domain/types'
@@ -127,31 +128,45 @@ export async function refreshContentLessons(profile: ContentProfile, signal?: Ab
 }
 
 /** Separate page-only delivery; failed acoustic selection cannot block this catalog. */
-export async function refreshExternalCourseCatalog(signal?: AbortSignal, sourceId: ExternalCatalogSource = 'voa-level1'): Promise<Material[]> {
+export function refreshExternalCourseCatalog(signal?: AbortSignal, sourceId: Exclude<ExternalCatalogSource, 'ja-tadoku'> = 'voa-level1'): Promise<Material[]> {
+  if (sourceId === ('ja-tadoku' as string)) throw invalid()
+  return refreshCatalogInto(db, sourceId, signal)
+}
+export function refreshJapaneseReadingCatalog(database: JoveDatabase, signal?: AbortSignal): Promise<Material[]> {
+  if (database.language !== 'ja') throw invalid()
+  return refreshCatalogInto(database, 'ja-tadoku', signal)
+}
+async function refreshCatalogInto(database: JoveDatabase, sourceId: ExternalCatalogSource, signal?: AbortSignal): Promise<Material[]> {
   externalCatalogSourceSchema.parse(sourceId)
   return withDeadline(signal, 25_000, async scoped => {
     const context = await access(scoped)
     try {
       scoped = AbortSignal.any([scoped, context.signal])
+      if ((await database.syncMeta.get('owner'))?.value !== context.ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
       const response = z.strictObject({ catalog: externalCatalogSchema.nullable() })
         .parse(await request(context, { action: 'external-catalog', ...(sourceId === 'voa-level1' ? {} : { sourceId }) }, scoped))
       if (!response.catalog) return []
-      if (response.catalog.sourceId !== sourceId) throw invalid()
+      if (response.catalog.sourceId !== sourceId || response.catalog.language !== database.language) throw invalid()
       if (response.catalog.checkedAt > Date.now() + 300_000 || response.catalog.checkedAt <= Date.now() - EXTERNAL_CATALOG_MAX_AGE) throw invalid()
       const materials = materialFromExternalCatalog(response.catalog).map(m => materialSchema.parse(m))
       await context.assertCurrent(); context.assertLive(); checkAbort(scoped)
-      await db.transaction('rw', [db.materials, db.syncMeta], async () => {
-        if ((await db.syncMeta.get('owner'))?.value !== context.ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
+      await database.transaction('rw', [database.materials, database.syncMeta], async () => {
+        if (database !== db) await Dexie.waitFor(Dexie.ignoreTransaction(context.assertCurrent))
+        if ((await database.syncMeta.get('owner'))?.value !== context.ownerId) throw new ProviderError('ACCOUNT_REQUIRED')
         for (const material of materials) {
-          const previous = await db.materials.get(material.id)
+          const previous = await database.materials.get(material.id)
           // Existing user edits, transcripts, drafts and source identities are never overwritten.
           if (previous) {
-            if (previous.sourceUrl !== material.sourceUrl || !previous.externalStudy) throw invalid()
+            const metadata = database.language === 'ja' ? 'externalReading' : 'externalStudy'
+            if (previous.sourceUrl !== material.sourceUrl || !previous[metadata]) throw invalid()
+            if (previous.externalReading && previous.externalReading.level !== material.externalReading?.level) throw invalid()
             // Only source freshness advances; all learner-authored fields and creation time stay intact.
-            await db.materials.update(previous.id, { 'externalStudy.checkedAt': Math.max(previous.externalStudy.checkedAt, response.catalog!.checkedAt) })
-          } else await db.materials.add(material)
+            const checkedAt = Math.max(previous[metadata]!.checkedAt, response.catalog!.checkedAt)
+            await database.materials.update(previous.id, metadata === 'externalReading' ? { 'externalReading.checkedAt': checkedAt } : { 'externalStudy.checkedAt': checkedAt })
+          } else await database.materials.add(material)
           context.assertLive(); checkAbort(scoped)
         }
+        if (database !== db) await Dexie.waitFor(Dexie.ignoreTransaction(context.assertCurrent))
       })
       context.assertLive(); checkAbort(scoped)
       return materials

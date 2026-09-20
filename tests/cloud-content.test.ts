@@ -2,8 +2,8 @@ import 'fake-indexeddb/auto'
 import Dexie from 'dexie'
 import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { db } from '../src/db/db'
-import { contentAudioIsTransient, materialFromContentLesson, prepareContentAudio, refreshContentLessons, refreshExternalCourseCatalog, flushContentHistory } from '../src/cloud/content'
+import { db, JoveDatabase } from '../src/db/db'
+import { contentAudioIsTransient, materialFromContentLesson, prepareContentAudio, refreshContentLessons, refreshExternalCourseCatalog, refreshJapaneseReadingCatalog, flushContentHistory } from '../src/cloud/content'
 import { externalMaterials, externalLessonCandidates, EXTERNAL_CATALOG_MAX_AGE } from '../src/content/external'
 import { defaultProfile, defaultSettings, type StudyEvent } from '../src/domain/types'
 import { demoMaterials } from '../src/content/materials'
@@ -66,6 +66,32 @@ beforeEach(async () => {
 afterEach(async () => { expect(auth.listeners.size).toBe(0); vi.restoreAllMocks(); vi.unstubAllGlobals(); await db.delete() })
 
 describe('automatic authenticated lesson delivery', () => {
+  it('imports original Japanese books only into the same-owner Japanese database, preserving edits and English', async () => {
+    const ja = new JoveDatabase(`catalog-ja-${crypto.randomUUID()}`, 'ja')
+    const catalog = { version: 1, sourceId: 'ja-tadoku', language: 'ja', checkedAt: Date.now(), revision: 'd'.repeat(64),
+      entries: ['Start', '0', '1', '2', '3', '4', '5'].map((level, i) => ({ id: String(i + 100), title: `Original ${i}`, level, url: `https://tadoku.org/japanese/book/${i + 100}/` })) }
+    try {
+      await ja.syncMeta.put({ id: 'owner', value: 'wrong-owner' })
+      await expect(refreshJapaneseReadingCatalog(ja)).rejects.toThrow(); expect(fetcher).not.toHaveBeenCalled()
+      await ja.syncMeta.put({ id: 'owner', value: auth.session!.user.id })
+      fetcher.mockImplementation(async (_url, init) => {
+        expect(JSON.parse(String(init.body))).toEqual({ action: 'external-catalog', sourceId: 'ja-tadoku' }); return json({ catalog })
+      })
+      const materials = await refreshJapaneseReadingCatalog(ja)
+      expect(materials).toHaveLength(7); expect(await ja.materials.count()).toBe(7); expect(await db.materials.count()).toBe(0)
+      await ja.materials.update(materials[0]!.id, { title: '我的书名标记', approved: false })
+      catalog.checkedAt += 1000
+      await refreshJapaneseReadingCatalog(ja)
+      expect(await ja.materials.get(materials[0]!.id)).toMatchObject({ title: '我的书名标记', approved: false, externalReading: { checkedAt: catalog.checkedAt } })
+      const before = await ja.materials.toArray()
+      fetcher.mockImplementation(async () => {
+        await db.syncMeta.put({ id: 'owner', value: 'owner-changed-in-flight' }); return json({ catalog })
+      })
+      await expect(refreshJapaneseReadingCatalog(ja)).rejects.toThrow()
+      expect(await ja.materials.toArray()).toEqual(before)
+      expect(() => refreshJapaneseReadingCatalog(db)).toThrow()
+    } finally { await ja.delete() }
+  })
   it('imports continuing episodes while retaining learner edits and stable drafts across a refresh', async () => {
     const catalog = { version: 1, sourceId: 'bbc-six-minute', language: 'en', checkedAt: Date.now(), revision: 'c'.repeat(64),
       entries: [{ id: 'p0abcdef', title: 'Everyday ideas', url: 'https://www.bbc.co.uk/learningenglish/english/features/6-minute-english_2026/ep-260917',

@@ -2,7 +2,7 @@
 import { pathToFileURL } from 'node:url'
 
 const endpoint = 'https://lnkxdwzdcrtlucaezhkd.supabase.co/functions/v1/content'
-const sources = ['voa-level1', 'voa-level2', 'bbc-six-minute']
+const sources = ['voa-level1', 'voa-level2', 'bbc-six-minute', 'ja-tadoku']
 class DirectoryJobError extends Error {
   constructor(message, diagnostics) { super(message); this.diagnostics = diagnostics }
 }
@@ -62,7 +62,8 @@ export async function refreshCourseDirectory(token, fetcher = fetch, sourceId = 
   } finally { void reader.cancel().catch(() => {}); reader.releaseLock() }
   let value
   try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw failure('RESPONSE_JSON', 'Directory response is invalid.') }
-  const validCount = lessons === undefined ? Number.isInteger(value?.lessons) && value.lessons >= 1 && value.lessons <= 52 : value?.lessons === lessons
+  const validCount = lessons === undefined ? Number.isInteger(value?.lessons) && value.lessons >= (sourceId === 'ja-tadoku' ? 7 : 1)
+    && value.lessons <= (sourceId === 'ja-tadoku' ? 500 : 52) : value?.lessons === lessons
   if (value?.refreshed === true && validCount && value.sourceId === sourceId
     && typeof value.revision === 'string' && /^[a-f0-9]{64}$/u.test(value.revision)) return `Course directory refreshed: ${value.lessons} lessons.`
   if (value?.refreshed === false && value.reason === 'not-due-or-running') return 'Course directory is not due or another refresh owns the lease.'

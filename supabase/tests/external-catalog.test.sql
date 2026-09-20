@@ -111,4 +111,33 @@ do $$ begin
   assert (select relrowsecurity from pg_class where oid='public.external_course_catalog'::regclass), 'RLS not enabled';
   assert not (select prosecdef from pg_proc where oid='public.external_catalog_worker(text,jsonb)'::regprocedure), 'RPC bypasses caller privileges';
 end $$;
+set local role service_role;
+do $$
+declare token text; snapshot jsonb; remembered jsonb; english jsonb;
+begin
+  english := public.external_catalog_worker('read','{"sourceId":"bbc-six-minute"}');
+  token := public.external_catalog_worker('claim','{"sourceId":"ja-tadoku"}')->>'leaseToken';
+  assert token is not null, 'Japanese book lease missing';
+  select jsonb_build_object('version',1,'sourceId','ja-tadoku','language','ja','checkedAt',9999999999999,'revision',repeat('d',64),
+    'entries',jsonb_agg(jsonb_build_object('id',i::text,'url','https://tadoku.org/japanese/book/'||i||'/',
+      'title','Fixture original book','level',case when i=1 then 'Start' else (i-2)::text end))) into snapshot from generate_series(1,7) i;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-tadoku','leaseToken',token,'catalog',jsonb_set(snapshot,'{language}','"en"')));
+    raise exception 'wrong book language accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-tadoku','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries,0,url}','"https://tadoku.org/japanese/book/2/"')));
+    raise exception 'mismatched book identity accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-tadoku','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries,0,level}','"5"')));
+    raise exception 'partial publisher levels accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-tadoku','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries}',(snapshot->'entries')||(snapshot->'entries'))));
+    raise exception 'duplicate books accepted'; exception when invalid_parameter_value then null; end;
+  assert public.external_catalog_worker('commit',jsonb_build_object('sourceId','ja-tadoku','leaseToken',token,'catalog',snapshot))='true'::jsonb, 'Japanese catalog not saved';
+  remembered := public.external_catalog_worker('read','{"sourceId":"ja-tadoku"}');
+  assert remembered->>'language'='ja' and jsonb_array_length(remembered->'entries')=7, 'Japanese metadata lost';
+  assert (remembered->>'checkedAt')::bigint < 9999999999999, 'book freshness forged';
+  assert public.external_catalog_worker('read','{"sourceId":"bbc-six-minute"}')=english, 'Japanese refresh changed English';
+  update public.external_course_catalog set next_attempt_at=now()-interval '1 second' where source_id='ja-tadoku';
+  token := public.external_catalog_worker('claim','{"sourceId":"ja-tadoku"}')->>'leaseToken';
+  perform public.external_catalog_worker('fail',jsonb_build_object('sourceId','ja-tadoku','leaseToken',token));
+  assert public.external_catalog_worker('read','{"sourceId":"ja-tadoku"}')=remembered, 'failed refresh destroyed books';
+end $$;
+reset role;
 select 'external-catalog-sql-passed' as result;

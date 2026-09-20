@@ -4,6 +4,7 @@ import { defineStore } from 'pinia'
 import { db as englishDatabase, createLanguageDatabase, type JoveDatabase } from '../db/db'
 import { initializeJapanese } from '../db/japanese'
 import { createCloudState, useCloud } from './cloud'
+import { refreshJapaneseReadingCatalog } from '../cloud/content'
 
 type CloudState = ReturnType<typeof createCloudState>
 type SharedAccount = Pick<CloudState, 'settle' | 'signOut'> & { ownerId: () => string }
@@ -12,7 +13,7 @@ type SharedAccount = Pick<CloudState, 'settle' | 'signOut'> & { ownerId: () => s
  * DB handle; leaving it cannot close this background synchronization handle. */
 export function createJapaneseSpace(english: JoveDatabase, sharedAccount: SharedAccount,
   database = createLanguageDatabase('ja'), makeCloud: (database: JoveDatabase, guard: (owner: string) => Promise<void>) => CloudState
-    = (database, guard) => createCloudState(database, undefined, undefined, guard)) {
+    = (database, guard) => createCloudState(database, undefined, undefined, guard), refreshCatalog = refreshJapaneseReadingCatalog) {
   if (english.language !== 'en' || database.language !== 'ja') throw new Error('Invalid language spaces')
   let epoch = 0
   const signingOut = ref(false)
@@ -22,6 +23,19 @@ export function createJapaneseSpace(english: JoveDatabase, sharedAccount: Shared
   }
   const cloud = makeCloud(database, admitOwner), ready = ref(false), opening = ref(false), initializationError = ref(''), revision = ref(0)
   let pending: Promise<void> | undefined, started = false, afterDownload: () => Promise<void> = async () => {}
+  const catalogProblem = ref('')
+  let catalogAbort: AbortController | undefined, catalogPending: Promise<void> | undefined, catalogAttempt = 0
+  function refreshBooks() {
+    if (!ready.value || !cloud.configured || !sharedAccount.ownerId() || catalogPending || Date.now() - catalogAttempt < 6 * 3600000) return
+    catalogAttempt = Date.now(); catalogAbort = new AbortController()
+    const generation = epoch
+    catalogPending = refreshCatalog(database, catalogAbort.signal).then(async materials => {
+      if (generation !== epoch) return
+      catalogProblem.value = materials.length ? '' : '完整原版读物目录尚未就绪，先使用已核验的备用链接。'; revision.value++; await afterDownload()
+    }).catch(() => {
+      if (generation === epoch) catalogProblem.value = '原版读物目录暂未更新，已有读物和草稿仍保留。系统稍后再试。'
+    }).finally(() => { catalogPending = undefined; catalogAbort = undefined })
+  }
   const status = computed(() => initializationError.value ? 'Japanese setup needs attention' : opening.value ? 'Opening Japanese sync'
     : !started ? 'Japanese not opened' : cloud.status.value)
   async function sameOwner() {
@@ -35,7 +49,7 @@ export function createJapaneseSpace(english: JoveDatabase, sharedAccount: Shared
   async function ensure() {
     if (signingOut.value) throw new Error('正在登出，请稍后再打开日语区。')
     if (pending) return pending
-    if (ready.value) { await sharedAccount.settle(); await sameOwner(); return }
+    if (ready.value) { await sharedAccount.settle(); await sameOwner(); refreshBooks(); return }
     opening.value = true; initializationError.value = ''
     const generation = epoch
     const current = () => { if (generation !== epoch || signingOut.value) throw new Error('日语初始化已取消，本地记录仍保留。') }
@@ -57,6 +71,7 @@ export function createJapaneseSpace(english: JoveDatabase, sharedAccount: Shared
       await sameOwner()
       ready.value = true; revision.value++
       await afterDownload()
+      refreshBooks()
     }).catch(error => {
       initializationError.value = error instanceof Error ? error.message : '日语同步尚未连接，本地记录仍保留。'
       throw error
@@ -74,6 +89,7 @@ export function createJapaneseSpace(english: JoveDatabase, sharedAccount: Shared
   async function signOut() {
     if (signingOut.value) return
     signingOut.value = true; epoch++
+    catalogAbort?.abort(); await catalogPending; catalogAttempt = 0
     // Fence both contexts before the shared auth session changes. In-flight
     // Japanese metadata/recording commits must not continue under a new login.
     try {
@@ -86,9 +102,9 @@ export function createJapaneseSpace(english: JoveDatabase, sharedAccount: Shared
       if (started) await cloud.resume()
     }
   }
-  async function stop() { epoch++; await cloud.stop(); await pending?.catch(() => {}); started = false; ready.value = false; database.close() }
+  async function stop() { epoch++; catalogAbort?.abort(); await catalogPending; await cloud.stop(); await pending?.catch(() => {}); started = false; ready.value = false; database.close() }
   return { database: markRaw(database), ready, opening, revision, status,
-    problem: computed(() => initializationError.value || cloud.problem.value), configured: cloud.configured,
+    problem: computed(() => initializationError.value || cloud.problem.value), catalogProblem, configured: cloud.configured,
     syncing: cloud.syncing, lastSynced: cloud.lastSynced, pending: cloud.pending, hasMore: cloud.hasMore,
     audioPending: cloud.audioPending, audioBlocked: cloud.audioBlocked, deferred: cloud.deferred,
     conflicts: cloud.conflicts, online: cloud.online, signingOut, ensure, startIfPresent, syncNow: cloud.syncNow,

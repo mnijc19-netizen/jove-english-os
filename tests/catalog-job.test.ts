@@ -6,12 +6,17 @@ describe('directory-only scheduler client', () => {
   it('refreshes all fixed sources independently with exact courses and bounded episode counts', async () => {
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const sourceId = JSON.parse(String(init?.body)).sourceId ?? 'voa-level1'
-      return Response.json({ refreshed: true, lessons: sourceId === 'voa-level1' ? 52 : 30, sourceId, revision: 'b'.repeat(64) })
+      return Response.json({ refreshed: true, lessons: sourceId === 'voa-level1' ? 52 : sourceId === 'ja-tadoku' ? 141 : 30, sourceId, revision: 'b'.repeat(64) })
     })
     const result = await refreshCourseDirectories(token, fetcher)
     expect(result).toContain('52 lessons'); expect(result).toContain('30 lessons')
-    expect(fetcher).toHaveBeenCalledTimes(3)
+    expect(result).toContain('141 lessons')
+    expect(fetcher).toHaveBeenCalledTimes(4)
     expect(fetcher.mock.calls[1]?.[1]?.body).toBe('{"action":"catalog-refresh","sourceId":"voa-level2"}')
+  })
+  it.each([6, 501, 7.5])('rejects an invalid Japanese directory size %s', async lessons => {
+    await expect(refreshCourseDirectory(token, async () => Response.json({ refreshed: true, lessons,
+      sourceId: 'ja-tadoku', revision: 'a'.repeat(64) }), 'ja-tadoku')).rejects.toThrow('valid outcome')
   })
   it('attempts the other course after one fails and never reports aggregate success', async () => {
     const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) =>
@@ -19,7 +24,7 @@ describe('directory-only scheduler client', () => {
         ? Response.json({ refreshed: false, reason: 'not-due-or-running' })
         : new Response('failure', { status: 503 }))
     await expect(refreshCourseDirectories(token, fetcher)).rejects.toThrow('successful refreshes remain saved')
-    expect(fetcher).toHaveBeenCalledTimes(3)
+    expect(fetcher).toHaveBeenCalledTimes(4)
   })
   it('rejects a valid snapshot result for the wrong requested course', async () => {
     await expect(refreshCourseDirectory(token, async () => Response.json({ refreshed: true, lessons: 52,
@@ -59,7 +64,7 @@ describe('directory-only scheduler client', () => {
       JSON.parse(String(init?.body)).sourceId ? Response.json({ refreshed: false, reason: 'not-due-or-running' })
         : new Response(`sensitive-response-${token}`, { status: 401 })) } catch (error) { failure = error }
     expect(directoryJobDiagnostics(failure)).toEqual([{ sourceId: 'voa-level1', code: 'HTTP', status: 401 },
-      { sourceId: 'voa-level2', code: 'SUCCESS_OR_NOT_DUE' }, { sourceId: 'bbc-six-minute', code: 'SUCCESS_OR_NOT_DUE' }])
+      { sourceId: 'voa-level2', code: 'SUCCESS_OR_NOT_DUE' }, { sourceId: 'bbc-six-minute', code: 'SUCCESS_OR_NOT_DUE' }, { sourceId: 'ja-tadoku', code: 'SUCCESS_OR_NOT_DUE' }])
     expect(JSON.stringify(directoryJobDiagnostics(failure))).not.toContain(token)
   })
   it('categorizes credential and transport errors without using arbitrary error messages or attached diagnostics', async () => {

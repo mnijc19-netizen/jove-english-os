@@ -98,7 +98,7 @@ export function resolveEpisodeAudioUrl(episode: FeedEpisode, source: ContentSour
   return validateSourceUrl(`https://hpr.nyc3.cdn.digitaloceanspaces.com${file}`, source.urls.audio)
 }
 
-function decodeXml(value: string): string {
+export function decodeXml(value: string): string {
   // Only the five predefined XML entities and bounded numeric references. No DTD or custom expansion.
   const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
   return value.replace(/&([^;\s<&]{1,32});|&/gu, (full: string, entity?: string) => {

@@ -13,12 +13,15 @@ import { createJapaneseReading } from './japanese-reading'
 import { japaneseReadingMaterials, japaneseWrittenExercises } from '../content/japanese-reading'
 import { nextJapaneseReading, nextJapaneseKana } from '../domain/japanese-reading'
 import { unavailableExternalIds } from '../content/external'
+import { tadokuStarterMaterials } from '../content/tadoku-catalog'
+import { nextJapaneseBook } from '../domain/japanese-extensive'
+import { createJapaneseExtensive } from './japanese-extensive'
 
 /** Called only by an explicitly enabled Japanese workspace, never by English
  * bootstrap. Does not overwrite setup, learned content, cards or saved work. */
 export async function initializeJapanese(database: JoveDatabase): Promise<void> {
   if (database.language !== 'ja') throw new Error('Japanese setup requires its own workspace')
-  await createLearningRepository(database).initialize([...japaneseMaterials(), ...japaneseReadingMaterials(japaneseWrittenExercises)])
+  await createLearningRepository(database).initialize([...japaneseMaterials(), ...japaneseReadingMaterials(japaneseWrittenExercises), ...tadokuStarterMaterials()])
 }
 
 const text = z.string().max(10_000)
@@ -59,6 +62,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
   }
   const dialogue = createJapaneseDialogue(database, checkOwner, fence, sharedFence)
   const reading = createJapaneseReading(database, checkOwner, fence, sharedFence)
+  const books = createJapaneseExtensive(database, checkOwner, fence, sharedFence)
   async function saveDiagnostic(responses: Record<string, string>, finish = false, now = Date.now()) {
     const frozen = { ...responses }
     for (const [id, answer] of Object.entries(frozen)) {
@@ -131,16 +135,25 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       } : undefined)
       const kanaMinutes = kanaTask ? Math.min(kanaTask.minutes, Math.max(0, minutes - reviewMinutes)) : 0
       const auxiliaryMinutes = Math.max(0, minutes - reviewMinutes - kanaMinutes)
-      const lastAuxiliary = sessions.filter(s => s.completedAt && s.completedAt <= now && !s.materialId?.startsWith('ja-kana-') && ['japanese-dialogue', 'japanese-reading'].includes(s.kind))
+      const lastAuxiliary = sessions.filter(s => s.completedAt && s.completedAt <= now && !s.materialId?.startsWith('ja-kana-') && ['japanese-dialogue', 'japanese-reading', 'japanese-extensive'].includes(s.kind))
         .sort((a, b) => a.completedAt! - b.completedAt!).at(-1)
-      const readingTurn = !!selectedReading && lastAuxiliary?.kind === 'japanese-dialogue'
+      const selectedBook = nextJapaneseBook(materials, events, now)
+      const lastReading = sessions.filter(s => s.completedAt && s.completedAt <= now && !s.materialId?.startsWith('ja-kana-')
+        && ['japanese-reading', 'japanese-extensive'].includes(s.kind)).sort((a, b) => a.completedAt! - b.completedAt!).at(-1)
+      const useBook = !!selectedBook && (lastReading?.kind === 'japanese-reading' || !selectedReading)
+      const readingTurn = !!selectedReading && lastAuxiliary?.kind === 'japanese-dialogue' || useBook
       const dialogueTask = previousDialogue ?? (!current && history.length >= 2 && material && auxiliaryMinutes >= 15
         && !(readingTurn && auxiliaryMinutes < 20) ? {
         id: `${date}:ja:speak:${material.id}`, kind: 'speak' as const, title: '连续回应三轮，再改一处', minutes: 5,
         reason: '系统沿用今天的话题；录音先保存，AI 不可用时可用标明的离线应答练习。', materialId: material.id, done: false,
       } : undefined)
       const dialogueMinutes = dialogueTask ? Math.min(dialogueTask.minutes, auxiliaryMinutes) : 0
-      const readingTask = previousReading ?? (!current && history.length >= 1 && selectedReading && auxiliaryMinutes - dialogueMinutes >= 15 ? {
+      const readingTask = previousReading ?? (!current && history.length >= 1 && useBook && auxiliaryMinutes - dialogueMinutes >= 15 ? {
+        id: `${date}:ja:learn:${selectedBook.book.id}`, kind: 'learn' as const, title: `轻松读原版：${selectedBook.book.title}`, minutes: 5,
+        reason: selectedBook.continuing ? '接着上次书签读；时间到了就停，不必读完一本。'
+          : selectedBook.trial ? '根据你的阅读感受试读浅一点的新等级；吃力就换，不是能力升级。'
+            : '从容易的原版开始，理解大意就继续；不加翻译和测验，读感只用于下一本推荐。', materialId: selectedBook.book.id, done: false,
+      } : !current && history.length >= 1 && selectedReading && auxiliaryMinutes - dialogueMinutes >= 15 ? {
         id: `${date}:ja:learn:${selectedReading.id}`, kind: 'learn' as const, title: `读懂生活短篇：${selectedReading.title}`, minutes: 5,
         reason: selectedReading.trial ? '新难度试读，不代表已经升级；吃力就回退。理解和读法分开练。'
           : '先读意思，再试假名读法；理解与读法分别记录，不算听说成绩。', materialId: selectedReading.id, done: false,
@@ -169,7 +182,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     const task = plan?.tasks.find(task => task.id === taskId && !task.done && !task.optional)
     if (task?.kind === 'review') return review.start(task, now)
     if (task?.kind === 'speak') return dialogue.start(task, now)
-    if (task?.kind === 'learn') return reading.start(task, now)
+    if (task?.kind === 'learn') return task.materialId?.startsWith('ja-tadoku-') ? books.start(task, now) : reading.start(task, now)
     if (!task?.materialId || task.minutes <= 0) throw new Error('今天的安排已更新，请返回今日任务。')
     await checkOwner()
     return database.transaction('rw', database.tables, async () => {
@@ -301,5 +314,5 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       return complete
     })
   }
-  return { database, repository, review, dialogue, reading, open, checkOwner, saveDiagnostic, today, start, save, replaceUnavailable, finish, diagnosticId }
+  return { database, repository, review, dialogue, reading, books, open, checkOwner, saveDiagnostic, today, start, save, replaceUnavailable, finish, diagnosticId }
 }
