@@ -129,7 +129,19 @@ export interface Projection {
 export async function eventOccurrenceKey(record: RecordValue): Promise<string> {
   const value = structuredClone(record)
   if (value.data && typeof value.data === 'object') {
-    delete (value.data as Record<string, unknown>).audioAvailable
+    const data = value.data as Record<string, unknown>
+    delete data.audioAvailable
+    if (value.type === 'ENGLISH_READING_REPORT' || value.type === 'ENGLISH_READING_RECALL') {
+      // New reading receipts must keep their source identity through a JSON
+      // backup (which intentionally excludes device-local eventKeys). Undo only
+      // projection's alias/time decoration before hashing the original report.
+      value.id = value.id.replace(/~[a-f0-9]{64}$/u, '')
+      if (Number.isSafeInteger(data.clientTimestamp) && Number(data.clientTimestamp) >= Number(value.timestamp)
+        && Number(data.clientTimestamp) <= 253402300799999) {
+        value.timestamp = data.clientTimestamp; delete data.clientTimestamp
+      }
+      if (typeof data.readingEventId === 'string') data.readingEventId = data.readingEventId.replace(/~[a-f0-9]{64}$/u, '')
+    }
     if (!Object.keys(value.data).length) delete value.data
   }
   const bytes = new TextEncoder().encode(canonical(value))
@@ -222,10 +234,11 @@ function mergePlanAssignments(plan: DailyPlan, history: StoredOperation[], evide
   return { ...plan, tasks: result, minutes: result.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0) }
 }
 
-const readingKind = (kind: unknown) => kind === 'reading' || kind === 'reading-recovery' || kind === 'japanese-reading' || kind === 'japanese-extensive'
+const readingKind = (kind: unknown) => kind === 'reading' || kind === 'reading-recovery' || kind === 'japanese-reading' || kind === 'japanese-extensive' || kind === 'english-reading'
 const committedReading = (row: RecordValue) => row.kind === 'japanese-reading'
   ? typeof (row.draft as Record<string, unknown>).lockedAt === 'number' : row.kind === 'japanese-extensive'
-    ? ['completed', 'unavailable'].includes(String(row.stage)) && typeof (row.draft as Record<string, unknown>).savedAt === 'number' : row.stage === 'saved'
+    ? ['completed', 'unavailable'].includes(String(row.stage)) && typeof (row.draft as Record<string, unknown>).savedAt === 'number'
+    : row.kind === 'english-reading' ? ['saved', 'stopped'].includes(String(row.stage)) && typeof (row.draft as Record<string, unknown>).savedAt === 'number' : row.stage === 'saved'
 function readingSnapshot(row: RecordValue): RecordValue {
   const copy = structuredClone(row)
   delete (copy.draft as Record<string, unknown>).syncReadingConflicts
@@ -233,6 +246,8 @@ function readingSnapshot(row: RecordValue): RecordValue {
 }
 function readingSubmission(row: RecordValue): string {
   const draft = row.draft as Record<string, unknown>
+  if (row.kind === 'english-reading') return canonical([row.materialId, row.startedAt, row.stage, draft.taskId, draft.mode, englishReadingSource(draft.source),
+    draft.response, draft.application, draft.minutesRead, draft.effort, draft.revealedAt, draft.rating, draft.outcome, draft.savedAt])
   if (row.kind === 'japanese-extensive') return canonical([row.materialId, row.startedAt, row.stage, draft.book, draft.bookmark, draft.note,
     draft.effort, draft.minutesRead, draft.spentMinutes, draft.outcome, draft.switched, draft.savedAt])
   if (row.kind === 'japanese-reading') return canonical([row.materialId, row.startedAt, draft.meaning, draft.kana, draft.helped, draft.seen, draft.lockedAt, draft.sourcePractice ?? ''])
@@ -240,9 +255,16 @@ function readingSubmission(row: RecordValue): string {
     draft.retell ?? '', draft.audioId ?? '', draft.audioSeconds ?? 0, draft.observationAt ?? 0, draft.activeMs ?? 0,
     draft.readSections ?? [], draft.sectionMs ?? [], draft.priorExposure !== false])
 }
+// Alias IDs may change after a late same-ID event conflict. The immutable
+// occurrence key and frozen learner text, not that display ID, bind the source.
+function englishReadingSource(value: unknown) {
+  if (!value || typeof value !== 'object') return value
+  const { readingEventId: _alias, ...source } = value as Record<string, unknown>
+  void _alias; return source
+}
 function readingWork(row: RecordValue): string {
   const draft = row.draft as Record<string, unknown>
-  if (row.kind === 'japanese-extensive') return readingSubmission(row)
+  if (row.kind === 'japanese-extensive' || row.kind === 'english-reading') return readingSubmission(row)
   if (row.kind === 'japanese-reading') return canonical([readingSubmission(row), draft.note ?? '', draft.effort ?? 'okay'])
   return canonical([readingSubmission(row), draft.response ?? '', draft.checkedSections ?? [], draft.unknownTokens ?? [], draft.lookupTokens ?? []])
 }
@@ -251,6 +273,14 @@ function readingWork(row: RecordValue): string {
  * replacing a different nonempty response does not. */
 function includesReadingWork(earlier: RecordValue, later: RecordValue): boolean {
   if (earlier.materialId !== later.materialId || earlier.startedAt !== later.startedAt) return false
+  if (earlier.kind === 'english-reading') {
+    if (later.kind !== earlier.kind) return false
+    if (committedReading(earlier)) return committedReading(later) && readingSubmission(earlier) === readingSubmission(later)
+    const a = earlier.draft as Record<string, unknown>, b = later.draft as Record<string, unknown>
+    return a.mode === b.mode && canonical(englishReadingSource(a.source)) === canonical(englishReadingSource(b.source)) && (!a.response || a.response === b.response)
+      && (!a.application || a.application === b.application) && Number(a.minutesRead) <= Number(b.minutesRead)
+      && (!a.revealedAt || a.revealedAt === b.revealedAt) && (!a.rating || a.rating === b.rating)
+  }
   if (earlier.kind === 'japanese-extensive') {
     if (later.kind !== earlier.kind) return false
     if (committedReading(earlier)) return committedReading(later) && readingSubmission(earlier) === readingSubmission(later)
@@ -288,6 +318,23 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
   const puts = history.filter(op => op.kind === 'put' && readingKind(op.payload.record?.kind))
   const attested = (op: StoredOperation) => {
     const row = op.payload.record!, draft = row.draft as Record<string, unknown>
+    if (row.kind === 'english-reading') {
+      const evidence = all.filter(e => e.entityType === 'events' && e.payload.record?.sessionId === row.id && e.payload.record.timestamp === draft.savedAt)
+        .map(e => e.payload.record!)
+      const terminal = evidence.some(event => {
+        const data = event.data as Record<string, unknown>
+        return event.type === (row.stage === 'stopped' ? 'TASK_STOPPED' : 'TASK_COMPLETED') && event.source === 'objective'
+          && data?.taskId === draft.taskId && data.materialId === row.materialId && data.minutes === draft.minutesRead && data.outcome === draft.outcome
+          && data.readingSelfReport === true && data.timeSource === 'self-report'
+      })
+      return terminal && (row.stage === 'stopped' || evidence.some(event => {
+        const data = event.data as Record<string, unknown>
+        return event.source === 'self-report' && data?.materialId === row.materialId && data.response === draft.response
+          && data.readingObserved === false && data.comprehensionVerified === false && (draft.mode === 'recall'
+            ? event.type === 'ENGLISH_READING_RECALL' && data.readingEventKey === (draft.source as Record<string, unknown>)?.readingEventKey && data.rating === draft.rating
+            : event.type === 'ENGLISH_READING_REPORT' && data.application === draft.application && data.outcome === draft.outcome && data.minutesRead === draft.minutesRead)
+      }))
+    }
     if (row.kind === 'japanese-extensive') return all.some(e => {
       const event = e.payload.record, data = event?.data as Record<string, unknown> | undefined
       if (row.stage === 'unavailable') return e.entityType === 'events' && event?.type === 'TASK_STOPPED' && event.source === 'objective'
@@ -321,7 +368,7 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
   // Japanese first answers are locked BEFORE feedback. Keep the earliest whole
   // completed snapshot on that branch; an offline unsubmitted draft cannot
   // replace its answers or completion marker through field-level merging.
-  const completedJapanese = compatible.find(op => ['japanese-reading', 'japanese-extensive'].includes(String(op.payload.record!.kind)) && op.payload.record!.completedAt)
+  const completedJapanese = compatible.find(op => ['japanese-reading', 'japanese-extensive', 'english-reading'].includes(String(op.payload.record!.kind)) && op.payload.record!.completedAt)
   const selected = completedJapanese ?? compatible.at(-1) ?? puts.at(-1)!
   const primary = readingSnapshot(selected.payload.record!)
   const copies: RecordValue[] = [], ids: string[] = [], conflicted: string[] = [], inactive: string[] = []
@@ -335,13 +382,14 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
     if (!latest || puts.some(op => compare(op, latest) > 0 && includesReadingWork(latest.payload.record!, op.payload.record!))) { inactive.push(id); continue }
     const row = readingSnapshot(latest.payload.record!)
     const draft = row.draft as Record<string, unknown>
-    const changedWork = row.kind === 'japanese-extensive' ? !!draft.note || !!draft.bookmark || Number(draft.minutesRead) > 0 || Number(draft.spentMinutes) > 0 || Array.isArray(draft.switched) && draft.switched.length > 0
+    const changedWork = row.kind === 'english-reading' ? !!draft.response || !!draft.application || Number(draft.minutesRead) > 0
+      : row.kind === 'japanese-extensive' ? !!draft.note || !!draft.bookmark || Number(draft.minutesRead) > 0 || Number(draft.spentMinutes) > 0 || Array.isArray(draft.switched) && draft.switched.length > 0
       : row.kind === 'japanese-reading' ? !!draft.note || !!draft.helped || !!draft.sourcePractice || ['meaning', 'kana'].some(key => Array.isArray(draft[key]) && (draft[key] as unknown[]).some(Boolean))
       : !!draft.response || !!draft.retell || !!draft.audioId || Number(draft.activeMs) > 0
     if (!changedWork) { inactive.push(id); continue }
     const sourceVersion = await eventOccurrenceKey(row)
     const root = (primary.draft as Record<string, unknown>).syncRecovery as Record<string, unknown> | undefined
-    const copy = { ...row, id, kind: row.kind === 'japanese-extensive' ? 'japanese-extensive-conflict' : row.kind === 'japanese-reading' ? 'japanese-reading-conflict' : 'reading-conflict', draft: { ...draft,
+    const copy = { ...row, id, kind: row.kind === 'english-reading' ? 'english-reading-conflict' : row.kind === 'japanese-extensive' ? 'japanese-extensive-conflict' : row.kind === 'japanese-reading' ? 'japanese-reading-conflict' : 'reading-conflict', draft: { ...draft,
       syncRecovery: { sourceSessionId: primary.id, rootSessionId: root?.rootSessionId ?? primary.id, sourceDeviceId: device, sourceVersion } } }
     // Explicit operations for a copy (including a tombstone) always outrank a
     // generated seed. User continuations normally use another stable session ID.
@@ -360,7 +408,7 @@ function references(type: EntityType, row: RecordValue): Reference[] {
     if (!value || typeof value !== 'object') return
     if (Array.isArray(value)) { value.forEach(draft); return }
     for (const [key, child] of Object.entries(value)) {
-      const table = ({ materialId: 'materials', conversationId: 'conversations', chunkId: 'chunks', errorId: 'errors', cardId: 'cards', audioId: 'audioMetadata', assessmentId: 'assessments' } as Record<string, EntityType>)[key]
+      const table = ({ materialId: 'materials', conversationId: 'conversations', chunkId: 'chunks', errorId: 'errors', cardId: 'cards', audioId: 'audioMetadata', assessmentId: 'assessments', readingEventId: 'events' } as Record<string, EntityType>)[key]
       if (table) add([table], child)
       if (key === 'audioIds' && Array.isArray(child)) child.forEach(id => add(['audioMetadata'], id))
       draft(child)
@@ -376,6 +424,7 @@ function references(type: EntityType, row: RecordValue): Reference[] {
   if (type === 'events') {
     add(['sessions', 'conversations', 'assessments'], row.sessionId)
     const data = row.data as Record<string, unknown> | undefined
+    add(['events'], data?.readingEventId)
     for (const [field, target] of [['materialId', 'materials'], ['errorId', 'errors'], ['cardId', 'cards'], ['audioId', 'audioMetadata']] as const) {
       if (field !== 'audioId' || data?.audioAvailable !== false) add([target], data?.[field])
     }
@@ -523,6 +572,14 @@ export async function projectOperations(input: StoredOperation[]): Promise<Proje
     }
   }
   records.sessions.push(...readingCopies.map(row => sessionSchema.parse(row) as unknown as RecordValue))
+  const remapReadingOccurrence = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return
+    if (Array.isArray(value)) { value.forEach(remapReadingOccurrence); return }
+    const object = value as Record<string, unknown>
+    if (typeof object.readingEventKey === 'string' && typeof object.readingEventId === 'string')
+      object.readingEventId = eventByKey.get(object.readingEventKey)?.id ?? `missing-reading-event:${object.readingEventKey}`
+    Object.values(object).forEach(remapReadingOccurrence)
+  }
   for (const type of entityTypes) {
     records[type] = records[type].map(row => withoutCacheAudioReferences(row, cacheIds))
     for (const row of records[type]) {
@@ -539,6 +596,7 @@ export async function projectOperations(input: StoredOperation[]): Promise<Proje
         })
       }
       remapReferences(row)
+      remapReadingOccurrence(row)
     }
   }
   for (const row of deletedRecords.values()) remapReferences(row)

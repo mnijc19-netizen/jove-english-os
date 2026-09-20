@@ -253,6 +253,11 @@ async function load(fresh = false) {
       materialId.value = id; sid.value = "";
       return;
     }
+    if (app.materials.find(m => m.id === id)?.externalReading) {
+      materialId.value = ''; sid.value = '';
+      await router.replace({ path: '/learn', query: { material: id, mode: 'reading', ...(route.query.task ? { task: String(route.query.task) } : {}) } });
+      return;
+    }
     const requestedTask = String(route.query.task || route.query.taskId || "");
     const task = app.plan.tasks.find(t => requestedTask ? t.id === requestedTask : t.kind === "listen" && t.materialId === id && !t.done);
     const taskId = requestedTask || task?.id || "";

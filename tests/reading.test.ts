@@ -168,6 +168,7 @@ describe('assigned learning loop with real local persistence', () => {
       '../stores/app': { useApp: () => learning }, '../db/db': { db: learningDb }, '../db/repository': { addChunk },
       '../domain/engine': engine, '../domain/longitudinal': longitudinal, '../composables/useRequest': { useRequest },
       '../components/ReadingPractice.vue': { default: loadComponent({ '../stores/app': { useApp: () => learning }, '../db/db': { db: learningDb } }) },
+      '../components/EnglishReadingPractice.vue': { default: Vue.defineComponent({ render: () => null }) },
       '../components/AudioPlayer.vue': { default: Vue.defineComponent({ render: () => null }) },
       '../components/Icon.vue': { default: Vue.defineComponent({ render: () => null }) },
     }

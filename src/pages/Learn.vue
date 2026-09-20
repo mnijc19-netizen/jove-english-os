@@ -8,6 +8,7 @@ import AudioPlayer from "../components/AudioPlayer.vue";
 import { useRequest } from "../composables/useRequest";
 import Icon from "../components/Icon.vue";
 import ReadingPractice from "../components/ReadingPractice.vue";
+import EnglishReadingPractice from "../components/EnglishReadingPractice.vue";
 import { planLongitudinal, type ReadingSavedEvidence } from "../domain/longitudinal";
 import { taskActivity } from "../domain/engine";
 const app = useApp(),
@@ -61,7 +62,7 @@ const readingComplete = computed(() => readingMode.value && savedReading.value =
 let startedAt = Date.now();
 let loadVersion = 0;
 async function persist() {
-  if (!loaded.value || !material.value) return false;
+  if (!loaded.value || !material.value || material.value.externalReading) return false;
   const id = draftId.value;
   try {
     await db.sessions.put({
@@ -93,6 +94,7 @@ watch(
   async (id) => {
     const version = ++loadVersion;
     loaded.value = false;
+    if (material.value?.externalReading) return;
     const saved = await db.sessions.get(id);
     if (version !== loadVersion || id !== draftId.value) return;
     startedAt = saved?.startedAt ?? Date.now();
@@ -246,7 +248,10 @@ async function continueReading() {
 }
 </script>
 <template>
-  <div v-if="readingMode" class="page task-page">
+  <div v-if="material?.approved && material.externalReading?.publisher === 'British Council'" class="page task-page">
+    <EnglishReadingPractice :key="`${taskId ?? 'free'}:${material.id}`" :material="material" :task-id="taskId" />
+  </div>
+  <div v-else-if="readingMode" class="page task-page">
     <ReadingPractice
       v-if="material?.approved" :key="`${taskId ?? 'free'}:${material.id}`" :material="material" :task-id="taskId"
       :segment-words="Math.min(readingPlan.reading.segmentWords, readingPlan.adjustments.segmentSeconds * 2)" @saved="readingSaved" />

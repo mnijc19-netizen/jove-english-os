@@ -11,7 +11,7 @@ describe('directory-only scheduler client', () => {
     const result = await refreshCourseDirectories(token, fetcher)
     expect(result).toContain('52 lessons'); expect(result).toContain('30 lessons')
     expect(result).toContain('141 lessons')
-    expect(fetcher).toHaveBeenCalledTimes(4)
+    expect(fetcher).toHaveBeenCalledTimes(5)
     expect(fetcher.mock.calls[1]?.[1]?.body).toBe('{"action":"catalog-refresh","sourceId":"voa-level2"}')
   })
   it.each([6, 501, 7.5])('rejects an invalid Japanese directory size %s', async lessons => {
@@ -24,7 +24,7 @@ describe('directory-only scheduler client', () => {
         ? Response.json({ refreshed: false, reason: 'not-due-or-running' })
         : new Response('failure', { status: 503 }))
     await expect(refreshCourseDirectories(token, fetcher)).rejects.toThrow('successful refreshes remain saved')
-    expect(fetcher).toHaveBeenCalledTimes(4)
+    expect(fetcher).toHaveBeenCalledTimes(5)
   })
   it('rejects a valid snapshot result for the wrong requested course', async () => {
     await expect(refreshCourseDirectory(token, async () => Response.json({ refreshed: true, lessons: 52,
@@ -64,7 +64,7 @@ describe('directory-only scheduler client', () => {
       JSON.parse(String(init?.body)).sourceId ? Response.json({ refreshed: false, reason: 'not-due-or-running' })
         : new Response(`sensitive-response-${token}`, { status: 401 })) } catch (error) { failure = error }
     expect(directoryJobDiagnostics(failure)).toEqual([{ sourceId: 'voa-level1', code: 'HTTP', status: 401 },
-      { sourceId: 'voa-level2', code: 'SUCCESS_OR_NOT_DUE' }, { sourceId: 'bbc-six-minute', code: 'SUCCESS_OR_NOT_DUE' }, { sourceId: 'ja-tadoku', code: 'SUCCESS_OR_NOT_DUE' }])
+      { sourceId: 'voa-level2', code: 'SUCCESS_OR_NOT_DUE' }, { sourceId: 'bbc-six-minute', code: 'SUCCESS_OR_NOT_DUE' }, { sourceId: 'ja-tadoku', code: 'SUCCESS_OR_NOT_DUE' }, { sourceId: 'en-bc-reading', code: 'SUCCESS_OR_NOT_DUE' }])
     expect(JSON.stringify(directoryJobDiagnostics(failure))).not.toContain(token)
   })
   it('categorizes credential and transport errors without using arbitrary error messages or attached diagnostics', async () => {

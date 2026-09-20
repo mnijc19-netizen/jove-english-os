@@ -102,7 +102,10 @@ export const materialSchema = z.strictObject({
   language: z.enum(['en', 'ja']).optional(),
   externalStudy: z.strictObject({ publisher: short, level: z.enum(['beginner', 'intermediate', 'advanced']),
     mission: z.string().min(1).max(1000), checkedAt: timestampSchema }).optional(),
-  externalReading: z.strictObject({ publisher: z.literal('NPO 多言語多読'), level: z.enum(['Start', '0', '1', '2', '3', '4', '5']), checkedAt: timestampSchema }).optional(),
+  externalReading: z.discriminatedUnion('publisher', [
+    z.strictObject({ publisher: z.literal('NPO 多言語多読'), level: z.enum(['Start', '0', '1', '2', '3', '4', '5']), checkedAt: timestampSchema }),
+    z.strictObject({ publisher: z.literal('British Council'), level: z.enum(['A1', 'A2', 'B1', 'B2', 'C1']), checkedAt: timestampSchema }),
+  ]).optional(),
   authenticPlayback: authenticPlaybackSchema.optional(),
   id, title: short, topic: short, difficulty: proportion, duration: z.number().min(0).max(1_000_000),
   transcript: text, translation: text.optional(), sentences: strings, audioPath: audioPath.optional(), audioId: id.optional(),
@@ -118,10 +121,14 @@ export const materialSchema = z.strictObject({
           url.hostname === 'www.bbc.co.uk' && /^\/learningenglish\/english\/features\/6-minute-english_20\d{2}\/ep-\d{6}$/u.test(url.pathname))
     } catch { return false }
   })()), 'External lessons require a publisher page, not copied transcripts or certified playback')
-  .refine(m => !m.externalReading || (m.language === 'ja' && !m.externalStudy && !m.authenticPlayback && !m.audioPath && !m.audioId
+  .refine(m => !m.externalReading || (!m.externalStudy && !m.authenticPlayback && !m.audioPath && !m.audioId
     && !m.synthetic && !m.transcript && !m.sentences.length && !m.translation && !m.answer && !m.question && !m.chunks.length
-    && m.sourceKind === 'url' && /^ja-tadoku-[1-9][0-9]{0,7}$/u.test(m.id)
-    && m.sourceUrl === `https://tadoku.org/japanese/book/${m.id.slice('ja-tadoku-'.length)}/`),
+    && m.sourceKind === 'url' && (m.externalReading.publisher === 'NPO 多言語多読'
+      ? m.language === 'ja' && /^ja-tadoku-[1-9][0-9]{0,7}$/u.test(m.id)
+        && m.sourceUrl === `https://tadoku.org/japanese/book/${m.id.slice('ja-tadoku-'.length)}/`
+      : m.language === 'en' && /^en-bc-(?:a1|a2|b1|b2|c1)-[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(m.id)
+        && m.id.startsWith(`en-bc-${m.externalReading.level.toLowerCase()}-`)
+        && m.sourceUrl === `https://learnenglish.britishcouncil.org/free-resources/reading/${m.externalReading.level.toLowerCase()}/${m.id.slice(9)}`)),
   'Extensive reading keeps original publisher books separate from tests and listening evidence')
 export const sessionSchema = z.strictObject({
   id, kind: short, materialId: id.optional(), startedAt: timestampSchema, completedAt: timestampSchema.optional(), stage: short, draft: z.record(safeKey, json),
@@ -185,7 +192,7 @@ export function validateRelationships(t: Backup['tables']): void {
     if (!value || typeof value !== 'object') return
     if (Array.isArray(value)) { for (const child of value) validateDraft(child); return }
     const draft = value as Record<string, unknown>
-    for (const [field, table] of [['materialId', 'materials'], ['conversationId', 'conversations'], ['chunkId', 'chunks'], ['errorId', 'errors'], ['cardId', 'cards'], ['audioId', 'audio'], ['assessmentId', 'assessments']] as const) {
+    for (const [field, table] of [['materialId', 'materials'], ['conversationId', 'conversations'], ['chunkId', 'chunks'], ['errorId', 'errors'], ['cardId', 'cards'], ['audioId', 'audio'], ['assessmentId', 'assessments'], ['readingEventId', 'events']] as const) {
       const reference = draft[field]
       // UI drafts may store an empty selection before the learner has recorded/chosen anything.
       if (reference !== undefined && reference !== '') {
@@ -218,7 +225,7 @@ export function validateRelationships(t: Backup['tables']): void {
   for (const event of t.events) {
     requireId('chunks', event.chunkId)
     if (event.sessionId && !keys.sessions.has(event.sessionId) && !keys.conversations.has(event.sessionId) && !keys.assessments.has(event.sessionId)) throw new Error('Missing session reference')
-    for (const [field, table] of [['materialId', 'materials'], ['errorId', 'errors'], ['cardId', 'cards'], ['audioId', 'audio']] as const) {
+    for (const [field, table] of [['materialId', 'materials'], ['errorId', 'errors'], ['cardId', 'cards'], ['audioId', 'audio'], ['readingEventId', 'events']] as const) {
       const value = event.data?.[field]
       if (value !== undefined) {
         if (typeof value !== 'string') throw new Error(`Invalid ${field} reference`)

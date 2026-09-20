@@ -140,4 +140,33 @@ begin
   assert public.external_catalog_worker('read','{"sourceId":"ja-tadoku"}')=remembered, 'failed refresh destroyed books';
 end $$;
 reset role;
+set local role service_role;
+do $$
+declare token text; snapshot jsonb; remembered jsonb; japanese jsonb;
+begin
+  japanese := public.external_catalog_worker('read','{"sourceId":"ja-tadoku"}');
+  token := public.external_catalog_worker('claim','{"sourceId":"en-bc-reading"}')->>'leaseToken';
+  assert token is not null, 'English reading lease missing';
+  select jsonb_build_object('version',1,'sourceId','en-bc-reading','language','en','checkedAt',9999999999999,'revision',repeat('e',64),
+    'entries',jsonb_agg(jsonb_build_object('id','fixture-reading','level',level,'title','Fixture reading',
+      'url','https://learnenglish.britishcouncil.org/free-resources/reading/'||lower(level)||'/fixture-reading'))) into snapshot
+    from unnest(array['A1','A2','B1','B2','C1']) level;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','en-bc-reading','leaseToken',token,'catalog',jsonb_set(snapshot,'{language}','"ja"')));
+    raise exception 'wrong reader language accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','en-bc-reading','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries,0,url}','"https://evil.example/reading"')));
+    raise exception 'foreign reading page accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','en-bc-reading','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries}',(snapshot->'entries')-0)));
+    raise exception 'missing reading level accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','en-bc-reading','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries}',(snapshot->'entries')||(snapshot->'entries'))));
+    raise exception 'duplicate readers accepted'; exception when invalid_parameter_value then null; end;
+  assert public.external_catalog_worker('commit',jsonb_build_object('sourceId','en-bc-reading','leaseToken',token,'catalog',snapshot))='true'::jsonb, 'English reader catalog not saved';
+  remembered := public.external_catalog_worker('read','{"sourceId":"en-bc-reading"}');
+  assert jsonb_array_length(remembered->'entries')=5 and (remembered->>'checkedAt')::bigint<9999999999999, 'English reading snapshot invalid';
+  assert public.external_catalog_worker('read','{"sourceId":"ja-tadoku"}')=japanese, 'English catalog changed Japanese';
+  update public.external_course_catalog set next_attempt_at=now()-interval '1 second' where source_id='en-bc-reading';
+  token := public.external_catalog_worker('claim','{"sourceId":"en-bc-reading"}')->>'leaseToken';
+  perform public.external_catalog_worker('fail',jsonb_build_object('sourceId','en-bc-reading','leaseToken',token));
+  assert public.external_catalog_worker('read','{"sourceId":"en-bc-reading"}')=remembered, 'failed reading refresh destroyed last good snapshot';
+end $$;
+reset role;
 select 'external-catalog-sql-passed' as result;

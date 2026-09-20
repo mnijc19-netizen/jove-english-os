@@ -1,6 +1,7 @@
 import { skillNames, type DailyPlan, type Material, type Profile, type ReviewCard, type Skill, type SkillName, type StudyEvent, type PlanTask } from './types'
 import { startedTaskIds, planLongitudinal } from './longitudinal'
 import { externalLessonCandidates, externalCatalogFresh, unavailableExternalIds } from '../content/external'
+import { nextEnglishReading } from './english-reading'
 
 // Scores, strengths, confidence and fatigue use 0..1, matching the shared UI/provider contract.
 const day = 86_400_000
@@ -166,7 +167,7 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   }
   const approved = materials.filter(m => m.approved)
   const unavailable = unavailableExternalIds(ordered, now)
-  const availableMaterials = approved.filter(m => externalCatalogFresh(m, now) && !(m.externalStudy && unavailable.has(m.id)))
+  const availableMaterials = approved.filter(m => !m.externalReading && externalCatalogFresh(m, now) && !(m.externalStudy && unavailable.has(m.id)))
   const approachable = availableMaterials.filter(m => m.difficulty <= Math.min(1, targetDifficulty + 0.25))
   // Screened, approachable human speech leads normal listening. A hard authentic
   // recording does not displace a comprehensible bridge simply for being human.
@@ -174,7 +175,7 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   const external = externalLessonCandidates(approachable, ordered, now)
   const listeningPool = authentic.length ? authentic : external.length ? external : approachable.length ? approachable : availableMaterials
   const boundMaterialId = today?.tasks.find(task => !task.done && !task.optional && task.kind === 'listen')?.materialId ?? today?.tasks.find(task => !task.done && !task.optional && task.materialId)?.materialId
-  const material = approved.find(item => item.id === boundMaterialId) ?? [...listeningPool].sort((a, b) =>
+  const material = approved.find(item => item.id === boundMaterialId && !item.externalReading) ?? [...listeningPool].sort((a, b) =>
     (approachable.length ? rank(b) - rank(a) : Math.abs(a.difficulty - targetDifficulty) - Math.abs(b.difficulty - targetDifficulty)) || order(a.id, b.id))[0]
   const activityCount = (kinds: string[]) => recent.filter(e => kinds.includes(e.type.toLowerCase()) || (typeof e.data?.kind === 'string' && kinds.includes(e.data.kind.toLowerCase()))).length
   const inputCount = activityCount(['listen', 'listening', 'reading'])
@@ -196,12 +197,20 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
   })
   // A separate unseen reader can provide new reading observations after listening.
   // Familiar material remains a usable fallback, with exposure labelled by the page.
-  const readingMaterial = profile.onboarded ? readingOptions.find(m => m.id !== material?.id && !ordered.some(e =>
+  const internalReader = profile.onboarded ? readingOptions.find(m => m.id !== material?.id && !ordered.some(e =>
     e.data?.materialId === m.id && !['TASK_OFFERED', 'TASK_STARTED', 'TASK_COMPLETED'].includes(e.type)))
     ?? readingOptions[0] : undefined
-  if (readingMaterial) candidates.push({ kind: 'learn', title: 'Read something worth sharing',
-    reason: 'Read at a comfortable pace, check useful words, then explain the meaning and retell it. Fit is provisional until observed.',
-    weight: adjustment.readingMinutes / 3, materialId: readingMaterial.id, id: `${date}:learn:${readingMaterial.id}:reading` })
+  const externalReader = profile.onboarded ? nextEnglishReading(approved, ordered, now, adjustment.readingTargetDifficulty) : undefined
+  const recentReadings = ordered.filter(e => e.type === 'READING_RESPONSE' || e.type === 'ENGLISH_READING_RECALL'
+    || e.type === 'ENGLISH_READING_REPORT' && e.data?.outcome === 'finished').slice(-2)
+  // Keep intensive, observed reading alongside comfortable publisher input.
+  // Two external sessions give way to one internal reader when available.
+  const externalTurn = !!externalReader && (!internalReader || recentReadings.length < 2 || recentReadings.some(e => e.type === 'READING_RESPONSE'))
+  const readingMaterial = externalTurn ? externalReader.material : internalReader
+  if (readingMaterial) candidates.push({ kind: 'learn', title: externalTurn ? externalReader.review ? '回想上次读到的重点' : '读一篇合适的原版英语' : 'Read something worth sharing',
+    reason: externalTurn ? externalReader.review ? '先不看笔记回想，再核对自己保存的内容；不是原文理解测试。' : '先读原文抓大意，回来用自己的话表达。系统根据体验调整下一篇；不必逐词翻成中文。'
+      : 'Read at a comfortable pace, check useful words, then explain the meaning and retell it. Fit is provisional until observed.',
+    weight: adjustment.readingMinutes / 3, materialId: readingMaterial.id, id: `${date}:learn:${readingMaterial.id}${externalTurn ? externalReader.review ? ':recall' : ':original' : ''}:reading` })
   const languageMaterial = material?.chunks.length ? material : [...approved].filter(m => m.chunks.length)
     .sort((a, b) => rank(b) - rank(a) || order(a.id, b.id))[0] ?? material
   candidates.push({ kind: 'learn', title: 'Make a chunk your own',

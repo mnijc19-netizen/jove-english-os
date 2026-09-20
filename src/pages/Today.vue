@@ -260,13 +260,13 @@ async function start(task: PlanTask) {
         <h2>{{ material.title }}</h2>
         <p>
           {{ material.topic }} · {{ material.sourceLabel }} ·
-          {{ material.externalStudy ? 'external lesson · guided short practice' : Math.round(material.duration) + ' seconds' }}
+          {{ material.externalReading ? '原版分级阅读' : material.externalStudy ? 'external lesson · guided short practice' : Math.round(material.duration) + ' seconds' }}
         </p>
       </div>
       <RouterLink
-        :to="'/listen?material=' + material.id"
+        :to="{ path: material.externalReading ? '/learn' : '/listen', query: { material: material.id, ...(material.externalReading ? { mode: 'reading' } : {}) } }"
         class="button secondary"
-        >Listen & explore <Icon name="arrow" :size="16"
+        >{{ material.externalReading ? '阅读原文' : 'Listen & explore' }} <Icon name="arrow" :size="16"
       /></RouterLink>
     </section>
   </div>

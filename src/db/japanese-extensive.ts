@@ -12,7 +12,7 @@ export function createJapaneseExtensive(database: JoveDatabase, checkOwner: () =
   async function transactionFence() { await Dexie.waitFor(Dexie.ignoreTransaction(sharedFence)); await fence() }
   async function book(id: string) {
     const material = materialSchema.parse(await database.materials.get(id))
-    if (material.language !== 'ja' || !material.externalReading) throw new Error('原版读物不存在，请返回今日安排。')
+    if (material.language !== 'ja' || material.externalReading?.publisher !== 'NPO 多言語多読') throw new Error('原版读物不存在，请返回今日安排。')
     return material
   }
   async function read(id: string) {

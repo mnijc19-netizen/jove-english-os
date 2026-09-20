@@ -40,7 +40,8 @@ export interface AuthenticPlayback {
 export interface Material {
   language?: 'en' | 'ja';
   externalStudy?: { publisher: string; level: 'beginner' | 'intermediate' | 'advanced'; mission: string; checkedAt: number };
-  externalReading?: { publisher: 'NPO 多言語多読'; level: 'Start' | '0' | '1' | '2' | '3' | '4' | '5'; checkedAt: number };
+  externalReading?: { publisher: 'NPO 多言語多読'; level: 'Start' | '0' | '1' | '2' | '3' | '4' | '5'; checkedAt: number }
+    | { publisher: 'British Council'; level: 'A1' | 'A2' | 'B1' | 'B2' | 'C1'; checkedAt: number };
   authenticPlayback?: AuthenticPlayback;
   id: string; title: string; topic: string; difficulty: number; duration: number;
   transcript: string; translation?: string; sentences: string[]; audioPath?: string; audioId?: string;

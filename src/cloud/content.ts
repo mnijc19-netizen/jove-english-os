@@ -157,9 +157,10 @@ async function refreshCatalogInto(database: JoveDatabase, sourceId: ExternalCata
           const previous = await database.materials.get(material.id)
           // Existing user edits, transcripts, drafts and source identities are never overwritten.
           if (previous) {
-            const metadata = database.language === 'ja' ? 'externalReading' : 'externalStudy'
+            const metadata = material.externalReading ? 'externalReading' : 'externalStudy'
             if (previous.sourceUrl !== material.sourceUrl || !previous[metadata]) throw invalid()
-            if (previous.externalReading && previous.externalReading.level !== material.externalReading?.level) throw invalid()
+            if (previous.externalReading && (previous.externalReading.level !== material.externalReading?.level
+              || previous.externalReading.publisher !== material.externalReading?.publisher)) throw invalid()
             // Only source freshness advances; all learner-authored fields and creation time stay intact.
             const checkedAt = Math.max(previous[metadata]!.checkedAt, response.catalog!.checkedAt)
             await database.materials.update(previous.id, metadata === 'externalReading' ? { 'externalReading.checkedAt': checkedAt } : { 'externalStudy.checkedAt': checkedAt })

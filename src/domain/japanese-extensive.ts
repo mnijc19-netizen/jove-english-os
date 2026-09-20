@@ -37,7 +37,7 @@ export function nextJapaneseBook(materials: readonly Material[], events: readonl
   const lastRead = history.findLast(h => ['continue', 'finished'].includes(h.data.outcome) && h.data.minutesRead > 0)?.event.timestamp ?? 0
   if (new Set(history.filter(h => h.data.outcome === 'unavailable' && h.event.timestamp > Math.max(now - day, lastRead))
     .map(h => h.data.materialId)).size >= 2) return undefined
-  const available = materials.filter(m => m.language === 'ja' && m.approved && m.externalReading
+  const available = materials.filter((m): m is Material & { externalReading: Extract<NonNullable<Material['externalReading']>, { publisher: 'NPO 多言語多読' }> } => m.language === 'ja' && m.approved && m.externalReading?.publisher === 'NPO 多言語多読'
     && m.externalReading.checkedAt <= now + 300000 && m.externalReading.checkedAt > now - EXTERNAL_CATALOG_MAX_AGE && !exclude.includes(m.id))
   const cooldown = new Set(history.filter(h => ['too-hard', 'not-interesting', 'unavailable'].includes(h.data.outcome)
     && h.event.timestamp > now - 30 * day).map(h => h.data.materialId))

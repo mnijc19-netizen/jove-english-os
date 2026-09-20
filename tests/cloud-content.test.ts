@@ -66,6 +66,23 @@ beforeEach(async () => {
 afterEach(async () => { expect(auth.listeners.size).toBe(0); vi.restoreAllMocks(); vi.unstubAllGlobals(); await db.delete() })
 
 describe('automatic authenticated lesson delivery', () => {
+  it('imports the English reading union without treating it as listening, preserves edits and rejects owner changes', async () => {
+    const catalog = { version: 1, sourceId: 'en-bc-reading', language: 'en', checkedAt: Date.now(), revision: 'e'.repeat(64),
+      entries: ['A1', 'A2', 'B1', 'B2', 'C1'].map(level => ({ id: 'fixture-reader', level, title: 'Fixture reader',
+        url: `https://learnenglish.britishcouncil.org/free-resources/reading/${level.toLowerCase()}/fixture-reader` })) }
+    fetcher.mockImplementation(async (_url, init) => {
+      expect(JSON.parse(String(init.body))).toEqual({ action: 'external-catalog', sourceId: 'en-bc-reading' }); return json({ catalog })
+    })
+    const [material] = await refreshExternalCourseCatalog(undefined, 'en-bc-reading')
+    expect(await db.materials.count()).toBe(5); expect(material?.externalStudy).toBeUndefined()
+    await db.materials.update(material!.id, { title: '我保存的标记', approved: false })
+    catalog.checkedAt += 1000; await refreshExternalCourseCatalog(undefined, 'en-bc-reading')
+    expect(await db.materials.get(material!.id)).toMatchObject({ title: '我保存的标记', approved: false, externalReading: { publisher: 'British Council', checkedAt: catalog.checkedAt } })
+    const before = await db.materials.toArray()
+    fetcher.mockImplementation(async () => { await db.syncMeta.put({ id: 'owner', value: 'wrong-owner' }); return json({ catalog }) })
+    await expect(refreshExternalCourseCatalog(undefined, 'en-bc-reading')).rejects.toThrow()
+    expect(await db.materials.toArray()).toEqual(before)
+  })
   it('imports original Japanese books only into the same-owner Japanese database, preserving edits and English', async () => {
     const ja = new JoveDatabase(`catalog-ja-${crypto.randomUUID()}`, 'ja')
     const catalog = { version: 1, sourceId: 'ja-tadoku', language: 'ja', checkedAt: Date.now(), revision: 'd'.repeat(64),

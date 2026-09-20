@@ -197,6 +197,10 @@ export const useApp = defineStore("app", () => {
             // producing BBC sync operations that an old client cannot project.
             ...(import.meta.env.VITE_JOVE_CONTINUING_COURSES === '1'
               ? [refreshExternalCourseCatalog(controller.signal, 'bbc-six-minute')] : []),
+            // Independently gated: every device needs the new reading schema
+            // and whole-attempt merge before these materials enter owner sync.
+            ...(import.meta.env.VITE_JOVE_GRADED_READING === '1'
+              ? [refreshExternalCourseCatalog(controller.signal, 'en-bc-reading')] : []),
           ]);
           if (!current()) return;
           const loaded = catalogs.filter(result => result.status === 'fulfilled' && result.value.length > 0).length;
