@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto'
 import { execFileSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { JoveDatabase } from '../src/db/db'
@@ -9,6 +10,7 @@ import { SupabaseSyncRemote, synchronize } from '../src/sync/remote'
 import { audioHash, downloadRecording, readRecordingRetention, synchronizeAudio, uploadRecording } from '../src/sync/audio'
 import { bindSyncAccess } from '../src/sync/access'
 import { changedFields, type RecordValue, type SyncOperation } from '../src/sync/protocol'
+import type { LearningLanguage } from '../src/domain/language'
 
 // Opt-in LOCAL integration only. CLI output is consumed in memory and never logged.
 const enabled = process.env.JOVE_LOCAL_CLOUD_TEST === '1'
@@ -25,6 +27,7 @@ describe.skipIf(!enabled)('real local Auth/PostgREST/Storage synchronization', (
     if (database && (await database.syncMeta.get('owner'))?.value !== owner) throw new Error('Wrong fixture database owner')
   }, localFetch)
   const objectPaths: string[] = []
+  const maintenanceDatabases: JoveDatabase[] = []
   beforeAll(async () => {
     let config: { API_URL: string; SERVICE_ROLE_KEY: string; ANON_KEY: string }
     try {
@@ -35,6 +38,10 @@ describe.skipIf(!enabled)('real local Auth/PostgREST/Storage synchronization', (
     } catch { throw new Error('Could not read dedicated local test configuration') }
     const url = new URL(config.API_URL)
     if (url.origin !== 'http://127.0.0.1:55321' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Refusing integration test against a non-Jove-local backend')
+    try {
+      const labels = JSON.parse(execFileSync('docker', ['inspect','--format','{{json .Config.Labels}}','supabase_db_jove-english-os'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore','pipe','pipe'] }))
+      if (labels['com.supabase.cli.project'] !== 'jove-english-os' || realpathSync(labels['com.supabase.cli.workdir']) !== realpathSync(process.cwd())) throw new Error()
+    } catch { throw new Error('Refusing SQL fixtures outside this dedicated local Jove workspace') }
     publicConfig = { url: config.API_URL, publishableKey: config.ANON_KEY }
     const options = { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: localFetch } }
     admin = createClient(config.API_URL, config.SERVICE_ROLE_KEY, options)
@@ -70,6 +77,7 @@ describe.skipIf(!enabled)('real local Auth/PostgREST/Storage synchronization', (
     if (second) await admin.auth.admin.deleteUser(second)
     if (dbA) await dbA.delete()
     if (dbB) await dbB.delete()
+    for (const database of maintenanceDatabases) await database.delete()
     for (const client of [a, b, stranger]) await client?.auth.signOut({ scope: 'local' })
   })
   it('syncs independent device evidence and a half-finished lesson through real authenticated HTTP', async () => {
@@ -244,6 +252,252 @@ describe.skipIf(!enabled)('real local Auth/PostgREST/Storage synchronization', (
     expect(await audioHash((await dbA.audio.get(asset.id))!.blob)).toBe(await audioHash(asset.blob))
   }, 60000)
 
+  describe('isolated recording maintenance', () => {
+  let a: SupabaseClient, owner = ''
+  beforeAll(async () => {
+    const email = `jove-maintenance-${crypto.randomUUID()}@example.invalid`, password = crypto.randomUUID()+crypto.randomUUID()
+    const created = await admin.auth.admin.createUser({ email, password, email_confirm: true })
+    if (created.error || !created.data.user) throw new Error('Local maintenance account provisioning failed')
+    owner = created.data.user.id
+    if ((await admin.from('app_members').insert({ user_id: owner })).error) throw new Error('Local maintenance membership failed')
+    a = createClient(publicConfig.url, publicConfig.publishableKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: localFetch } })
+    if ((await a.auth.signInWithPassword({ email, password })).error) throw new Error('Local maintenance sign-in failed')
+  })
+  afterAll(async () => {
+    if (owner) {
+      const paths = objectPaths.filter(path => path.startsWith(owner+'/'))
+      if (paths.length) expect((await admin.storage.from('jove-recordings').remove(paths)).error).toBeNull()
+      expect((await admin.auth.admin.deleteUser(owner)).error).toBeNull()
+    }
+    await a?.auth.signOut({ scope: 'local' })
+  })
+  function localSql(input: string): string {
+    try {
+      return execFileSync('docker', ['exec','-i','supabase_db_jove-english-os','psql','-X','-qAt','-v','ON_ERROR_STOP=1','-U','postgres','-d','postgres'], {
+        input, encoding: 'utf8', windowsHide: true, stdio: ['pipe','pipe','pipe'],
+      })
+    } catch { throw new Error('Dedicated local recording fixture SQL failed; raw output withheld') }
+  }
+  async function prepareExpiredRecording(language: LearningLanguage, bytes = 8) {
+    const buffer = new Uint8Array(bytes); buffer.set([82,73,70,70,1,2,3,4])
+    const blob = new Blob([buffer], { type: 'audio/wav' })
+    const asset = { id: crypto.randomUUID(), blob, mimeType: 'audio/wav', createdAt: Date.now()-10*86400000,
+      duration: 1, kind: 'recording' as const, processed: true, label: 'Local maintenance fixture' }
+    const database = new JoveDatabase(`maintenance-live-${crypto.randomUUID()}`, language)
+    maintenanceDatabases.push(database)
+    await new SyncJournal(database).bindOwner(owner)
+    await database.audio.add(asset)
+    const aa = await bindSyncAccess(a, owner, publicConfig, async () => {
+      if ((await database.syncMeta.get('owner'))?.value !== owner) throw new Error('Maintenance fixture owner changed')
+    }, localFetch)
+    const manifest = await uploadRecording(aa, asset, { purpose: 'draft', expiresAt: null }, language)
+    objectPaths.push(manifest.object_path)
+    const table = language === 'en' ? 'sync_operations' : 'language_sync_operations'
+    const frontier = await a.from(table).select('cursor').order('cursor', { ascending: false }).limit(1)
+    expect(frontier.error).toBeNull()
+    const cursor = frontier.data?.[0]?.cursor ?? 0, policy = await readRecordingRetention(aa)
+    expect((await a.rpc(language === 'en' ? 'reconcile_recording_retention' : 'reconcile_language_recording_retention', {
+      ...(language === 'ja' ? { learning_language: 'ja' } : {}), recording_id: asset.id, expected_cursor: cursor,
+      retention_purpose: 'history', retention_expires_at: new Date(asset.createdAt+7*86400000).toISOString(), expected_policy: policy,
+    })).data).toBe(true)
+    const planned = await a.rpc('recording_maintenance', { action: 'prepare-cleanup', learning_language: language, request: { cursor, policy } })
+    expect(planned.error).toBeNull()
+    const candidate = (planned.data?.candidates as { audioId: string; path: string; version: string }[])?.find(row => row.audioId === asset.id)
+    if (!candidate || candidate.path !== manifest.object_path || !/^[a-zA-Z0-9/-]+$/.test(candidate.path) || !/^[a-zA-Z0-9-]+$/.test(candidate.version)) throw new Error('Invalid local cleanup fixture identity')
+    return { asset, aa, manifest, candidate, database, cursor, policy }
+  }
+  it.each(['en','ja'] as const)('removes only the expired %s cloud version and leaves its local original', async language => {
+    const f = await prepareExpiredRecording(language)
+    const removed = await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])
+    expect(removed.error).toBeNull()
+    expect(removed.data?.some(row => row.name === f.candidate.path)).toBe(true)
+    const final = await a.rpc('recording_maintenance', { action: 'finish-cleanup', learning_language: language,
+      request: { audioId: f.asset.id, version: f.candidate.version } })
+    expect(final.data?.state).toBe('removed')
+    expect((await a.storage.from('jove-recordings').download(f.candidate.path)).error).toBeTruthy()
+    expect((await a.from(language === 'en' ? 'recording_manifest' : 'language_recording_manifest').select('*').eq('audio_id', f.asset.id)).data).toEqual([])
+    expect(await audioHash((await f.database.audio.get(f.asset.id))!.blob)).toBe(await audioHash(f.asset.blob))
+  }, 30000)
+  it.each(['en','ja'] as const)('recovers %s after physical deletion but metadata rollback, and ignores a late old-version delete', async language => {
+    const f = await prepareExpiredRecording(language)
+    expect((await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])).error).toBeNull()
+    // Recreate exactly the post-rollback failure state: the actual file was
+    // deleted through Storage, while its old DB metadata still exists. This is
+    // a LOCAL fixture only, not the production recovery implementation.
+    localSql(`insert into storage.objects(bucket_id,name,owner_id,version,metadata) values ('jove-recordings','${f.candidate.path}','${owner}','${f.candidate.version}','{"size":8,"mimetype":"audio/wav"}');`)
+    expect((await a.storage.from('jove-recordings').info(f.candidate.path)).error).toBeNull()
+    expect((await a.storage.from('jove-recordings').download(f.candidate.path)).error).toBeTruthy()
+    if (language === 'en') {
+      const request = { audioId: f.asset.id, version: f.candidate.version, sha256: f.manifest.sha256, bytes: 8 }
+      expect((await a.rpc('recording_maintenance', { action: 'prepare-recovery', learning_language: language, request })).data?.state).toBe('remove-old')
+      expect((await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])).error).toBeNull()
+      expect((await a.rpc('reserve_recording_upload', { object_path: f.candidate.path, recording_bytes: 8 })).data).toBe(true)
+      expect((await admin.from('recording_upload_reservations').select('bytes,held_bytes,expires_at').eq('object_path', f.candidate.path).single()).data)
+        .toMatchObject({ bytes: 8, held_bytes: 25*1024*1024, expires_at: 'infinity' })
+    }
+    const recovered = await uploadRecording(f.aa, f.asset, { purpose: 'draft', expiresAt: null }, language)
+    expect(recovered.cleanup_version).toBeNull()
+    expect(recovered.recovery_pending).toBe(false)
+    expect(await audioHash((await a.storage.from('jove-recordings').download(f.candidate.path)).data!)).toBe(await audioHash(f.asset.blob))
+    expect((await admin.from('recording_upload_reservations').select('object_path').eq('object_path', f.candidate.path)).data).toEqual([])
+    const late = await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])
+    expect(late.error).toBeNull()
+    expect(late.data).toEqual([])
+    const final = await a.rpc('recording_maintenance', { action: 'finish-cleanup', learning_language: language,
+      request: { audioId: f.asset.id, version: f.candidate.version } })
+    expect(final.data?.state).toBe('unchanged')
+    expect(await audioHash((await a.storage.from('jove-recordings').download(f.candidate.path)).data!)).toBe(await audioHash(f.asset.blob))
+    expect((await f.database.audio.get(f.asset.id))?.blob.size).toBe(8)
+  }, 30000)
+  it('confirms an already uploaded replacement after a lost recovery response without deleting it again', async () => {
+    const f = await prepareExpiredRecording('en')
+    const request = { audioId: f.asset.id, version: f.candidate.version, sha256: f.manifest.sha256, bytes: f.asset.blob.size }
+    expect((await a.rpc('recording_maintenance', { action: 'prepare-recovery', learning_language: 'en', request })).data?.state).toBe('remove-old')
+    expect((await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])).error).toBeNull()
+    expect((await a.storage.from('jove-recordings').upload(f.candidate.path, f.asset.blob, { upsert: false })).error).toBeNull()
+    const readVersion = () => localSql(`select version from storage.objects where bucket_id='jove-recordings' and name='${f.candidate.path}';`).trim()
+    const before = readVersion()
+    const requests: { method: string; version: string | null; nonce: string | null }[] = []
+    const freshAccess = await bindSyncAccess(a, owner, publicConfig, async () => {}, async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (url.pathname.includes('/storage/v1/object/')) requests.push({ method: init?.method ?? 'GET', version: url.searchParams.get('versionId'), nonce: url.searchParams.get('cacheNonce') })
+      return localFetch(input, init)
+    })
+    const recovered = await uploadRecording(freshAccess, f.asset, { purpose: 'draft', expiresAt: null })
+    const after = readVersion()
+    expect(recovered.cleanup_version).toBeNull()
+    expect(before).toMatch(/^[a-zA-Z0-9-]{1,100}$/)
+    expect(after).toBe(before)
+    expect(requests).toEqual([{ method: 'GET', version: before, nonce: expect.any(String) }])
+    expect((await admin.from('recording_upload_reservations').select('object_path').eq('object_path', f.candidate.path)).data).toEqual([])
+  }, 30000)
+  it.each(['en','ja'] as const)('keeps a physically missing new %s version pending instead of confirming a cached copy', async language => {
+    const f = await prepareExpiredRecording(language)
+    const request = { audioId: f.asset.id, version: f.candidate.version, sha256: f.manifest.sha256, bytes: 8 }
+    expect((await a.rpc('recording_maintenance', { action: 'prepare-recovery', learning_language: language, request })).data?.state).toBe('remove-old')
+    expect((await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])).error).toBeNull()
+    const replacementVersion = crypto.randomUUID()
+    // LOCAL-only rollback fixture: V2 metadata exists, physical V2 does not.
+    localSql(`insert into storage.objects(bucket_id,name,owner_id,version,metadata) values ('jove-recordings','${f.candidate.path}','${owner}','${replacementVersion}','{"size":8,"mimetype":"audio/wav"}');`)
+    const missing = await a.storage.from('jove-recordings').download(f.candidate.path, { versionId: replacementVersion, cacheNonce: crypto.randomUUID() })
+    expect(missing.error && { code: 'code' in missing.error ? missing.error.code : undefined, status: missing.error.status, statusCode: missing.error.statusCode })
+      .toMatchObject({ code: 'InternalError' })
+    await expect(uploadRecording(f.aa, f.asset, { purpose: 'draft', expiresAt: null }, language)).rejects.toThrow('could not be verified')
+    expect((await a.from(language === 'en' ? 'recording_manifest' : 'language_recording_manifest').select('cleanup_version,recovery_pending').eq('audio_id', f.asset.id).single()).data)
+      .toMatchObject({ cleanup_version: f.candidate.version, recovery_pending: true })
+    expect(localSql(`select version from storage.objects where bucket_id='jove-recordings' and name='${f.candidate.path}';`).trim()).toBe(replacementVersion)
+    expect(await audioHash((await f.database.audio.get(f.asset.id))!.blob)).toBe(await audioHash(f.asset.blob))
+  }, 30000)
+  it('does not rebase or delete a new version on a denied physical verification', async () => {
+    const f = await prepareExpiredRecording('en')
+    const request = { audioId: f.asset.id, version: f.candidate.version, sha256: f.manifest.sha256, bytes: 8 }
+    await a.rpc('recording_maintenance', { action: 'prepare-recovery', learning_language: 'en', request })
+    await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])
+    expect((await a.storage.from('jove-recordings').upload(f.candidate.path, f.asset.blob)).error).toBeNull()
+    const writes: string[] = []
+    const deniedAccess = await bindSyncAccess(a, owner, publicConfig, async () => {}, async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (url.pathname.includes('/storage/v1/object/')) {
+        if (init?.method && init.method !== 'GET') writes.push(init.method)
+        return new Response(JSON.stringify({ code: 'AccessDenied', message: 'Local fixture' }), { status: 403, headers: { 'Content-Type': 'application/json' } })
+      }
+      return localFetch(input, init)
+    })
+    await expect(uploadRecording(deniedAccess, f.asset, { purpose: 'draft', expiresAt: null })).rejects.toThrow('could not be verified')
+    expect(writes).toEqual([])
+    expect((await a.from('recording_manifest').select('cleanup_version').eq('audio_id', f.asset.id).single()).data?.cleanup_version).toBe(f.candidate.version)
+    await uploadRecording(f.aa, f.asset, { purpose: 'draft', expiresAt: null })
+  }, 30000)
+  it('treats an empty successful deletion as denied when a newer assessment protects the object', async () => {
+    const f = await prepareExpiredRecording('en')
+    expect((await a.rpc('reconcile_recording_retention', { recording_id: f.asset.id, expected_cursor: f.cursor,
+      retention_purpose: 'assessment', retention_expires_at: null, expected_policy: f.policy })).data).toBe(true)
+    const denied = await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])
+    expect(denied.error).toBeNull()
+    expect(denied.data).toEqual([])
+    const final = await a.rpc('recording_maintenance', { action: 'finish-cleanup', learning_language: 'en', request: { audioId: f.asset.id, version: f.candidate.version } })
+    expect(final.data?.state).toBe('pending')
+    expect(await audioHash((await a.storage.from('jove-recordings').download(f.candidate.path)).data!)).toBe(await audioHash(f.asset.blob))
+  }, 30000)
+  it.each(['en','ja'] as const)('automatically cleans %s before a full-bucket upload instead of starving maintenance', async language => {
+    const f = await prepareExpiredRecording(language, 20*1024*1024)
+    const fresh = { ...f.asset, id: crypto.randomUUID(), createdAt: Date.now(), processed: false }
+    const path = `${owner}/${language === 'ja' ? 'ja/' : ''}${fresh.id}-${await audioHash(fresh.blob)}`
+    objectPaths.push(path)
+    await f.database.audio.add(fresh)
+    const journal = new SyncJournal(f.database)
+    await synchronize(journal, new SupabaseSyncRemote(f.aa.client, f.aa, language))
+    const setting = await admin.from('recording_storage_limits').select('limit_bytes').single()
+    if (!setting.data || setting.error) throw new Error('Missing local cloud limit')
+    const used = Number(localSql("select public.recording_capacity_used('');").trim())
+    if (!Number.isSafeInteger(used) || used < 20*1024*1024) throw new Error('Invalid local storage fixture accounting')
+    try {
+      expect((await admin.from('recording_storage_limits').update({ limit_bytes: used+12*1024*1024 }).eq('singleton', true)).error).toBeNull()
+      expect((await a.rpc('reserve_recording_upload', { object_path: path, recording_bytes: fresh.blob.size })).data).toBe(false)
+      const result = await synchronizeAudio(f.database, f.aa, await readRecordingRetention(f.aa))
+      expect(result.uploaded).toBeGreaterThan(0)
+      expect((await a.storage.from('jove-recordings').download(f.manifest.object_path)).error).toBeTruthy()
+      const table = language === 'en' ? 'recording_manifest' : 'language_recording_manifest'
+      expect((await a.from(table).select('audio_id').eq('audio_id', f.asset.id)).data).toEqual([])
+      expect((await a.from(table).select('bytes').eq('audio_id', fresh.id).single()).data?.bytes).toBe(fresh.blob.size)
+      expect((await f.database.audio.get(f.asset.id))?.blob.size).toBe(20*1024*1024)
+      expect((await f.database.audio.get(fresh.id))?.blob.size).toBe(20*1024*1024)
+    } finally {
+      expect((await admin.from('recording_storage_limits').update({ limit_bytes: setting.data.limit_bytes }).eq('singleton', true)).error).toBeNull()
+      expect((await admin.storage.from('jove-recordings').remove([path, f.manifest.object_path])).error).toBeNull()
+      expect((await admin.from(language === 'en' ? 'recording_manifest' : 'language_recording_manifest').delete().eq('user_id', owner).eq('audio_id', fresh.id)).error).toBeNull()
+      expect((await admin.from('recording_upload_reservations').delete().in('object_path', [path, f.manifest.object_path])).error).toBeNull()
+    }
+  }, 60000)
+  it.each(['en','ja'] as const)('finishes a pending %s recovery even when the current policy would skip that recording', async language => {
+    const f = await prepareExpiredRecording(language)
+    const request = { audioId: f.asset.id, version: f.candidate.version, sha256: f.manifest.sha256, bytes: 8 }
+    expect((await a.rpc('recording_maintenance', { action: 'prepare-recovery', learning_language: language, request })).data?.state).toBe('remove-old')
+    expect((await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])).error).toBeNull()
+    const journal = new SyncJournal(f.database)
+    await synchronize(journal, new SupabaseSyncRemote(f.aa.client, f.aa, language))
+    const result = await synchronizeAudio(f.database, f.aa, await readRecordingRetention(f.aa))
+    expect(result.uploaded).toBeGreaterThan(0)
+    expect(result.retentionPending).toBe(true)
+    expect((await admin.from('recording_upload_reservations').select('object_path').eq('object_path', f.candidate.path)).data).toEqual([])
+    expect(await audioHash((await a.storage.from('jove-recordings').download(f.candidate.path)).data!)).toBe(await audioHash(f.asset.blob))
+    // After recovery has released its hold, ordinary policy cleanup may run.
+    await synchronizeAudio(f.database, f.aa, await readRecordingRetention(f.aa))
+    expect((await a.storage.from('jove-recordings').download(f.candidate.path)).error).toBeTruthy()
+    expect((await f.database.audio.get(f.asset.id))?.blob.size).toBe(8)
+  }, 60000)
+  it.each(['en','ja'] as const)('keeps a missing %s recovery blocked while another device synchronizes unrelated originals', async language => {
+    const f = await prepareExpiredRecording(language), sourceJournal = new SyncJournal(f.database)
+    await synchronize(sourceJournal, new SupabaseSyncRemote(f.aa.client, f.aa, language))
+    const request = { audioId: f.asset.id, version: f.candidate.version, sha256: f.manifest.sha256, bytes: 8 }
+    expect((await a.rpc('recording_maintenance', { action: 'prepare-recovery', learning_language: language, request })).data?.state).toBe('remove-old')
+    expect((await a.storage.from('jove-recordings').remove([{ path: f.candidate.path, versionId: f.candidate.version }])).error).toBeNull()
+    const other = new JoveDatabase(`maintenance-other-${crypto.randomUUID()}`, language)
+    maintenanceDatabases.push(other)
+    const otherJournal = new SyncJournal(other)
+    await otherJournal.bindOwner(owner)
+    const otherAccess = await bindSyncAccess(a, owner, publicConfig, async () => {
+      if ((await other.syncMeta.get('owner'))?.value !== owner) throw new Error('Other fixture owner changed')
+    }, localFetch)
+    const fresh = { ...f.asset, id: crypto.randomUUID(), createdAt: Date.now(), processed: false }
+    await other.audio.add(fresh)
+    const path = `${owner}/${language === 'ja' ? 'ja/' : ''}${fresh.id}-${await audioHash(fresh.blob)}`
+    objectPaths.push(path)
+    await synchronize(otherJournal, new SupabaseSyncRemote(otherAccess.client, otherAccess, language))
+    expect(await other.audio.get(f.asset.id)).toBeUndefined()
+    const result = await synchronizeAudio(other, otherAccess, await readRecordingRetention(otherAccess))
+    expect(result.blocked).toBeGreaterThan(0)
+    expect(result.retentionPending).toBe(true)
+    expect(result.uploaded).toBeGreaterThan(0)
+    expect((await a.storage.from('jove-recordings').download(path)).error).toBeNull()
+    expect(await other.audio.get(f.asset.id)).toBeUndefined()
+    // The original device can finish the outstanding recovery later.
+    await synchronize(sourceJournal, new SupabaseSyncRemote(f.aa.client, f.aa, language))
+    await synchronizeAudio(f.database, f.aa, await readRecordingRetention(f.aa))
+    expect(await audioHash((await a.storage.from('jove-recordings').download(f.candidate.path)).data!)).toBe(await audioHash(f.asset.blob))
+    expect((await admin.from('recording_upload_reservations').select('object_path').eq('object_path', f.candidate.path)).data).toEqual([])
+  }, 60000)
+  })
   it('fences real Storage inserts and concurrent English/Japanese reservations with one allowance', async () => {
     const current = await admin.from('recording_storage_limits').select('limit_bytes').single()
     if (current.error || !current.data) throw new Error('Missing local cloud allowance')

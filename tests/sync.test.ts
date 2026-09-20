@@ -174,6 +174,7 @@ function sdkAudioFixture() {
   const config = { url: 'https://jove-sync-test.invalid', publishableKey: 'sb_publishable_test_only' }
   const manifests = new Map<string, AudioManifest>(), objects = new Map<string, Blob>(), server = new Server()
   let principal = owner, token = 'test-token-a', member = true, policy = 'minimal', capacity: unknown = true, hook: ((path: string) => Promise<void>) | undefined
+  let downloadFailure: { status: number; code: string } | undefined
   const requests: { path: string; authorization: string | null }[] = []
   const transport: typeof fetch = async (input, init) => {
     const url = new URL(String(input)), method = init?.method ?? 'GET'
@@ -183,6 +184,7 @@ function sdkAudioFixture() {
     if (url.pathname.endsWith('/app_members')) return json(member ? [{ user_id: owner }] : [])
     if (url.pathname.endsWith('/service_preferences')) return json([{ recording_retention: policy }])
     if (url.pathname.endsWith('/reserve_recording_upload')) return json(capacity)
+    if (url.pathname.endsWith('/recording_maintenance')) return json({ candidates: [], pending: false, removed: 0 })
     if (url.pathname.endsWith('/append_sync_operations')) {
       const rows = await server.upload(JSON.parse(String(init?.body)).operations)
       return json(rows.map(row => ({ ...row, received_at: new Date(row.receivedAt).toISOString() })))
@@ -199,6 +201,8 @@ function sdkAudioFixture() {
         objects.set(path, body.get('') as Blob)
         return json({ Key: path })
       }
+      if (downloadFailure) return new Response(JSON.stringify({ code: downloadFailure.code, message: 'Fixture storage failure', statusCode: String(downloadFailure.status) }),
+        { status: downloadFailure.status, headers: { 'Content-Type': 'application/json' } })
       const blob = objects.get(path)
       return blob ? new Response(blob) : new Response('missing', { status: 404 })
     }
@@ -217,6 +221,7 @@ function sdkAudioFixture() {
       const args = JSON.parse(String(init?.body)), row = manifests.get(args.recording_id)
       if (args.expected_policy !== policy || !row) return json(false)
       row.purpose = args.retention_purpose; row.expires_at = args.retention_expires_at
+      row.retention_cursor = args.expected_cursor; row.retention_policy = args.expected_policy
       return json(true)
     }
     throw new Error('Unexpected fixture request')
@@ -230,6 +235,7 @@ function sdkAudioFixture() {
     switchUser() { principal = deviceB; token = 'test-token-b' }, setMember(value: boolean) { member = value },
     setPolicy(value: string) { policy = value }, setHook(value?: typeof hook) { hook = value },
     setCapacity(value: unknown) { capacity = value },
+    setDownloadFailure(value: typeof downloadFailure) { downloadFailure = value },
   }
 }
 function recording(id = 'audio-fixture', processed = false) {
@@ -252,6 +258,16 @@ describe('private audio uses the real SDK builders with fixed-principal access',
     await expect(uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })).rejects.toThrow()
     expect(fixture.objects.size).toBe(0)
     expect(asset.blob.size).toBe(8)
+  })
+  it('stops recovery before any delete when the account changes during its prepare request', async () => {
+    const fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording()
+    const existing = await uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })
+    fixture.manifests.set(asset.id, { ...existing, cleanup_version: 'old-version', recovery_pending: false })
+    const baseline = fixture.requests.length
+    fixture.setHook(async path => { if (path.endsWith('/recording_maintenance')) fixture.switchUser() })
+    await expect(uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })).rejects.toThrow('Account changed')
+    expect(fixture.requests.slice(baseline).some(row => row.path.includes('/storage/'))).toBe(false)
+    expect(fixture.objects.get(existing.object_path)?.size).toBe(8)
   })
   it('never journals or uploads generated/content caches and preserves authentic playback metadata', async () => {
     const { db, journal } = await local(), fixture = sdkAudioFixture(), access = await fixture.access()
@@ -315,6 +331,28 @@ describe('private audio uses the real SDK builders with fixed-principal access',
     expect((await db.audio.toArray()).map(row => row.blob.size)).toEqual([8,8])
     fixture.setCapacity(null)
     await expect(synchronizeAudio(db, access, 'minimal')).rejects.toThrow('Could not check shared cloud recording capacity')
+  })
+  it.each(['NoSuchKey','AccessDenied'])('continues only an explicit missing object, not an authorization failure: %s', async code => {
+    const { db, journal } = await local(), fixture = sdkAudioFixture(), access = await fixture.access()
+    const missing = recording('missing'), fresh = recording('fresh')
+    const manifest = await uploadRecording(access, missing, { purpose: 'draft', expiresAt: null })
+    fixture.manifests.set(missing.id, { ...manifest, cleanup_version: 'old-version', recovery_pending: true })
+    await db.audio.add(fresh)
+    await synchronize(journal, fixture.server)
+    const { blob, ...metadata } = missing
+    expect(blob.size).toBe(8)
+    await db.syncMeta.put({ id: 'remoteAudio', value: [metadata] })
+    fixture.setDownloadFailure({ status: code === 'NoSuchKey' ? 404 : 403, code })
+    if (code === 'NoSuchKey') {
+      const result = await synchronizeAudio(db, access, 'minimal')
+      expect(result).toMatchObject({ blocked: 1, uploaded: 1, retentionPending: true })
+      expect(fixture.manifests.has(fresh.id)).toBe(true)
+    } else {
+      await expect(synchronizeAudio(db, access, 'minimal')).rejects.toThrow('could not download')
+      expect(fixture.manifests.has(fresh.id)).toBe(false)
+    }
+    expect(await db.audio.get(missing.id)).toBeUndefined()
+    expect((await db.audio.get(fresh.id))?.blob.size).toBe(8)
   })
   it('uses complete paginated manifests, retains conversation drafts and applies policy changes without sliding TTL', async () => {
     const { db, journal } = await local(), fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording('active', true)

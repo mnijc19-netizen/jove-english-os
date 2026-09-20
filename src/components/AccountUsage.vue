@@ -72,6 +72,7 @@ onBeforeUnmount(() => { ++generation; controller?.abort() })
         <label class="check-label"><input type="checkbox" :checked="preferences.prosody_enabled" :disabled="busy" @change="save('prosody_enabled', $event)" />Include available rhythm and intonation assessment</label>
       </div>
       <p class="help-text">Unfinished originals remain protected. A zero budget pauses new paid requests, not local practice. Service estimates and provider-side spending caps supplement these limits.</p>
+      <p class="help-text">到期的历史云副本会在联网同步时清理，保留时间从录制日起计算。未完成练习、评估和导入音频受保护，本机原件不会被自动删除。</p>
       <button class="button secondary" :disabled="busy" @click="refresh">{{ busy ? 'Please wait…' : 'Refresh account usage' }}</button>
     </template>
     <p v-if="message" class="success-note" role="status">{{ message }}</p>
