@@ -2,12 +2,18 @@
 
 ## Latest checkpoint — September20 local
 
+### Current public release —879515c, September20 delivered
+
+- CI35488693307 on879515ca46d43a02e8a88d09034acf9b7b1c8d81 passed verification and Pages deployment. Actual deployment6549060216 at04:34:14UTC binds that exact SHA. The previous type-declaration/bootstrap-count failures are fixed, not active blockers. The one corrected substantive release passed all unit, cold22-migration, real local Auth/Storage/content/Deno, multi-profile sync, Chromium/WebKit/browser, dependency and release-readiness gates.
+- Actual public isolated desktop/mobile profiles updated from `index-BrkzxZ9C.js` to `index-DWJdX7eE.js` using Update now. English draft and reload preservation, external lessons, Chinese guidance, short-day selection and public cloud configuration passed; Japanese stayed hidden and neither profile had uncaught errors. Evidence: `.work/japanese-catalog-compat-20260920-{desktop,mobile}.png` and `-result.json`. These are synthetic local-learning profiles, not real-owner login or physical-phone acceptance.
+- The four-source metadata workflow35488550238 already passed on main; hosted Tadoku141-entry reserve is live. BBC automatic browser import remains off (enable variable absent), pending the owner's save/update acknowledgement across devices. Japanese remains DEV-only; real-owner AI/sync/physical-device acceptance and sustained English graded reading remain open. Later local interruption fix82e0850 is not included in this public release. Overall goal remains active and incomplete.
+
 ### Interrupted original-book reading — LOCAL ONLY, queued for next grouped release
 
 - If no suitable replacement exists, retain the source/comfort report and original bookmark, end this attempt explicitly as `unavailable`, keep its assignment optional/notdone, and record `TASK_STOPPED` rather than a fabricated successful completion. Positive self-reported time remains in shared workload accounting; zero minutes does not count. A later assignment uses a fresh task/session and restores the last unfinished bookmark. Two distinct unavailable Tadoku books in24hours temporarily stop publisher rotation; a subsequent positive reading report allows recovery. There is no network/paid retry or forced jump to a harder book.
 - Independent review identified and closed the discarded-report/continued-link-loop, released-used-time and stale-device-unsetting-state cases. Terminal interruption now has an attested whole-session snapshot bound to task, original/current book, stop time and minutes; concurrent notes remain conflict copies. Workload receipts are deterministic, completion-before-interruption, and deduplicated by task. They are not comprehension or proficiency evidence.
 -29 targeted extensive-reading/shared-day/workspace cases, typecheck and scoped lint pass. Isolated actual DEV mobile Chromium and WebKit both save a bookmark, report time, take the no-alternative exit and retain the explicit interrupted/not-completed screen after reload without overflow/uncaught errors. Screenshots `.work/japanese-books-20260920-interrupted-{mobile,webkit}.png`. Independent final static re-review found no blocking P1/P2 in this increment. No backend, public release, provider or owner-data mutation was made for this local follow-up.
-- Candidate879515c is separately in its existing Pages release workflow35488693307. Do not restart that release or describe this later local interruption behavior as public. English graded-reading source screening is recorded in CONTENT; it is not an implemented adapter.
+- Candidate879515c has completed the separate Pages release workflow35488693307 above. Do not restart that release or describe this later local interruption behavior as public. English graded-reading source screening is recorded in CONTENT; it is not an implemented adapter.
 
 ### Japanese original-book reading — September20 implemented, backend delivered; frontend candidate
 
