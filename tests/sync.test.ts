@@ -173,7 +173,7 @@ describe('atomic Settings local changes with actual Dexie transactions', () => {
 function sdkAudioFixture() {
   const config = { url: 'https://jove-sync-test.invalid', publishableKey: 'sb_publishable_test_only' }
   const manifests = new Map<string, AudioManifest>(), objects = new Map<string, Blob>(), server = new Server()
-  let principal = owner, token = 'test-token-a', member = true, policy = 'minimal', hook: ((path: string) => Promise<void>) | undefined
+  let principal = owner, token = 'test-token-a', member = true, policy = 'minimal', capacity: unknown = true, hook: ((path: string) => Promise<void>) | undefined
   const requests: { path: string; authorization: string | null }[] = []
   const transport: typeof fetch = async (input, init) => {
     const url = new URL(String(input)), method = init?.method ?? 'GET'
@@ -182,6 +182,7 @@ function sdkAudioFixture() {
     const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } })
     if (url.pathname.endsWith('/app_members')) return json(member ? [{ user_id: owner }] : [])
     if (url.pathname.endsWith('/service_preferences')) return json([{ recording_retention: policy }])
+    if (url.pathname.endsWith('/reserve_recording_upload')) return json(capacity)
     if (url.pathname.endsWith('/append_sync_operations')) {
       const rows = await server.upload(JSON.parse(String(init?.body)).operations)
       return json(rows.map(row => ({ ...row, received_at: new Date(row.receivedAt).toISOString() })))
@@ -228,6 +229,7 @@ function sdkAudioFixture() {
     access: () => bindSyncAccess(client, owner, config, async () => {}, transport),
     switchUser() { principal = deviceB; token = 'test-token-b' }, setMember(value: boolean) { member = value },
     setPolicy(value: string) { policy = value }, setHook(value?: typeof hook) { hook = value },
+    setCapacity(value: unknown) { capacity = value },
   }
 }
 function recording(id = 'audio-fixture', processed = false) {
@@ -235,6 +237,22 @@ function recording(id = 'audio-fixture', processed = false) {
     mimeType: 'audio/wav', createdAt: Date.now(), duration: 1, kind: 'recording' as const, processed, label: 'Fixture' }
 }
 describe('private audio uses the real SDK builders with fixed-principal access', () => {
+  it.each([false, null, { allowed: true }])('retains the original and never uploads without a strict capacity grant: %j', async value => {
+    const fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording()
+    fixture.setCapacity(value)
+    await expect(uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })).rejects.toThrow('Shared cloud recording storage is full')
+    expect(fixture.objects.size).toBe(0)
+    expect(fixture.manifests.size).toBe(0)
+    expect(asset.blob.size).toBe(8)
+    expect(fixture.requests.some(row => row.path.includes('/storage/'))).toBe(false)
+  })
+  it('rechecks the captured owner after capacity admission before uploading', async () => {
+    const fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording()
+    fixture.setHook(async path => { if (path.endsWith('/reserve_recording_upload')) fixture.switchUser() })
+    await expect(uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })).rejects.toThrow()
+    expect(fixture.objects.size).toBe(0)
+    expect(asset.blob.size).toBe(8)
+  })
   it('never journals or uploads generated/content caches and preserves authentic playback metadata', async () => {
     const { db, journal } = await local(), fixture = sdkAudioFixture(), access = await fixture.access()
     for (const kind of ['generated', 'content-cache']) {

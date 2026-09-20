@@ -84,6 +84,9 @@ export async function uploadRecording(access: SyncAccess, asset: AudioAsset,
     if (existing.sha256 !== sha256 || existing.bytes !== blob.size) throw new Error('A different original uses this recording ID. Neither copy was overwritten.')
     return existing as AudioManifest
   }
+  const reservation = await accountRequest(access, () => access.client.rpc('reserve_recording_upload', { object_path: path, recording_bytes: blob.size }))
+  if (reservation.error) throw new Error('Could not check shared cloud recording capacity. Retry later; your original stays on this device.')
+  if (reservation.data !== true) throw new Error('Shared cloud recording storage is full. Your original stays on this device; free cloud space before retrying.')
   const { error } = await accountRequest(access, () => access.client.storage.from(bucket).upload(path, blob, { upsert: false, contentType: asset.mimeType.split(';')[0] }))
   if (error) {
     const prior = await accountRequest(access, () => access.client.storage.from(bucket).download(path))

@@ -244,6 +244,54 @@ describe.skipIf(!enabled)('real local Auth/PostgREST/Storage synchronization', (
     expect(await audioHash((await dbA.audio.get(asset.id))!.blob)).toBe(await audioHash(asset.blob))
   }, 60000)
 
+  it('fences real Storage inserts and concurrent English/Japanese reservations with one allowance', async () => {
+    const current = await admin.from('recording_storage_limits').select('limit_bytes').single()
+    if (current.error || !current.data) throw new Error('Missing local cloud allowance')
+    const originalLimit = current.data.limit_bytes
+    const paths = [`${owner}/quota-${crypto.randomUUID()}`, `${owner}/ja/quota-${crypto.randomUUID()}`]
+    const undersized = `${owner}/quota-small-${crypto.randomUUID()}`, legacy = `${owner}/quota-legacy-${crypto.randomUUID()}`
+    objectPaths.push(...paths, undersized, legacy)
+    const reserve = (client: SupabaseClient, path: string, bytes: number) => client.rpc('reserve_recording_upload', { object_path: path, recording_bytes: bytes })
+    const blob = new Blob([new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4])], { type: 'audio/wav' })
+    try {
+      // Actual Storage final metadata, not just a SQL/mocked policy call.
+      expect((await reserve(a, undersized, 1)).data).toBe(true)
+      expect((await a.storage.from('jove-recordings').upload(undersized, blob)).error).toBeTruthy()
+      expect((await a.storage.from('jove-recordings').download(undersized)).error).toBeTruthy()
+      // Installed older English clients still get admission, without an RPC.
+      expect((await a.storage.from('jove-recordings').upload(legacy, blob)).error).toBeNull()
+      expect((await a.storage.from('jove-recordings').upload(legacy, blob, { upsert: true })).error).toBeTruthy()
+      expect((await admin.from('recording_storage_limits').update({ limit_bytes: 32 * 1024 * 1024 }).eq('singleton', true)).error).toBeNull()
+      const bytes = 20 * 1024 * 1024
+      const reservations = await Promise.all([reserve(a, paths[0]!, bytes), reserve(b, paths[1]!, bytes)])
+      expect(reservations.map(row => row.error)).toEqual([null, null])
+      expect(reservations.filter(row => row.data === true)).toHaveLength(1)
+      const winner = reservations.findIndex(row => row.data === true), loser = 1 - winner
+      const large = new Blob([new Uint8Array(bytes)], { type: 'audio/wav' })
+      expect((await [a,b][winner]!.storage.from('jove-recordings').upload(paths[winner]!, large)).error).toBeNull()
+      // No reservation/direct SDK upload cannot bypass the final shared gate.
+      expect((await [a,b][loser]!.storage.from('jove-recordings').upload(paths[loser]!, large)).error).toBeTruthy()
+      // Confirmation recovery costs no extra bytes, even after a lower cap.
+      expect((await admin.from('recording_storage_limits').update({ limit_bytes: 1 }).eq('singleton', true)).error).toBeNull()
+      expect((await reserve(b, paths[winner]!, bytes)).data).toBe(true)
+      expect((await reserve(b, paths[loser]!, bytes)).data).toBe(false)
+      const listed = await admin.storage.from('jove-recordings').list(paths[winner]!.slice(0, paths[winner]!.lastIndexOf('/')))
+      expect(listed.data?.find(row => row.name === paths[winner]!.split('/').at(-1))?.metadata?.size).toBe(bytes)
+      expect((await a.from('recording_storage_limits').update({ limit_bytes: originalLimit }).eq('singleton', true)).error).toBeTruthy()
+      expect((await stranger.rpc('reserve_recording_upload', { object_path: `${second}/not-member`, recording_bytes: 1 })).error?.code).toBe('42501')
+      // Both legacy preflights may see room. Only one final privileged commit fits.
+      expect((await admin.storage.from('jove-recordings').remove(paths)).error).toBeNull()
+      expect((await admin.from('recording_upload_reservations').delete().eq('user_id', owner)).error).toBeNull()
+      expect((await admin.from('recording_storage_limits').update({ limit_bytes: 32 * 1024 * 1024 }).eq('singleton', true)).error).toBeNull()
+      const racing = await Promise.all([a.storage.from('jove-recordings').upload(paths[0]!, large), b.storage.from('jove-recordings').upload(paths[1]!, large)])
+      expect(racing.filter(row => row.error === null)).toHaveLength(1)
+    } finally {
+      const restored = await admin.from('recording_storage_limits').update({ limit_bytes: originalLimit }).eq('singleton', true)
+      const removed = await admin.storage.from('jove-recordings').remove([...paths, undersized, legacy])
+      expect(restored.error).toBeNull()
+      expect(removed.error).toBeNull()
+    }
+  }, 60000)
   it('uploads once, verifies the original on another device, and rejects cross-owner recording reads', async () => {
     const blob = new Blob([new Uint8Array([82, 73, 70, 70, 1, 2, 3, 4])], { type: 'audio/wav' })
     const recording = { id: crypto.randomUUID(), blob, mimeType: 'audio/wav', createdAt: Date.now(), duration: 1, kind: 'recording' as const, processed: false, label: 'Local storage integration fixture' }

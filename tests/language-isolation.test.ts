@@ -141,6 +141,7 @@ function recordingTransport() {
       const url = new URL(String(input)), method = init?.method ?? 'GET'
       requests.push(url.pathname)
       const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } })
+      if (url.pathname.endsWith('/reserve_recording_upload')) return json(true)
       if (url.pathname.includes('/storage/v1/object/')) {
         const path = decodeURIComponent(url.pathname.split('/jove-recordings/')[1]!)
         if (method === 'POST') { objects.set(path, (init!.body as FormData).get('') as Blob); return json({ Key: path }) }

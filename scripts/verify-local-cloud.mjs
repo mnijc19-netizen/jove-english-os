@@ -54,7 +54,7 @@ try {
   const expected = readdirSync(resolve(root, 'supabase/migrations')).filter(file => /^\d+_.+\.sql$/u.test(file)).map(file => file.split('_')[0]).sort()
   const actual = sql('select version from supabase_migrations.schema_migrations order by version;', 'migration readback').trim().split(/\r?\n/u)
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error('Local migration readback does not match the current source set')
-  const suites = ['sync', 'services', 'content', 'speech', 'external-catalog', 'language-sync']
+  const suites = ['sync', 'services', 'content', 'speech', 'external-catalog', 'language-sync', 'recording-capacity']
   for (const name of suites) {
     const body = readFileSync(resolve(root, `supabase/tests/${name}.test.sql`), 'utf8')
     if (/^\s*commit\b/imu.test(body)) throw new Error('A local verification fixture may not commit')
