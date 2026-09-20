@@ -10,10 +10,32 @@ class DirectoryJobError extends Error {
 export function directoryJobDiagnostics(error) {
   return error instanceof DirectoryJobError ? error.diagnostics : [{ code: 'UNCLASSIFIED' }]
 }
+async function backendFailureCode(response) {
+  if (!response.body) return undefined
+  const allowed = new Set(['EXTERNAL_CATALOG', 'EXTERNAL_CATALOG_REFRESH', 'CATALOG_JOB_AUTH',
+    'CATALOG_JOB_AUTHORITY', 'CATALOG_JOB_REQUEST', 'CONFIGURATION'])
+  const reader = response.body.getReader(), chunks = []
+  let timer, size = 0
+  const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(null), 2000) })
+  try {
+    for (;;) {
+      const part = await Promise.race([reader.read(), deadline])
+      if (!part) return undefined
+      if (part.done) break
+      size += part.value.byteLength
+      if (size > 4096) return undefined
+      chunks.push(part.value)
+    }
+    const code = JSON.parse(Buffer.concat(chunks).toString('utf8'))?.error?.code
+    return typeof code === 'string' && allowed.has(code) ? code : undefined
+  } catch { return undefined }
+  finally { clearTimeout(timer); void reader.cancel().catch(() => {}); reader.releaseLock() }
+}
 export async function refreshCourseDirectory(token, fetcher = fetch, sourceId = 'voa-level1') {
   const lessons = sourceId === 'voa-level1' ? 52 : sourceId === 'voa-level2' ? 30 : 0
   if (!lessons) throw new Error('Unknown directory source.')
-  const failure = (code, message, status) => new DirectoryJobError(message, [{ sourceId, code, ...(status === undefined ? {} : { status }) }])
+  const failure = (code, message, status, backendCode) => new DirectoryJobError(message, [{ sourceId, code,
+    ...(status === undefined ? {} : { status }), ...(backendCode === undefined ? {} : { backendCode }) }])
   if (typeof token !== 'string' || !/^[a-f0-9]{64}$/u.test(token)) throw failure('CREDENTIAL', 'Directory job credential is not configured.')
   const signal = AbortSignal.timeout(30000)
   let response
@@ -21,7 +43,7 @@ export async function refreshCourseDirectory(token, fetcher = fetch, sourceId = 
     headers: { 'Content-Type': 'application/json', 'X-Jove-Catalog-Job': token },
     body: JSON.stringify({ action: 'catalog-refresh', ...(sourceId === 'voa-level1' ? {} : { sourceId }) }) }) }
   catch { throw failure(signal.aborted ? 'TIMEOUT' : 'TRANSPORT', 'Directory transport failed; no automatic retry.') }
-  if (!response.ok) { void response.body?.cancel().catch(() => {}); throw failure('HTTP', 'Directory refresh failed; inspect backend health without repeating paid work.', response.status) }
+  if (!response.ok) throw failure('HTTP', 'Directory refresh failed; inspect backend health without repeating paid work.', response.status, await backendFailureCode(response))
   if (!response.body) throw failure('RESPONSE_MISSING', 'Directory response is missing.')
   const reader = response.body.getReader(), chunks = []
   let size = 0
