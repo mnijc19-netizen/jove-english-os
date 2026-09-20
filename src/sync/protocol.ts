@@ -225,7 +225,7 @@ function mergePlanAssignments(plan: DailyPlan, history: StoredOperation[], evide
 const readingKind = (kind: unknown) => kind === 'reading' || kind === 'reading-recovery' || kind === 'japanese-reading' || kind === 'japanese-extensive'
 const committedReading = (row: RecordValue) => row.kind === 'japanese-reading'
   ? typeof (row.draft as Record<string, unknown>).lockedAt === 'number' : row.kind === 'japanese-extensive'
-    ? row.stage === 'completed' && typeof (row.draft as Record<string, unknown>).savedAt === 'number' : row.stage === 'saved'
+    ? ['completed', 'unavailable'].includes(String(row.stage)) && typeof (row.draft as Record<string, unknown>).savedAt === 'number' : row.stage === 'saved'
 function readingSnapshot(row: RecordValue): RecordValue {
   const copy = structuredClone(row)
   delete (copy.draft as Record<string, unknown>).syncReadingConflicts
@@ -233,7 +233,7 @@ function readingSnapshot(row: RecordValue): RecordValue {
 }
 function readingSubmission(row: RecordValue): string {
   const draft = row.draft as Record<string, unknown>
-  if (row.kind === 'japanese-extensive') return canonical([row.materialId, row.startedAt, draft.book, draft.bookmark, draft.note,
+  if (row.kind === 'japanese-extensive') return canonical([row.materialId, row.startedAt, row.stage, draft.book, draft.bookmark, draft.note,
     draft.effort, draft.minutesRead, draft.spentMinutes, draft.outcome, draft.switched, draft.savedAt])
   if (row.kind === 'japanese-reading') return canonical([row.materialId, row.startedAt, draft.meaning, draft.kana, draft.helped, draft.seen, draft.lockedAt, draft.sourcePractice ?? ''])
   return canonical([row.materialId, row.startedAt, draft.passage ?? '', draft.submittedResponse ?? '',
@@ -290,6 +290,11 @@ async function mergeReadingSession(history: StoredOperation[], all: StoredOperat
     const row = op.payload.record!, draft = row.draft as Record<string, unknown>
     if (row.kind === 'japanese-extensive') return all.some(e => {
       const event = e.payload.record, data = event?.data as Record<string, unknown> | undefined
+      if (row.stage === 'unavailable') return e.entityType === 'events' && event?.type === 'TASK_STOPPED' && event.source === 'objective'
+        && event.sessionId === row.id && event.timestamp === draft.savedAt && !!data && data.taskId === draft.taskId
+        && data.materialId === row.materialId && data.minutes === Number(draft.minutesRead) + Number(draft.spentMinutes)
+        && data.readingMaterialId === (draft.book as Record<string, unknown>)?.materialId
+        && data.readingSelfReport === true && data.timeSource === 'self-report'
       return e.entityType === 'events' && event?.type === 'JAPANESE_EXTENSIVE_READING' && event.source === 'self-report'
         && event.sessionId === row.id && event.timestamp === draft.savedAt && !!data
         && data.materialId === (draft.book as Record<string, unknown>)?.materialId

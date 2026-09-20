@@ -49,7 +49,7 @@ export function createJapaneseExtensive(database: JoveDatabase, checkOwner: () =
       if (previous) return previous
       const prior = extensiveHistory(await database.events.toArray(), now).findLast(h => h.data.materialId === material.id)
       const draft: ExtensiveDraft = { version: 1, revision: 0, stamp: crypto.randomUUID(), taskId: task.id, minutes: task.minutes, book: { materialId: material.id },
-        bookmark: prior?.data.outcome === 'continue' ? prior.data.bookmark : '', note: '', effort: 'okay', minutesRead: 0, spentMinutes: 0, outcome: 'continue', switched: [] }
+        bookmark: prior && prior.data.outcome !== 'finished' ? prior.data.bookmark : '', note: '', effort: 'okay', minutesRead: 0, spentMinutes: 0, outcome: 'continue', switched: [] }
       const session = sessionSchema.parse({ id, kind: 'japanese-extensive', materialId: material.id, startedAt: now, stage: 'read', draft })
       await database.sessions.add(session)
       await repository.recordEvent({ id: `${id}:started`, type: 'TASK_STARTED', source: 'objective', timestamp: now, sessionId: id,
@@ -77,11 +77,24 @@ export function createJapaneseExtensive(database: JoveDatabase, checkOwner: () =
     return change(id, extensiveDraftSchema.parse(expected), async (draft, session) => {
       if (draft.spentMinutes + draft.minutesRead >= draft.minutes) throw new Error('今天的阅读时间已用完，请先保存结束，下次自动换书。')
       await observe(session, draft, reason, now)
-      const excluded = [...draft.switched, draft.book.materialId]
+      const excluded = [...new Set([...draft.switched, draft.book.materialId])]
       const next = nextJapaneseBook(await database.materials.toArray(), await database.events.toArray(), now, excluded)
-      if (!next) throw new Error('暂时没有其他合适的原版读物；当前书签仍保留，可先返回今日安排。')
+      if (!next) {
+        // Keep the access/comfort report even when no replacement exists.
+        // An optional assignment is not a completed reading or lost progress.
+        const plan = await database.plans.get(new Date(now).toLocaleDateString('en-CA')), task = plan?.tasks.find(t => t.id === draft.taskId)
+        if (plan && task) { task.optional = true; plan.minutes = plan.tasks.reduce((sum, t) => sum + (t.optional ? 0 : t.minutes), 0); await database.plans.put(plan) }
+        // End this interrupted attempt, not the book. Preserve its self-reported
+        // work once; a later attempt receives a new task/session identity.
+        await repository.recordEvent({ id: `${id}:stopped`, type: 'TASK_STOPPED', source: 'objective', timestamp: now, sessionId: id,
+          data: { taskId: draft.taskId, minutes: draft.spentMinutes + draft.minutesRead, materialId: session.materialId!,
+            readingMaterialId: draft.book.materialId, readingSelfReport: true, timeSource: 'self-report', reason: 'no-suitable-original-book' } })
+        session.stage = 'unavailable'; session.completedAt = now; draft.savedAt = now
+        return
+      }
       draft.switched = excluded; draft.spentMinutes += draft.minutesRead; draft.minutesRead = 0
       draft.book = { materialId: next.book.id }; draft.bookmark = next.bookmark; draft.note = ''; draft.effort = 'okay'; draft.outcome = 'continue'
+      session.stage = 'read'
     })
   }
   async function finish(id: string, expected: ExtensiveDraft, now = Date.now()) {

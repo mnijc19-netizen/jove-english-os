@@ -34,6 +34,9 @@ export function extensiveHistory(events: readonly StudyEvent[], now: number) {
  * This is a conservative product heuristic, not a universal research threshold. */
 export function nextJapaneseBook(materials: readonly Material[], events: readonly StudyEvent[], now: number, exclude: readonly string[] = []) {
   const history = extensiveHistory(events, now), latest = history.at(-1)
+  const lastRead = history.findLast(h => ['continue', 'finished'].includes(h.data.outcome) && h.data.minutesRead > 0)?.event.timestamp ?? 0
+  if (new Set(history.filter(h => h.data.outcome === 'unavailable' && h.event.timestamp > Math.max(now - day, lastRead))
+    .map(h => h.data.materialId)).size >= 2) return undefined
   const available = materials.filter(m => m.language === 'ja' && m.approved && m.externalReading
     && m.externalReading.checkedAt <= now + 300000 && m.externalReading.checkedAt > now - EXTERNAL_CATALOG_MAX_AGE && !exclude.includes(m.id))
   const cooldown = new Set(history.filter(h => ['too-hard', 'not-interesting', 'unavailable'].includes(h.data.outcome)

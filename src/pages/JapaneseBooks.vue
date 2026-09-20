@@ -49,7 +49,9 @@ async function transition(action: 'finish' | 'too-hard' | 'not-interesting' | 'u
   const id = state.value.session.id
   if (action === 'finish') await learning.books.finish(id, draft.value)
   else await learning.books.switchBook(id, draft.value, action)
-  await load(id); notice.value = action === 'finish' ? '阅读记录已保存' : '已换一本，之前的书签和读感仍保留在阅读记录中'
+  await load(id); notice.value = action === 'finish' ? '阅读记录已保存' : state.value?.session.stage === 'unavailable'
+    ? '已记录问题并保留书签，暂时没有合适的替代读物。今天可以先继续其他任务，不必反复尝试原站。'
+    : '已换一本，之前的书签和读感仍保留在阅读记录中'
 }
 async function recover() {
   clearTimeout(timer); await saves.catch(() => {})
@@ -105,6 +107,7 @@ onBeforeUnmount(() => {
         <button class="button primary" :disabled="busy || draft.minutesRead < 1" @click="act(() => transition('finish'))">保存今天的阅读，下次自动接续</button>
         <details><summary>这本不合适？系统帮我换</summary><p>不是失败，不用勉强读完。当前书签和读感会先保存。</p><div class="row wrap"><button class="button secondary" :disabled="busy" @click="act(() => transition('too-hard'))">太难，换浅一点</button><button class="button secondary" :disabled="busy" @click="act(() => transition('not-interesting'))">没兴趣，换一本</button><button class="text-button" :disabled="busy" @click="act(() => transition('unavailable'))">原站无法打开</button></div></details>
       </template>
+      <template v-else-if="state.session.stage === 'unavailable'"><h3>这次已暂停，未算读完</h3><p>书签和读感已保留，已用的自报分钟仍计入今天的时间。这本暂不列为必做；之后重新安排时会保留书签，现在先继续其他任务。</p><RouterLink to="/ja" class="button primary">继续今日安排</RouterLink></template>
       <template v-else><h3>今天的阅读已保存</h3><p>{{ draft.outcome === 'continue' ? '书签已留下，下次会结合难度和你的读感安排续读。' : '下一次会自动挑选合适的新书，不必自己找材料。' }} 读完一本不等于掌握了全部词语；这里不增加听说或考试能力分数。</p><RouterLink to="/ja" class="button primary">继续今日安排</RouterLink></template>
       <p class="help-text"><a :href="TADOKU_GUIDE" target="_blank" rel="noopener noreferrer">出版社原版多读和使用说明</a></p>
       <details v-if="state.visits.length"><summary>查看这次已保存的书签和读感</summary><div v-for="visit in state.visits" :key="visit.event.id"><p>出版社 Level {{ visit.data.level }} · 自报 {{ visit.data.minutesRead }} 分钟</p><p>书签：{{ visit.data.bookmark || '未填写' }}</p><p>读感：{{ visit.data.note || '未填写' }}</p></div></details>

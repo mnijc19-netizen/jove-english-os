@@ -97,6 +97,35 @@ describe('Japanese original-book recommendations and honest self-reported readin
     const allowance = allocateLanguageDay(45, { en: { enabled: true, events: [], dueCards: 0 }, ja: { enabled: true, events, dueCards: 0 } }, now)
     expect(allowance.credited).toBe(3); expect(allowance.remaining).toBe(42)
   })
+  it('retains an unavailable report with no replacement, removes the compulsory slot and stops after two publisher failures', async () => {
+    const { reading, ja } = await setup(), first = await reading.start(task, now)
+    const date = new Date(now).toLocaleDateString('en-CA')
+    await ja.plans.put({ id: date, date, minutes: task.minutes, focus: 'realWorld', tasks: [task], evidenceFingerprint: 'fixture', createdAt: now })
+    // Only the currently assigned book remains eligible; do not advance a
+    // novice to a harder book simply because its source link is available.
+    await ja.materials.toCollection().modify(m => { if (m.id !== books[0]!.id) m.approved = false })
+    const saved = await reading.save(first.id, { ...extensiveDraftSchema.parse(first.draft), minutesRead: 2, bookmark: '第2页' })
+    const result = await reading.switchBook(first.id, extensiveDraftSchema.parse(saved.draft), 'unavailable', now + 1)
+    expect(result).toMatchObject({ stage: 'unavailable', draft: { book: { materialId: books[0]!.id } } })
+    expect(result.completedAt).toBe(now + 1)
+    expect((await ja.plans.get(date))?.tasks[0]).toMatchObject({ optional: true, done: false })
+    const events = await ja.events.toArray()
+    expect(events.filter(e => e.type === 'JAPANESE_EXTENSIVE_READING')).toHaveLength(1)
+    expect(events.some(e => e.type === 'TASK_COMPLETED')).toBe(false)
+    const allowance = allocateLanguageDay(45, { en: { enabled: true, events: [], dueCards: 0 }, ja: { enabled: true, events, plan: await ja.plans.get(date), dueCards: 0 } }, now + 1)
+    expect(allowance.credited).toBe(2); expect(allowance.remaining).toBe(43)
+    const completed: StudyEvent = { id: 'concurrent-completed', type: 'TASK_COMPLETED', source: 'objective', timestamp: now + 2,
+      data: { taskId: task.id, minutes: 3 } }
+    for (const ordered of [[...events, completed], [completed, ...events].reverse(), [completed, ...events]]) {
+      expect(allocateLanguageDay(45, { en: { enabled: true, events: [], dueCards: 0 }, ja: { enabled: true, events: ordered, dueCards: 0 } }, now + 3).credited).toBe(3)
+    }
+    expect(await reading.finish(first.id, extensiveDraftSchema.parse(result.draft), now + 2)).toEqual(result)
+    expect((await ja.events.toArray()).some(e => e.type === 'TASK_COMPLETED')).toBe(false)
+    const failures = [observation(0, now, 'unavailable'), observation(1, now + 1, 'unavailable')]
+    expect(nextJapaneseBook(books, failures, now + 2)).toBeUndefined()
+    expect(nextJapaneseBook(books, failures, now + day + 2)).toBeDefined()
+    expect(nextJapaneseBook(books, [...failures, observation(2, now + 2, 'continue')], now + 3)?.continuing).toBe(true)
+  })
   it.each([45, 90])('rotates original books independently of a later completed dialogue (shared budget %s)', async minutes => {
     const { learning, ja, en } = await setup()
     await en.profiles.update('main', { dailyMinutes: minutes })
@@ -145,5 +174,22 @@ describe('extensive reading sync is an atomic self-report, with concurrent bookm
     await expect(reading.switchBook(first.id, stale, 'too-hard', now + 100)).rejects.toThrow('其他页面')
     await expect(reading.finish(first.id, stale, now + 100)).rejects.toThrow('其他页面')
     expect((await ja.sessions.get(first.id))?.draft.bookmark).toBe('')
+  })
+  it('preserves an interrupted terminal attempt and the concurrent note without inventing a completed reading', async () => {
+    const { reading, ja } = await setup(), first = await reading.start(task, now)
+    const saved = await reading.save(first.id, { ...extensiveDraftSchema.parse(first.draft), bookmark: 'A第2页', minutesRead: 2 })
+    await ja.materials.toCollection().modify(m => { if (m.id !== books[0]!.id) m.approved = false })
+    const stopped = await reading.switchBook(first.id, extensiveDraftSchema.parse(saved.draft), 'unavailable', now + 100)
+    const onB = { ...first, draft: { ...first.draft, revision: 1, stamp: crypto.randomUUID(), bookmark: 'B原书签', note: '另一设备保留的笔记' } }
+    const operations = [...books.map(b => op('materials', b as unknown as RecordValue)), op('sessions', first as unknown as RecordValue),
+      op('sessions', stopped as unknown as RecordValue, 2, 1, first as unknown as RecordValue), op('sessions', onB as unknown as RecordValue, 3, 2, first as unknown as RecordValue),
+      ...(await ja.events.toArray()).map(e => op('events', e as unknown as RecordValue, 4))]
+    const projection = await projectOperations(operations)
+    expect(projection.records.sessions.find(s => s.id === first.id)).toMatchObject({ stage: 'unavailable', draft: { bookmark: 'A第2页' } })
+    expect(projection.records.sessions.find(s => s.kind === 'japanese-extensive-conflict')).toMatchObject({ draft: { note: '另一设备保留的笔记' } })
+    expect(projection.records.events.some(e => e.type === 'TASK_COMPLETED')).toBe(false)
+    expect(canonical(await projectOperations([...operations].reverse()))).toBe(canonical(projection))
+    const retry = await reading.start({ ...task, id: 'fresh-attempt' }, now + day)
+    expect(retry.id).not.toBe(first.id); expect(retry.draft.bookmark).toBe('A第2页')
   })
 })

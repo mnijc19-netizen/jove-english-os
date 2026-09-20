@@ -31,7 +31,13 @@ export function allocateLanguageDay(totalMinutes: number, spaces: Record<Learnin
   for (const language of languages) {
     const space = spaces[language], tasks = space.plan?.date === date ? space.plan.tasks : []
     const done = new Map(tasks.filter(task => task.done).map(task => [task.id, task.minutes]))
-    for (const event of space.events) if (event.type === 'TASK_COMPLETED' && event.source === 'objective' && event.timestamp <= now
+    // A planned completed snapshot wins. Without it, select one terminal
+    // receipt: completion before interruption, then stable time/id order.
+    // Concurrent receipts never add minutes twice or depend on download order.
+    const terminal = space.events.filter(event => event.type === 'TASK_COMPLETED'
+      || event.type === 'TASK_STOPPED' && event.data?.readingSelfReport === true && event.data.timeSource === 'self-report')
+      .sort((a, b) => Number(b.type === 'TASK_COMPLETED') - Number(a.type === 'TASK_COMPLETED') || a.timestamp - b.timestamp || a.id.localeCompare(b.id, 'en'))
+    for (const event of terminal) if (event.source === 'objective' && event.timestamp <= now
       && new Date(event.timestamp).toLocaleDateString('en-CA') === date && typeof event.data?.taskId === 'string'
       && event.data.taskId.trim() && allowed(event.data.minutes) && !done.has(event.data.taskId)) done.set(event.data.taskId, event.data.minutes)
     completed[language] = [...done.values()].filter(allowed).reduce((sum, minutes) => sum + minutes, 0)
