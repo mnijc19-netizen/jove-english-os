@@ -14,6 +14,12 @@ export interface AudioManifest {
   purpose: 'assessment' | 'pronunciation' | 'draft' | 'history' | 'import'; created_at: string; expires_at: string | null;
 }
 export interface AudioSyncResult { uploaded: number; downloaded: number; hasMore: boolean; blocked: number; retentionPending: boolean }
+export class CloudRecordingCapacityError extends Error {
+  constructor() {
+    super('Shared cloud recording storage is full. Your original stays on this device; free cloud space before retrying.')
+    this.name = 'CloudRecordingCapacityError'
+  }
+}
 const bucket = 'jove-recordings', maxBytes = 25 * 1024 * 1024, day = 86400000
 export async function audioHash(blob: Blob): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))].map(value => value.toString(16).padStart(2, '0')).join('')
@@ -85,8 +91,8 @@ export async function uploadRecording(access: SyncAccess, asset: AudioAsset,
     return existing as AudioManifest
   }
   const reservation = await accountRequest(access, () => access.client.rpc('reserve_recording_upload', { object_path: path, recording_bytes: blob.size }))
-  if (reservation.error) throw new Error('Could not check shared cloud recording capacity. Retry later; your original stays on this device.')
-  if (reservation.data !== true) throw new Error('Shared cloud recording storage is full. Your original stays on this device; free cloud space before retrying.')
+  if (reservation.error || typeof reservation.data !== 'boolean') throw new Error('Could not check shared cloud recording capacity. Retry later; your original stays on this device.')
+  if (!reservation.data) throw new CloudRecordingCapacityError()
   const { error } = await accountRequest(access, () => access.client.storage.from(bucket).upload(path, blob, { upsert: false, contentType: asset.mimeType.split(';')[0] }))
   if (error) {
     const prior = await accountRequest(access, () => access.client.storage.from(bucket).download(path))
@@ -138,7 +144,15 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
   }, now)
   for (const asset of assets) {
     const decision = decisionFor(metadata.get(asset.id) ?? asset)
-    if (decision && (decision.expiresAt === null || decision.expiresAt > now)) { await uploadRecording(access, asset, decision, language); result.uploaded++ }
+    if (decision && (decision.expiresAt === null || decision.expiresAt > now)) {
+      try { await uploadRecording(access, asset, decision, language); result.uploaded++ }
+      catch (error) {
+        // A full bucket must not prevent existing downloads/retention alignment.
+        // Identity/auth/transport failures still abort this captured-owner sync.
+        if (!(error instanceof CloudRecordingCapacityError)) throw error
+        result.blocked++
+      }
+    }
   }
   const manifests: AudioManifest[] = []
   let after = ''

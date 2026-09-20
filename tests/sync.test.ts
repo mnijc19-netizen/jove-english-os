@@ -240,7 +240,7 @@ describe('private audio uses the real SDK builders with fixed-principal access',
   it.each([false, null, { allowed: true }])('retains the original and never uploads without a strict capacity grant: %j', async value => {
     const fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording()
     fixture.setCapacity(value)
-    await expect(uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })).rejects.toThrow('Shared cloud recording storage is full')
+    await expect(uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })).rejects.toThrow(value === false ? 'Shared cloud recording storage is full' : 'Could not check shared cloud recording capacity')
     expect(fixture.objects.size).toBe(0)
     expect(fixture.manifests.size).toBe(0)
     expect(asset.blob.size).toBe(8)
@@ -299,6 +299,22 @@ describe('private audio uses the real SDK builders with fixed-principal access',
   })
   it('recognizes array and nested conversation/repair audio references', () => {
     expect([...referencedAudio({ audioIds: ['a', 'b'], messages: [{ audioId: 'c' }], repairAudio: { attempt: 'd' } })].sort()).toEqual(['a', 'b', 'c', 'd'])
+  })
+  it('keeps a full-bucket upload pending but still aligns existing retention and retains both originals', async () => {
+    const { db, journal } = await local(), fixture = sdkAudioFixture(), access = await fixture.access()
+    const old = recording('existing'), pending = recording('pending')
+    await uploadRecording(access, old, { purpose: 'draft', expiresAt: null })
+    await db.audio.bulkPut([{ ...old, processed: true }, pending])
+    await synchronize(journal, fixture.server)
+    fixture.setCapacity(false)
+    const result = await synchronizeAudio(db, access, 'minimal')
+    expect(result.blocked).toBe(1)
+    expect(result.hasMore).toBe(false)
+    expect(fixture.manifests.get(old.id)?.expires_at).toBe(new Date(old.createdAt + 7 * 86400000).toISOString())
+    expect(fixture.manifests.has(pending.id)).toBe(false)
+    expect((await db.audio.toArray()).map(row => row.blob.size)).toEqual([8,8])
+    fixture.setCapacity(null)
+    await expect(synchronizeAudio(db, access, 'minimal')).rejects.toThrow('Could not check shared cloud recording capacity')
   })
   it('uses complete paginated manifests, retains conversation drafts and applies policy changes without sliding TTL', async () => {
     const { db, journal } = await local(), fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording('active', true)
