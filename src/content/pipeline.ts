@@ -111,7 +111,7 @@ function decodeXml(value: string): string {
     return String.fromCodePoint(code)
   })
 }
-interface XmlNode { name: string; ns: string; attrs: Record<string, string>; text: string; children: XmlNode[] }
+export interface XmlNode { name: string; ns: string; attrs: Record<string, string>; text: string; children: XmlNode[] }
 
 /** Extract an inert, exact Conversation block. Never execute the surrounding publisher page. */
 export function parseVoaLessonPage(input: string, contract: VoaLessonContract): VoaLessonCandidate {
@@ -157,7 +157,7 @@ export function parseVoaLessonPage(input: string, contract: VoaLessonContract): 
 }
 
 /** Small, bounded RSS XML subset; not a general-purpose HTML/XML parser. Never creates a DOM. */
-function parseXml(input: string): XmlNode {
+export function parseXml(input: string): XmlNode {
   let xml = boundedText(input, PIPELINE_LIMITS.feedBytes).replace(/^\uFEFF/u, '')
   if (/<!\s*(?:DOCTYPE|ENTITY)/iu.test(xml)) fail('xml-declaration-forbidden')
   assertNoActiveContent(xml)

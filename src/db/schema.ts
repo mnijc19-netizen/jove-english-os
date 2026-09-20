@@ -113,7 +113,8 @@ export const materialSchema = z.strictObject({
     try { const url = new URL(m.sourceUrl!); return url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash &&
       (m.language === 'ja' ? url.hostname === 'www.irodori.jpf.go.jp' && /^\/en\/(?:starter|elementary01|elementary02)\/audio\/lesson(0[1-9]|1[0-8])\.html$/u.test(url.pathname)
         : url.hostname === 'learningenglish.voanews.com' && /^\/a\/[a-z0-9-]+\/\d+\.html$/u.test(url.pathname) ||
-          url.hostname === 'www.esl-lab.com' && /^\/(?:easy|intermediate|difficult)\/[a-z0-9-]+\/$/u.test(url.pathname))
+          url.hostname === 'www.esl-lab.com' && /^\/(?:easy|intermediate|difficult)\/[a-z0-9-]+\/$/u.test(url.pathname) ||
+          url.hostname === 'www.bbc.co.uk' && /^\/learningenglish\/english\/features\/6-minute-english_20\d{2}\/ep-\d{6}$/u.test(url.pathname))
     } catch { return false }
   })()), 'External lessons require a publisher page, not copied transcripts or certified playback')
 export const sessionSchema = z.strictObject({

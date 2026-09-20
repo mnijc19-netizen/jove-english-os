@@ -23,6 +23,9 @@ test('signed-in Library loads and retries the directory before initial learning 
       url: externalMaterials.find(m => m.id === legacy[i + 1])?.sourceUrl ?? `https://learningenglish.voanews.com/a/lesson-${i + 1}/${9000000 + i}.html` })) }
   const intermediate = { ...catalog, sourceId: 'voa-level2', entries: Array.from({ length: 30 }, (_, i) => ({
     position: i + 1, url: `https://learningenglish.voanews.com/a/level-two-lesson-${i + 1}/${9100000 + i}.html` })) }
+  const continuing = { ...catalog, sourceId: 'bbc-six-minute', entries: [{ id: 'p0abcdef', title: 'Everyday ideas',
+    url: 'https://www.bbc.co.uk/learningenglish/english/features/6-minute-english_2026/ep-260917',
+    publishedAt: Date.now() - 86400_000, duration: 381 }] }
   let attempts = 0, cursor = 0
   const unexpected: string[] = []
   await page.route('https://*.supabase.co/**', async route => {
@@ -38,6 +41,7 @@ test('signed-in Library loads and retries the directory before initial learning 
     if (path === '/rest/v1/rpc/append_sync_operations') return json(request.postDataJSON().operations.map((op: { id: string }) =>
       ({ id: op.id, cursor: ++cursor, received_at: new Date().toISOString() })))
     if (path === '/functions/v1/content' && request.postDataJSON().action === 'external-catalog') {
+      if (request.postDataJSON().sourceId === 'bbc-six-minute') return json({ catalog: continuing })
       if (request.postDataJSON().sourceId === 'voa-level2') return json({ catalog: intermediate })
       attempts++
       return attempts === 1 ? json({ error: 'fixture-unavailable' }, 503) : json({ catalog })
@@ -65,6 +69,23 @@ test('signed-in Library loads and retries the directory before initial learning 
   await expect(page.getByRole('heading', { name: 'Everyday English · Lesson 2', exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: test.info().outputPath('catalog-before-setup.png') })
+  if (process.env.VITE_JOVE_CONTINUING_COURSES !== '1') {
+    expect((await records(page, 'materials')).some(m => String(m.id).startsWith('external-bbc-'))).toBe(false)
+    return // Compatibility release must not emit BBC operations yet.
+  }
+  await page.getByRole('textbox', { name: 'Search materials' }).fill('6 Minute English')
+  await expect(page.getByRole('heading', { name: '6 Minute English · Everyday ideas', exact: true })).toBeVisible()
+  await page.getByRole('link', { name: 'Explore', exact: false }).click()
+  await expect(page.getByRole('link', { name: "Open today's listening lesson ↗" })).toHaveAttribute('href', continuing.entries[0]!.url)
+  await expect(page.getByText('不改变你的美式口语目标', { exact: false })).toBeVisible()
+  await page.locator('#external-summary').fill('我先记下听懂的主题，稍后继续。')
+  await expect.poll(async () => (await records(page, 'sessions')).some(s =>
+    (s as unknown as StudySession).draft.answer === '我先记下听懂的主题，稍后继续。')).toBe(true)
+  await page.reload()
+  await expect(page.locator('#external-summary')).toHaveValue('我先记下听懂的主题，稍后继续。')
+  expect((await records(page, 'events')).some(e => e.type === 'EXTERNAL_LISTEN_REFLECTION')).toBe(false)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: test.info().outputPath('continuing-course-draft.png') })
 })
 })
 

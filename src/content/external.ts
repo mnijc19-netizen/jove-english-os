@@ -52,7 +52,7 @@ export function unavailableExternalIds(events: StudyEvent[], now: number): Set<s
 }
 /** Catalog-only links expire for new assignments, not for saved work or static seeds. */
 export function externalCatalogFresh(material: Material, now: number): boolean {
-  if (!/^external-voa-level[12]-/u.test(material.id)) return true
+  if (!/^external-(?:voa-level[12]|bbc-six-minute)-/u.test(material.id)) return true
   const checkedAt = material.externalStudy?.checkedAt
   return typeof checkedAt === 'number' && Number.isFinite(checkedAt)
     && checkedAt <= now + 300_000 && now - checkedAt < EXTERNAL_CATALOG_MAX_AGE

@@ -80,6 +80,32 @@ begin
   assert (select lease_token::text=first_token from public.external_course_catalog where source_id='voa-level1'), 'other course consumed lease';
   assert public.external_catalog_worker('claim','{"sourceId":"voa-level2"}')->>'leaseToken' is null, 'Level 2 success backoff missing';
 end $$;
+do $$
+declare token text; snapshot jsonb; previous jsonb; remembered jsonb;
+begin
+  select catalog into previous from public.external_course_catalog where source_id='voa-level2';
+  token := public.external_catalog_worker('claim','{"sourceId":"bbc-six-minute"}')->>'leaseToken';
+  assert token is not null, 'episode lease missing';
+  snapshot := jsonb_build_object('version',1,'sourceId','bbc-six-minute','language','en','checkedAt',9999999999999,'revision',repeat('c',64),
+    'entries',jsonb_build_array(jsonb_build_object('id','p0abcdef','title','Everyday ideas',
+      'url','https://www.bbc.co.uk/learningenglish/english/features/6-minute-english_2026/ep-260917',
+      'publishedAt',floor(extract(epoch from now()-interval '1 day')*1000)::bigint,'duration',381)));
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','bbc-six-minute','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries,0,url}','"https://evil.example/episode"')));
+    raise exception 'foreign episode URL accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','bbc-six-minute','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries,0,publishedAt}','9999999999999')));
+    raise exception 'future episode accepted'; exception when invalid_parameter_value then null; end;
+  begin perform public.external_catalog_worker('commit',jsonb_build_object('sourceId','bbc-six-minute','leaseToken',token,'catalog',jsonb_set(snapshot,'{entries}',(snapshot->'entries')||(snapshot->'entries'))));
+    raise exception 'duplicate episode accepted'; exception when invalid_parameter_value then null; end;
+  assert public.external_catalog_worker('commit',jsonb_build_object('sourceId','bbc-six-minute','leaseToken',token,'catalog',snapshot))='true'::jsonb, 'episode catalog failed';
+  remembered := public.external_catalog_worker('read','{"sourceId":"bbc-six-minute"}');
+  assert jsonb_array_length(remembered->'entries')=1, 'variable-size episode catalog lost';
+  assert (remembered->>'checkedAt')::bigint < 9999999999999, 'episode freshness forged';
+  assert (select catalog=previous from public.external_course_catalog where source_id='voa-level2'), 'episode catalog overwrote VOA';
+  update public.external_course_catalog set next_attempt_at=now()-interval '1 second' where source_id='bbc-six-minute';
+  token := public.external_catalog_worker('claim','{"sourceId":"bbc-six-minute"}')->>'leaseToken';
+  perform public.external_catalog_worker('fail',jsonb_build_object('sourceId','bbc-six-minute','leaseToken',token));
+  assert public.external_catalog_worker('read','{"sourceId":"bbc-six-minute"}')=remembered, 'failed episode refresh destroyed reserve';
+end $$;
 reset role;
 do $$ begin
   assert (select relrowsecurity from pg_class where oid='public.external_course_catalog'::regclass), 'RLS not enabled';

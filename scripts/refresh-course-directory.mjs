@@ -2,6 +2,7 @@
 import { pathToFileURL } from 'node:url'
 
 const endpoint = 'https://lnkxdwzdcrtlucaezhkd.supabase.co/functions/v1/content'
+const sources = ['voa-level1', 'voa-level2', 'bbc-six-minute']
 class DirectoryJobError extends Error {
   constructor(message, diagnostics) { super(message); this.diagnostics = diagnostics }
 }
@@ -32,8 +33,8 @@ async function backendFailureCode(response) {
   finally { clearTimeout(timer); void reader.cancel().catch(() => {}); reader.releaseLock() }
 }
 export async function refreshCourseDirectory(token, fetcher = fetch, sourceId = 'voa-level1') {
-  const lessons = sourceId === 'voa-level1' ? 52 : sourceId === 'voa-level2' ? 30 : 0
-  if (!lessons) throw new Error('Unknown directory source.')
+  if (!sources.includes(sourceId)) throw new Error('Unknown directory source.')
+  const lessons = sourceId === 'voa-level1' ? 52 : sourceId === 'voa-level2' ? 30 : undefined
   const failure = (code, message, status, backendCode) => new DirectoryJobError(message, [{ sourceId, code,
     ...(status === undefined ? {} : { status }), ...(backendCode === undefined ? {} : { backendCode }) }])
   if (typeof token !== 'string' || !/^[a-f0-9]{64}$/u.test(token)) throw failure('CREDENTIAL', 'Directory job credential is not configured.')
@@ -61,17 +62,18 @@ export async function refreshCourseDirectory(token, fetcher = fetch, sourceId = 
   } finally { void reader.cancel().catch(() => {}); reader.releaseLock() }
   let value
   try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw failure('RESPONSE_JSON', 'Directory response is invalid.') }
-  if (value?.refreshed === true && value.lessons === lessons && value.sourceId === sourceId
-    && typeof value.revision === 'string' && /^[a-f0-9]{64}$/u.test(value.revision)) return `Course directory refreshed: ${lessons} lessons.`
+  const validCount = lessons === undefined ? Number.isInteger(value?.lessons) && value.lessons >= 1 && value.lessons <= 52 : value?.lessons === lessons
+  if (value?.refreshed === true && validCount && value.sourceId === sourceId
+    && typeof value.revision === 'string' && /^[a-f0-9]{64}$/u.test(value.revision)) return `Course directory refreshed: ${value.lessons} lessons.`
   if (value?.refreshed === false && value.reason === 'not-due-or-running') return 'Course directory is not due or another refresh owns the lease.'
   throw failure('RESPONSE_CONTRACT', 'Directory refresh did not confirm a valid outcome.')
 }
 
 export async function refreshCourseDirectories(token, fetcher = fetch) {
-  const results = await Promise.allSettled(['voa-level1', 'voa-level2'].map(source => refreshCourseDirectory(token, fetcher, source)))
+  const results = await Promise.allSettled(sources.map(source => refreshCourseDirectory(token, fetcher, source)))
   if (results.some(result => result.status === 'rejected')) throw new DirectoryJobError('One or more course directories failed; successful refreshes remain saved.',
     results.flatMap((result, index) => result.status === 'rejected' ? directoryJobDiagnostics(result.reason)
-      : [{ sourceId: ['voa-level1', 'voa-level2'][index], code: 'SUCCESS_OR_NOT_DUE' }]))
+      : [{ sourceId: sources[index], code: 'SUCCESS_OR_NOT_DUE' }]))
   return results.map(result => result.value).join('\n')
 }
 

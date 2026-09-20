@@ -66,6 +66,21 @@ beforeEach(async () => {
 afterEach(async () => { expect(auth.listeners.size).toBe(0); vi.restoreAllMocks(); vi.unstubAllGlobals(); await db.delete() })
 
 describe('automatic authenticated lesson delivery', () => {
+  it('imports continuing episodes while retaining learner edits and stable drafts across a refresh', async () => {
+    const catalog = { version: 1, sourceId: 'bbc-six-minute', language: 'en', checkedAt: Date.now(), revision: 'c'.repeat(64),
+      entries: [{ id: 'p0abcdef', title: 'Everyday ideas', url: 'https://www.bbc.co.uk/learningenglish/english/features/6-minute-english_2026/ep-260917',
+        publishedAt: Date.now() - 86400_000, duration: 381 }] }
+    fetcher.mockImplementation(async (_url, init) => {
+      expect(JSON.parse(String(init.body))).toEqual({ action: 'external-catalog', sourceId: 'bbc-six-minute' })
+      return json({ catalog })
+    })
+    const [material] = await refreshExternalCourseCatalog(undefined, 'bbc-six-minute')
+    await db.materials.update(material!.id, { title: 'My saved title' })
+    catalog.checkedAt += 1000
+    await refreshExternalCourseCatalog(undefined, 'bbc-six-minute')
+    expect(await db.materials.get(material!.id)).toMatchObject({ title: 'My saved title', externalStudy: { checkedAt: catalog.checkedAt } })
+    expect(await db.materials.count()).toBe(1)
+  })
   it('loads the independent intermediate reserve without rebinding beginner materials', async () => {
     const catalog = { ...externalCatalog(), sourceId: 'voa-level2', entries: Array.from({ length: 30 }, (_, i) => ({
       position: i + 1, url: `https://learningenglish.voanews.com/a/level-two-lesson-${i + 1}/${9100000 + i}.html` })) }

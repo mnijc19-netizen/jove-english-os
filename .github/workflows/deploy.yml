@@ -48,6 +48,9 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ vars.JOVE_SUPABASE_URL }}
           VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.JOVE_SUPABASE_PUBLISHABLE_KEY }}
+          # Leave unset/false for the compatibility release. Enable only after
+          # each owner's device has saved its work and installed that release.
+          VITE_JOVE_CONTINUING_COURSES: ${{ vars.JOVE_CONTINUING_COURSES_ENABLED == 'true' && '1' || '0' }}
           JOVE_REQUIRE_CLOUD: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && '1' || '0' }}
       - run: npm run check:security
       - run: npx playwright install --with-deps chromium webkit
@@ -58,6 +61,8 @@ jobs:
           JOVE_SYNC_BROWSERS: chromium,webkit
       - run: npm run test:e2e -- --max-failures=1
         id: browser-regression
+        env:
+          VITE_JOVE_CONTINUING_COURSES: ${{ vars.JOVE_CONTINUING_COURSES_ENABLED == 'true' && '1' || '0' }}
       - name: Preserve isolated browser failure evidence
         if: failure() && steps.browser-regression.outcome == 'failure'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -193,13 +193,17 @@ export const useApp = defineStore("app", () => {
           const catalogs = await Promise.allSettled([
             refreshExternalCourseCatalog(controller.signal),
             refreshExternalCourseCatalog(controller.signal, 'voa-level2'),
+            // Two-stage rollout: install the widened schema on all devices before
+            // producing BBC sync operations that an old client cannot project.
+            ...(import.meta.env.VITE_JOVE_CONTINUING_COURSES === '1'
+              ? [refreshExternalCourseCatalog(controller.signal, 'bbc-six-minute')] : []),
           ]);
           if (!current()) return;
           const loaded = catalogs.filter(result => result.status === 'fulfilled' && result.value.length > 0).length;
           hasCatalog = loaded > 0;
           if (hasCatalog) await refresh();
           if (!current()) return;
-          catalogState.value = loaded === 2 ? 'ready' : loaded ? 'partial'
+          catalogState.value = loaded === catalogs.length ? 'ready' : loaded ? 'partial'
             : catalogs.some(result => result.status === 'rejected') ? 'error' : 'empty';
         } catch { if (!current()) return; catalogState.value = online.value ? 'error' : 'offline'; }
         // The shared page-only directory needs no learner diagnosis. Personalized

@@ -1,12 +1,14 @@
 import { z } from 'zod'
 import { externalMaterial, externalMaterials } from './external'
 import type { Material } from '../domain/types'
+import { bbcCatalogSchema, materialFromBbcCatalog } from './external-bbc-catalog'
 
 export const EXTERNAL_CATALOG_URL = 'https://learningenglish.voanews.com/p/5644.html'
 export const EXTERNAL_CATALOG_SOURCE = 'voa-level1'
 export const EXTERNAL_CATALOG_LIMIT = 256 * 1024
-export const externalCatalogSourceSchema = z.enum(['voa-level1', 'voa-level2'])
+export const externalCatalogSourceSchema = z.enum(['voa-level1', 'voa-level2', 'bbc-six-minute'])
 export type ExternalCatalogSource = z.infer<typeof externalCatalogSourceSchema>
+type VoaCatalogSource = Exclude<ExternalCatalogSource, 'bbc-six-minute'>
 export const externalCatalogCourses = {
   'voa-level1': { url: EXTERNAL_CATALOG_URL, lessons: 52, marker: '52 weeks', level: 'beginner',
     title: 'Everyday English', difficultyStart: 0.15, difficultySpan: 0.5 },
@@ -23,16 +25,17 @@ const urlSchema = z.string().max(2048).refine(raw => {
 })
 const entriesSchema = (count: number) => z.array(z.strictObject({ position: z.number().int().min(1).max(count), url: urlSchema })).length(count)
   .refine(entries => new Set(entries.map(e => e.position)).size === count && new Set(entries.map(e => e.url)).size === count)
-export const externalCatalogSchema = z.strictObject({
-  version: z.literal(1), sourceId: externalCatalogSourceSchema, language: z.literal('en'),
+const voaCatalogSchema = z.strictObject({
+  version: z.literal(1), sourceId: z.enum(['voa-level1', 'voa-level2']), language: z.literal('en'),
   checkedAt: z.number().int().nonnegative().max(253402300799999), revision: z.string().regex(/^[a-f0-9]{64}$/u),
   entries: z.array(z.strictObject({ position: z.number().int().min(1).max(52), url: urlSchema })).max(52),
 }).refine(catalog => entriesSchema(externalCatalogCourses[catalog.sourceId].lessons).safeParse(catalog.entries).success)
+export const externalCatalogSchema = z.union([voaCatalogSchema, bbcCatalogSchema])
 export type ExternalCatalog = z.infer<typeof externalCatalogSchema>
 
 /** Exact publisher-course adapter. Only numbers and page URLs leave the parser. */
-export function parseExternalCatalogPage(html: string, sourceId: ExternalCatalogSource = EXTERNAL_CATALOG_SOURCE): ExternalCatalog['entries'] {
-  const course = externalCatalogCourses[externalCatalogSourceSchema.parse(sourceId)]
+export function parseExternalCatalogPage(html: string, sourceId: VoaCatalogSource = EXTERNAL_CATALOG_SOURCE): z.infer<typeof voaCatalogSchema>['entries'] {
+  const course = externalCatalogCourses[z.enum(['voa-level1', 'voa-level2']).parse(sourceId)]
   if (new TextEncoder().encode(html).byteLength > EXTERNAL_CATALOG_LIMIT
     || !html.includes('Certified American English teachers') || !html.includes(course.marker)) throw new Error('CATALOG_FORMAT')
   const inert = html.replace(/<!--[\s\S]*?-->/gu, '').replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
@@ -57,6 +60,7 @@ export function parseExternalCatalogPage(html: string, sourceId: ExternalCatalog
 const legacyIds: Record<number, string> = { 1: 'external-voa-welcome', 3: 'external-voa-im-here', 10: 'external-voa-directions' }
 export function materialFromExternalCatalog(catalog: ExternalCatalog): Material[] {
   const checked = externalCatalogSchema.parse(catalog)
+  if (checked.sourceId === 'bbc-six-minute') return materialFromBbcCatalog(checked)
   const course = externalCatalogCourses[checked.sourceId]
   return checked.entries.map(entry => {
     const legacy = checked.sourceId === EXTERNAL_CATALOG_SOURCE ? externalMaterials.find(m => m.id === legacyIds[entry.position]) : undefined

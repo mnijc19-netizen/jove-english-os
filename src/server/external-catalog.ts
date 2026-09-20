@@ -5,8 +5,9 @@ import { EXTERNAL_CATALOG_LIMIT, EXTERNAL_CATALOG_SOURCE, EXTERNAL_CATALOG_URL, 
 import type { ContentSource } from '../content/pipeline-types'
 import { createContentFetcher, type ContentFetcher } from './content-network'
 import { digestRequest, GatewayError } from './gateway'
+import { BBC_CATALOG_LIMIT, BBC_CATALOG_URL, parseBbcCatalog } from '../content/external-bbc-catalog'
 
-// This capability can fetch one HTML directory only: no audio/transcript/model routes.
+// Exact publisher directories only: no audio/transcript/model routes.
 const source: ContentSource = {
   id: EXTERNAL_CATALOG_SOURCE, name: 'VOA beginner course directory', enabled: true,
   feedUrl: EXTERNAL_CATALOG_URL, homepage: EXTERNAL_CATALOG_URL, publisher: 'VOA Learning English',
@@ -52,21 +53,29 @@ export async function readOrRefreshExternalCatalog(admin: SupabaseClient, option
 export async function refreshExternalCatalog(admin: SupabaseClient, options: CatalogOptions = {}) {
   options.signal?.throwIfAborted()
   const sourceId = externalCatalogSourceSchema.parse(options.sourceId ?? EXTERNAL_CATALOG_SOURCE)
-  const course = externalCatalogCourses[sourceId], url = course.url
+  const bbc = sourceId === 'bbc-six-minute'
+  const course = bbc ? undefined : externalCatalogCourses[sourceId]
+  const url = course?.url ?? BBC_CATALOG_URL
   const scopedArgs = sourceId === EXTERNAL_CATALOG_SOURCE ? {} : { sourceId }
-  const courseSource: ContentSource = { ...source, id: sourceId, name: `VOA ${course.level} course directory`,
-    feedUrl: url, homepage: url, notes: [`Official ${course.lessons}-lesson ${course.level} archive; link-only.`],
-    rights: { ...source.rights, evidenceUrls: [url] },
-    urls: { ...source.urls, page: [{ origin: 'https://learningenglish.voanews.com', pathPrefix: new URL(url).pathname }] } }
+  const courseSource: ContentSource = { ...source, id: sourceId, name: bbc ? 'BBC 6 Minute English episode directory' : `VOA ${course!.level} course directory`,
+    feedUrl: url, homepage: url, publisher: bbc ? 'BBC Learning English' : source.publisher,
+    supply: bbc ? 'continuing-feed' : source.supply,
+    notes: [bbc ? 'Official named-presenter series; British listening extension, not an American pronunciation model.'
+      : `Official ${course!.lessons}-lesson ${course!.level} archive; link-only.`],
+    rights: { ...source.rights, attribution: bbc ? 'BBC Learning English' : source.rights.attribution, evidenceUrls: [url] },
+    urls: { feed: bbc ? [{ origin: new URL(url).origin, pathPrefix: new URL(url).pathname }] : [],
+      page: bbc ? [] : [{ origin: new URL(url).origin, pathPrefix: new URL(url).pathname }], audio: [], transcript: [] } }
   const claim = await rpc(admin, 'claim', scopedArgs)
   if (!claim?.leaseToken) return { refreshed: false, reason: 'not-due-or-running' }
   try {
     options.signal?.throwIfAborted()
-    const response = await (options.fetcher ?? createContentFetcher())({ url, source: courseSource, role: 'page',
-      maxBytes: EXTERNAL_CATALOG_LIMIT, exactUrls: [url], timeoutMs: 20000, signal: options.signal })
+    const response = await (options.fetcher ?? createContentFetcher())({ url, source: courseSource, role: bbc ? 'feed' : 'page',
+      maxBytes: bbc ? BBC_CATALOG_LIMIT : EXTERNAL_CATALOG_LIMIT, exactUrls: [url], timeoutMs: 20000, signal: options.signal })
     options.signal?.throwIfAborted()
-    if (response.status !== 200 || response.contentType !== 'text/html' || response.finalUrl !== url) throw new Error('CATALOG_FETCH')
-    const entries = parseExternalCatalogPage(new TextDecoder('utf-8', { fatal: true }).decode(response.body), sourceId)
+    const contentTypes = bbc ? ['application/rss+xml', 'application/xml', 'text/xml'] : ['text/html']
+    if (response.status !== 200 || !contentTypes.includes(response.contentType) || response.finalUrl !== url) throw new Error('CATALOG_FETCH')
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(response.body)
+    const entries = sourceId === 'bbc-six-minute' ? parseBbcCatalog(text, (options.now ?? Date.now)()) : parseExternalCatalogPage(text, sourceId)
     const catalog = externalCatalogSchema.parse({ version: 1, sourceId, language: 'en',
       checkedAt: (options.now ?? Date.now)(), revision: await digestRequest(JSON.stringify(entries)), entries })
     materialFromExternalCatalog(catalog) // Reject legacy ID rebinding before committing.
