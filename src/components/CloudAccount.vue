@@ -3,8 +3,9 @@ import { ref } from 'vue'
 import { useCloud } from '../stores/cloud'
 import Icon from './Icon.vue'
 import { useJapaneseSpace } from '../stores/japanese-space'
+import { japaneseEnabled } from '../release-flags'
 const cloud = useCloud(), address = ref(''), code = ref(''), sent = ref(false)
-const japanese = import.meta.env.DEV ? useJapaneseSpace() : null
+const japanese = japaneseEnabled ? useJapaneseSpace() : null
 async function signOut() { if (japanese) await japanese.signOut(); else await cloud.signOut() }
 async function syncJapanese() {
   if (!japanese) return

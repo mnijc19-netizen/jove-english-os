@@ -1,6 +1,15 @@
 # Dedicated Jove production activation and release
 
-This is an executable operator sequence, not evidence that production is provisioned. The current public V1 stays available until the release hold passes. Never use another project's backend, copy real credentials into this document, or push local Auth configuration to production.
+This is an executable operator sequence, not current deployment evidence; see `STATUS.md` for the exact public release and dedicated backend. Never use another project's backend, copy real credentials into this document, or push local Auth configuration to production.
+
+## Current release scope and language switches
+
+The September13 owner amendment supersedes the older hosted-media/acoustic workflow below: publisher links/playback are preferred; automatic acoustic pronunciation/prosody scoring is not required. Do not provision Azure, restart paid audio screening or copy publisher media to satisfy a removed requirement. The delivered six-source metadata schedule is documented in `CONTENT_PIPELINE.md`; the legacy clip-ingestion cron below is a separate opt-in workflow, not a prerequisite for link-based lessons.
+
+- `JOVE_CONTINUING_COURSES_ENABLED=true` and `JOVE_GRADED_READING_ENABLED=true` separately enable the BBC and English original-reading imports. They remain held pending compatibility-update acknowledgment; do not count cached catalog entries as authenticated delivery to Today.
+- `JOVE_JAPANESE_ENABLED=true` maps to the exact build flag `VITE_JOVE_JAPANESE=1`. It controls routes, navigation, background account synchronization and language-specific data settings together. Missing/false remains OFF. Local DEV preview is separate; no browser-storage or URL override exists.
+- The deployment workflow gives build and browser acceptance the same flag. `japanese-release.spec.ts` tests the actual production bundle; the larger DEV-only source-fixture suite is not substituted for it. Turning the flag off and rebuilding hides Japanese but does not delete its database or affect English history. Retain the existing URL, repository and PWA scope.
+- Do not set the Japanese repository variable merely because the build passes. Record the scoped review/browser evidence and remaining legitimate owner AI/recording/sync/device acceptance in `STATUS.md`. A flag change requires a new build and the normal exact-commit deployment; it does not update an already installed PWA by itself.
 
 ## 1. Establish the explicit target
 
@@ -51,8 +60,8 @@ Set credentials only in this dedicated backend's server secrets. The browser and
 | Service | Required server configuration | Readback before acceptance |
 | --- | --- | --- |
 | Account AI/STT/TTS | `OPENROUTER_API_KEY`; supported `JOVE_FAST_MODEL`, `JOVE_STRONG_MODEL`, `JOVE_STT_MODEL`, `JOVE_TTS_MODEL` and `JOVE_TTS_VOICE` as needed | Legitimate actual LLM/STT/TTS requests, recovery and server usage; never infer model capability from its name |
-| Acoustic assessment | `AZURE_SPEECH_RESOURCE_NAME`, `AZURE_SPEECH_KEY`, positive conservative `JOVE_SPEECH_MAX_DISPATCH_USD` | Actual owner recording, provider-supported acoustic fields, low-evidence/failure paths and charged/unknown usage |
-| Content screening | Existing OpenRouter credential, audio-capable `JOVE_CONTENT_AUDIO_MODEL`; direct Gemini is optional, not a required third key | Actual audio/transcript screening, retained provenance and an eligible playable clip; test approval flags never qualify |
+| Acoustic assessment (removed from required delivery) | Legacy optional configuration only; do not provision without a new owner request | Not a release blocker; never invent acoustic scores |
+| Hosted-clip content screening (legacy opt-in, not link-catalog delivery) | Existing OpenRouter credential, audio-capable `JOVE_CONTENT_AUDIO_MODEL`; direct Gemini is optional, not a required third key | Only if this separate workflow is explicitly resumed: actual screening and eligible clip; fixtures never qualify |
 | Public routing | `JOVE_ALLOWED_ORIGINS` limited to the production origin; `JOVE_PUBLIC_SUPABASE_URL` is this project's exact HTTPS origin | Authenticated browser CORS, safe signed-audio conversion and original-byte hash |
 | Scheduled ingestion | `JOVE_CONTENT_JOB_TOKEN`, at least 32 characters, also stored under a dedicated `jove-content-job-*` Vault name | Actual scheduled HTTP execution and persisted refresh results |
 
@@ -60,7 +69,7 @@ Preserve existing preferences. Set account budgets and recording retention expli
 
 Free-service/privacy check (official sources checked 2026-09-09):
 
-- [Azure pricing](https://azure.microsoft.com/en-us/pricing/details/speech/) lists five shared real-time STT hours and 0.5 million neural TTS characters per month for F0, excluding batch STT; prosody appears separately as an enhanced add-on. These quotas do not prove this account is eligible or that all required acoustic features are free. Verify the exact resource/tier/region and feature pricing before activation; do not enable billing or remove prosody from the final requirements to bypass this gate.
+- Historical [Azure pricing](https://azure.microsoft.com/en-us/pricing/details/speech/) research is not a current account/price guarantee. The owner removed acoustic scoring from required delivery on September13; no Azure activation or billing is required for the current scope. Recheck eligibility and pricing only if the owner explicitly requests this optional service later.
 - [OpenRouter limits](https://openrouter.ai/docs/api_reference/limits) distinguish free-model request caps from paid credit limits. A catalog entry or a generated key does not prove available quota, audio capability or sustained quality. Chat completions now apply `provider.data_collection: deny` in the shared adapter, including direct/BYOK, schema downgrade, configured-model fallback and streaming. The server pricing layer independently retains the same policy and its price ceilings. [This routing filter](https://openrouter.ai/docs/guides/routing/provider-selection#requiring-providers-to-comply-with-data-policies) is not a zero-retention guarantee, an account logging-setting audit or coverage of separate search/STT/TTS providers. Do not relax it when a route is unavailable. Audio endpoints require their own verified privacy contract, not an undocumented chat parameter.
 - [Gemini terms](https://ai.google.dev/gemini-api/terms) describe improvement use and possible human review for unpaid-service inputs/outputs and prohibit submitting sensitive, confidential or personal information, with regional exceptions. They also restrict the service to professional/business development rather than consumer use. Resolve eligibility and the account's applicable data policy before selecting the optional direct Gemini path for this personal-use project; public source availability alone does not establish permission for downstream model improvement. No automatic switch to an unpaid tier or billing-enabled account is authorized.
 

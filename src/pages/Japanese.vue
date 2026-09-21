@@ -5,6 +5,7 @@ import { db as english, createLanguageDatabase } from '../db/db'
 import { createJapaneseWorkspace, japanesePracticeDraft, type JapanesePracticeStep, type JapanesePracticeDraft } from '../db/japanese'
 import { japanesePlacement, japanesePlacementItems, japaneseReadingSupport, kanaMorae } from '../domain/japanese'
 import { japaneseLessons, japaneseLessonUrl, japaneseCourseNames, japaneseSource } from '../content/japanese'
+import { japaneseDevelopment } from '../release-flags'
 import { readLanguageDay } from '../db/language-day'
 import type { Assessment, AudioAsset, DailyPlan, StudySession } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
@@ -200,7 +201,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="page japanese-page">
     <div class="page-heading"><div><p class="eyebrow">JAPANESE · 日语学习</p><h1 tabindex="-1">每天一点，真的用得上。</h1></div><RouterLink to="/today" class="text-button">返回英语</RouterLink></div>
-    <p class="help-text">开发预览：本页尚未开放到正式网站。日语 AI、分级内容和正式云端验收仍在完善。</p>
+    <p v-if="japaneseDevelopment" class="help-text">开发预览：本页尚未开放到正式网站。日语 AI、分级内容和正式云端验收仍在完善。</p>
     <p class="help-text" role="status">日语：{{ space.status }} <span v-if="space.problem"> · {{ space.problem }}</span></p>
     <p v-if="error" class="error" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="act(ready ? flush : openPage)">{{ ready ? '重试保存' : '重试打开日语区' }}</button></p>
     <p v-if="!ready" role="status">正在打开独立的日语学习记录…</p>

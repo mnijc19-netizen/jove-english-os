@@ -2,6 +2,12 @@
 
 ## Latest checkpoint — September21 local
 
+### Controlled Japanese production gate — implemented, not publicly enabled
+
+- One build-time gate now controls all five Japanese routes, navigation, background synchronization, shared sign-out and language-specific data settings. Production requires exact `VITE_JOVE_JAPANESE=1`; absent/false stays OFF. The workflow maps `JOVE_JAPANESE_ENABLED=true` consistently into both build and browser checks. DEV retains its preview label; enabled production does not. Settings no longer initializes the Japanese store while the gate is disabled. No public variable, backend, English history, URL or PWA scope changed.
+- Typecheck/scoped lint pass;18 release-flag/Settings tests pass after the last source edit (the earlier26-case selection also included Japanese-space). Actual isolated production OFF/ON bundles with the public project configuration passed desktop Chromium and mobile WebKit: disabled route/settings without creating a Japanese database; enabled language navigation, completed diagnosis/reload and data controls; then disabled rollback preserving the exact Japanese assessment and original English draft. No page errors or Japanese-page overflow; mobile screenshot inspected. Evidence: `.work/japanese-release-browser-20260921-result.json` and `.work/japanese-release-on-{desktop,webkit}-20260921.png`. The first probe's mobile navigation timeout was a test-harness offscreen-menu mistake, fixed by opening the actual collapsed menu; product code was not changed for it.
+- Added a small permanent built-bundle gate test to the existing browser suite, including WebKit. Its OFF/ON desktop/mobile checks pass4/4 without retries. Existing DEV-only source-fixture tests remain separate. Independent read-only gate review found no actionable P1/P2. These fresh synthetic profiles block service workers and use no owner session or paid provider; they do not prove PWA upgrades, genuine AI quality or physical-device synchronization. Public Japanese is still held; final goal remains incomplete.
+
 ### Japanese course directory maintenance — backend delivered, frontend held
 
 - Exact717948ae295e1c9f488a5dde9e37533d392765f3 passed single CI35532554967, including cold24-migration SQL, real isolated Auth/Storage/content/Deno, multi-profile sync and page E2E. Feature-branch Pages deployment was correctly skipped. Independent operator review closed source/runtime provenance checks. Guarded deployment verified fullSHA, clean relevant code, full23-version history and rebuilt runtime hash, then applied exact migration24 plus its history entry in one transaction. Hosted history matches source, with catalog RLS/security-invoker/client execute denials retained.
@@ -20,7 +26,7 @@
 ### Remaining full-delivery gates
 
 - English: obtain all-device compatibility-update acknowledgment, enable the separately held BBC/graded-reading imports, and prove an actual recurring catalog reaches a new eligible authenticated Today assignment. Stored catalog counts or synthetic browser fixtures alone do not close this gate.
-- Japanese: finish controlled production-build activation across routes/navigation/account/settings, then public release and owner-account AI/recording/sync acceptance. Do not expose the held switch as completed Japanese learning.
+- Japanese: controlled production-build gate is implemented and locally browser-verified above; remaining are its grouped release and legitimate owner-account AI/recording/sync acceptance. Do not expose the held switch as completed Japanese learning.
 - Owner/device evidence: actual owner login in an accessible isolated acceptance browser and Android/iPhone/desktop save→switch→resume remain unconfirmed. Existing original Chrome is not attachable; no account cookies, credentials or identity are extracted to bypass that boundary. The September21 all-device update question is awaiting a reply. Do unblocked implementation without repeatedly asking for learning-method choices or paid diagnostics.
 
 ### Current public release — cd9a422, delivered; recurring-job diagnosis

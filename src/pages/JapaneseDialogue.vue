@@ -12,6 +12,7 @@ import { useRequest } from '../composables/useRequest'
 import type { AudioAsset } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
 import SavedRecording from '../components/SavedRecording.vue'
+import { japaneseDevelopment } from '../release-flags'
 
 const route = useRoute(), app = useApp(), cloud = useCloud(), space = useJapaneseSpace()
 const database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, english), dialogue = learning.dialogue
@@ -126,7 +127,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="page ja-dialogue">
     <div class="page-heading"><div><p class="eyebrow">JAPANESE · 连续交流</p><h1 tabindex="-1">先把话接下去，再改一处。</h1></div><RouterLink to="/ja" class="text-button">返回日语今日安排</RouterLink></div>
-    <p class="help-text">日语开发预览 · 今天预算内的三轮短练习。AI 是文字对话伙伴，不是标准发音示范，也不测听说水平。</p>
+    <p class="help-text">{{ japaneseDevelopment ? '日语开发预览 · ' : '' }}今天预算内的三轮短练习。AI 是文字对话伙伴，不是标准发音示范，也不测听说水平。</p>
     <p v-if="notice" role="status" class="help-text">{{ notice }}</p>
     <p v-if="error || saveError" role="alert" class="error">{{ error || saveError }} 原回答与录音仍保留，不会自动重试付费请求。</p>
     <div v-if="error || saveError" class="row wrap"><button class="text-button" :disabled="locked" @click="reloadSaved">重新载入已保存的对话（保留本页文字副本）</button><button v-if="dirty" class="text-button" :disabled="locked" @click="flush().catch(() => {})">重试保存</button></div>

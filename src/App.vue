@@ -6,9 +6,9 @@ import { useApp } from "./stores/app";
 import Icon from "./components/Icon.vue";
 import { useCloud } from "./stores/cloud";
 import { useJapaneseSpace } from "./stores/japanese-space";
+import { japaneseEnabled, japaneseDevelopment } from "./release-flags";
 const cloud = useCloud();
-const japanesePreview = import.meta.env.DEV;
-const japanese = japanesePreview ? useJapaneseSpace() : null;
+const japanese = japaneseEnabled ? useJapaneseSpace() : null;
 const app = useApp(),
   route = useRoute(),
   menu = ref(false),
@@ -144,9 +144,9 @@ function focusPractice() {
         ></RouterLink
       >
       <p class="nav-label">YOUR WORKSPACE</p>
-      <div v-if="japanesePreview" class="language-links" aria-label="学习语言">
+      <div v-if="japaneseEnabled" class="language-links" aria-label="学习语言">
         <RouterLink to="/today" :aria-current="!inJapanese ? 'true' : undefined" class="nav-item">English · 英语</RouterLink>
-        <RouterLink to="/ja" :aria-current="inJapanese ? 'true' : undefined" class="nav-item">日本語 · 日语预览</RouterLink>
+        <RouterLink to="/ja" :aria-current="inJapanese ? 'true' : undefined" class="nav-item">日本語 · {{ japaneseDevelopment ? '日语预览' : '日语' }}</RouterLink>
       </div>
       <nav v-if="!inJapanese" aria-label="Main navigation">
         <RouterLink

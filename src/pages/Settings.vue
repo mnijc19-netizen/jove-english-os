@@ -13,9 +13,9 @@ import AccountUsage from "../components/AccountUsage.vue";
 import { useCloud } from "../stores/cloud";
 import { useJapaneseSpace } from "../stores/japanese-space";
 import { resetDeviceCacheAndKey } from "../sync/local-change";
+import { japaneseEnabled } from "../release-flags";
 const cloud = useCloud();
-const japanese = useJapaneseSpace();
-const japaneseEnabled = import.meta.env.DEV;
+const japanese = japaneseEnabled ? useJapaneseSpace() : null;
 const dataLanguage = ref<'en' | 'ja'>('en');
 const dataLabel = computed(() => dataLanguage.value === 'ja' ? '日语' : '英语');
 const importedLanguage = ref<'en' | 'ja'>('en');
@@ -38,7 +38,7 @@ function clearImport() {
 watch(dataLanguage, () => { clearImport(); message.value = ''; error.value = ''; });
 async function dataContext(language: 'en' | 'ja') {
   if (language === 'en') return { database: db, account: cloud };
-  if (!japaneseEnabled || !(await Dexie.getDatabaseNames()).includes(japanese.database.name))
+  if (!japanese || !(await Dexie.getDatabaseNames()).includes(japanese.database.name))
     throw new Error('请先打开日语学习区；这里不会为了备份而创建空的学习记录。');
   await japanese.ensure();
   return { database: japanese.database, account: japanese };
@@ -174,7 +174,7 @@ async function storageStatus() {
   const persistent = await navigator.storage?.persisted?.();
   storage.value = `${((estimate?.usage || 0) / 1024 / 1024).toFixed(1)} MB used · ${persistent ? "persistent storage" : "standard browser storage"}`;
   japaneseAudioMB.value = undefined;
-  if (japaneseEnabled && (await Dexie.getDatabaseNames()).includes(japanese.database.name)
+  if (japanese && (await Dexie.getDatabaseNames()).includes(japanese.database.name)
       && (await japanese.database.syncMeta.get('owner'))?.value === (await db.syncMeta.get('owner'))?.value) {
     japaneseAudioMB.value = (await japanese.database.audio.toArray()).reduce((sum, asset) => sum + asset.blob.size, 0) / 1024 / 1024;
   }

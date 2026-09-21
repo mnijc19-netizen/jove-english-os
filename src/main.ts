@@ -2,14 +2,14 @@ import { createApp, nextTick } from "vue";
 import { createPinia } from "pinia";
 import { createRouter, createWebHashHistory } from "vue-router";
 import App from "./App.vue";
+import { japaneseEnabled } from "./release-flags";
 import "./styles.css";
 
 const router = createRouter({
   history: createWebHashHistory(import.meta.env.BASE_URL),
   routes: [
-    // Kept out of production navigation until language sync and practice gates
-    // are complete. Local development can exercise the real Japanese pages.
-    ...(import.meta.env.DEV ? [
+    // Production stays held until explicitly enabled after its acceptance gates.
+    ...(japaneseEnabled ? [
       { path: '/ja', component: () => import('./pages/Japanese.vue') },
       { path: '/ja/review', component: () => import('./pages/JapaneseReview.vue') },
       { path: '/ja/talk', component: () => import('./pages/JapaneseDialogue.vue') },

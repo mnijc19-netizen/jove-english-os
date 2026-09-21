@@ -93,13 +93,14 @@ function mount() {
   app.mount(root); mounted.push(app); return root
 }
 beforeAll(() => {
-  const source = readFileSync(new URL('../src/pages/Settings.vue', import.meta.url), 'utf8').replaceAll('import.meta.env.DEV', 'true')
+  const source = readFileSync(new URL('../src/pages/Settings.vue', import.meta.url), 'utf8')
   const { descriptor } = parse(source, { filename: 'Settings.vue' })
   const script = compileScript(descriptor, { id: 'settings-test', inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } })
   const code = transpileModule(script.content, { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText
   const dependencies: Record<string, unknown> = {
     vue: Vue, dexie: { default: Dexie }, '../db/db': { db }, '../db/repository': repository, '../sync/local-change': localChange,
     '../stores/japanese-space': { useJapaneseSpace: () => japanese },
+    '../release-flags': { japaneseEnabled: true },
     '../stores/app': { useApp: () => appState }, '../stores/cloud': { useCloud: () => cloud }, '../composables/useRequest': { useRequest },
     '../components/Icon.vue': { default: { setup: () => () => Vue.h('i') } },
     '../components/CloudAccount.vue': { default: { setup: () => () => Vue.h('section', 'Learning account') } },
