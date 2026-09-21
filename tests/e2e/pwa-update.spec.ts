@@ -201,6 +201,67 @@ for (const controlledReload of [false, true]) {
   });
 }
 
+test("Settings release panel explicitly updates the real worker and preserves saved learning", async ({ page }) => {
+  const host = await serveUpgrade();
+  const pageErrors: string[] = [], externalRequests: string[] = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  page.on("request", request => {
+    if (/^https?:/.test(request.url()) && new URL(request.url()).origin !== host.origin) externalRequests.push(request.url());
+  });
+  try {
+    await page.addInitScript(() => {
+      window.__jovePwaUpdateDocument = {
+        id: crypto.randomUUID(), controlledAtBoot: !!navigator.serviceWorker.controller, controllerChanges: 0,
+      };
+    });
+    await page.goto(host.baseURL + `#/listen?material=${materialId}`);
+    const answer = "Keep this saved listening answer when I update from Settings.";
+    await page.locator("#meaning").fill(answer);
+    await expect.poll(() => savedAnswer(page)).toBe(answer);
+    await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+    await page.goto(host.baseURL + "#/settings");
+    await expect(page.getByTestId("current-release")).toBeVisible();
+    await expect(page.locator(marker)).toHaveAttribute("content", "A");
+    const previousId = await page.evaluate(() => window.__jovePwaUpdateDocument.id);
+    const panel = page.locator(".release-status");
+    const apply = panel.getByRole("button", { name: "已保存练习，更新页面", exact: true });
+    await expect(apply).toHaveCount(0);
+    host.deployCurrent();
+    await panel.getByRole("button", { name: "检查更新", exact: true }).click();
+    await expect(apply).toBeEnabled();
+    await expect.poll(() => page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.waiting?.state)).toBe("installed");
+    // This fixture changes the HTML/worker, not the compiled release ID. It proves
+    // the Settings action wiring; distinct build comparisons have a separate test.
+    await expect(page.getByTestId("release-result")).toContainText("核对一致");
+    await expect(page.locator(marker)).toHaveAttribute("content", "A");
+    expect(await page.evaluate(() => window.__jovePwaUpdateDocument.id)).toBe(previousId);
+    expect(await savedAnswer(page)).toBe(answer);
+    await apply.click();
+    await expect.poll(async () => {
+      try {
+        return await page.evaluate(id => document.readyState === "complete"
+          && window.__jovePwaUpdateDocument.id !== id
+          && window.__jovePwaUpdateDocument.controlledAtBoot
+          && !document.querySelector('meta[name="test-version"]')
+          && !!document.querySelector('[data-testid="current-release"]'), previousId);
+      } catch (error) {
+        if (/Execution context was destroyed|Cannot find context with specified id|most likely because of a navigation/.test(String(error))) return false;
+        throw error;
+      }
+    }, { timeout: 15000 }).toBe(true);
+    await expect(apply).toHaveCount(0);
+    await page.goto(host.baseURL + `#/listen?material=${materialId}`);
+    await expect(page.locator("#meaning")).toHaveValue(answer);
+    expect(await savedAnswer(page)).toBe(answer);
+    expect(pageErrors).toEqual([]);
+    expect(host.httpErrors).toEqual([]);
+    expect(externalRequests).toEqual([]);
+  } finally {
+    await page.close();
+    await host.close();
+  }
+});
+
 async function savedSpeakingWork(page: Page) {
   return page.evaluate(async () => {
     type Session = { draft: { text?: string; audioId?: string } };
