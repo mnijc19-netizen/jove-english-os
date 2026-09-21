@@ -1,6 +1,15 @@
 # Current status
 
-## Latest checkpoint — September21 local
+## Latest checkpoint — September22 local
+
+### Actual owner desktop acceptance — login, catalog delivery and recovery verified
+
+- The owner signed in manually in a dedicated isolated browser on the existing public release `index-DuZGU8Fd.js`. Actual UI shows signed-in/synced and successful account-AI connection verification. Authenticated normal synchronization and usage/manifest requests return200. Credentials remain in that browser; no token/profile export or permission relaxation was used. Connection verification is not paid-generation acceptance; budgets/usage holds were not changed and no paid call was made.
+- Actual owner-client catalog responses contain VOA Level1/Level2 at52/30entries, with `checkedAt`1789996375813/1789996377977. They correspond to successful recurring workflow35604146290 on24ce2d5. The ordinary account Today page selects a VOA publisher lesson and displays Chinese listening/recall/expression guidance. This proves scheduled metadata reaches the actual account and an external course is assigned, not that a newly discovered post-completion lesson has been learned or that the held BBC/reading imports are active.
+- Actual service-worker-controlled offline reload preserves the usable Today guidance; restoring connectivity returns to Synced. Local original recording bytes and sizes match the actual private remote manifest via SHA256, with only pass/count metadata observed and no audio exported. The first immediate post-DOM-load visibility sample was too early; the bounded ready-state check passed while offline. No learner answer, completion or skill score was entered by the tester. Physical phones and a genuine save-on-one-device/resume-on-another journey remain unverified.
+- The previous inspection timeout terminated its REPL-launched browser, not the user's original Chrome. The replacement owner-assisted window runs in an independent process so a short inspection deadline cannot terminate its login session. The owner reauthenticated; do not repeat login while this window remains available. Ignored, noncredential evidence: `.work/owner-acceptance-20260922.json`.
+
+### Previous September21 implementation checkpoint — still valid where unchanged
 
 ### Controlled Japanese production gate — implemented, not publicly enabled
 
@@ -27,7 +36,7 @@
 
 - English: obtain all-device compatibility-update acknowledgment, enable the separately held BBC/graded-reading imports, and prove an actual recurring catalog reaches a new eligible authenticated Today assignment. Stored catalog counts or synthetic browser fixtures alone do not close this gate.
 - Japanese: controlled production-build gate is implemented and locally browser-verified above; remaining are its grouped release and legitimate owner-account AI/recording/sync acceptance. Do not expose the held switch as completed Japanese learning.
-- Owner/device evidence: actual owner login in an accessible isolated acceptance browser and Android/iPhone/desktop save→switch→resume remain unconfirmed. Existing original Chrome is not attachable; no account cookies, credentials or identity are extracted to bypass that boundary. The September21 all-device update question is awaiting a reply. Do unblocked implementation without repeatedly asking for learning-method choices or paid diagnostics.
+- Owner/device evidence: the owner desktop login, normal cloud restore, actual audio integrity and offline/reconnect checks now pass above. Android/iPhone/desktop save→switch→resume and the all-device compatibility-update acknowledgment remain open. Initial placement requires the learner's own answers, never agent-filled evidence. Actual paid English/Japanese generation remains unverified for the current release while account budgets are paused. No original Chrome cookies, credentials or identity were extracted. Do not repeat the passed login or unchanged full matrices.
 
 ### Current public release — cd9a422, delivered; recurring-job diagnosis
 
