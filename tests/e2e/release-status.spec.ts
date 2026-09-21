@@ -1,0 +1,32 @@
+import { test, expect } from '@playwright/test'
+
+test.use({ serviceWorkers: 'block' })
+test('release identity is visible; manual checks distinguish same, different and unknown without a reload', async ({ page, context }) => {
+  await page.goto('#/settings')
+  const current = page.getByTestId('current-release'), result = page.getByTestId('release-result')
+  const buildId = (await current.innerText()).trim()
+  expect(buildId).toMatch(/^(?:[a-f0-9]{7}|local)-[a-f0-9]{12}$/u)
+  await expect(result).toContainText('尚未联网核对')
+  await page.evaluate(() => { (window as unknown as { releaseDocumentMarker: string }).releaseDocumentMarker = 'keep-this-page' })
+  await page.getByRole('button', { name: '检查更新', exact: true }).click()
+  await expect(result).toContainText('核对一致')
+  await expect(page.getByTestId('published-release')).toHaveText(buildId)
+  await page.route('**/release.json?check=*', route => route.fulfill({ json: {
+    schema: 1, buildId: 'bbbbbbb-0123456789ab', revision: 'b'.repeat(40), dirty: false, builtAt: '2026-09-22T00:00:00.000Z',
+  } }))
+  await page.getByRole('button', { name: '检查更新', exact: true }).click()
+  await expect(result).toContainText('发现不同的发布版本')
+  expect(await page.evaluate(() => (window as unknown as { releaseDocumentMarker: string }).releaseDocumentMarker)).toBe('keep-this-page')
+  await context.setOffline(true)
+  await page.getByRole('button', { name: '检查更新', exact: true }).click()
+  await expect(result).toContainText('当前离线，无法确认')
+  await expect(page.getByTestId('published-release')).toHaveCount(0)
+  await context.setOffline(false)
+  await page.unroute('**/release.json?check=*')
+  await page.route('**/release.json?check=*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<html>stale fallback</html>' }))
+  await page.getByRole('button', { name: '检查更新', exact: true }).click()
+  await expect(result).toContainText('暂时无法确认')
+  await expect(page.getByTestId('published-release')).toHaveCount(0)
+  expect(await page.evaluate(() => (window as unknown as { releaseDocumentMarker: string }).releaseDocumentMarker)).toBe('keep-this-page')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true)
+})

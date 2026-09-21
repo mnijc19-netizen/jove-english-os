@@ -10,6 +10,7 @@ import { useRequest } from "../composables/useRequest";
 import Icon from "../components/Icon.vue";
 import CloudAccount from "../components/CloudAccount.vue";
 import AccountUsage from "../components/AccountUsage.vue";
+import ReleaseStatus from "../components/ReleaseStatus.vue";
 import { useCloud } from "../stores/cloud";
 import { useJapaneseSpace } from "../stores/japanese-space";
 import { resetDeviceCacheAndKey } from "../sync/local-change";
@@ -235,6 +236,7 @@ onMounted(storageStatus);
       Cancel current request
     </button>
     <CloudAccount />
+    <ReleaseStatus />
     <section class="settings-section">
       <div class="settings-description">
         <span class="small-icon"><Icon name="sparkle" /></span>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { registerSW } from "virtual:pwa-register";
 import { useApp } from "./stores/app";
@@ -7,6 +7,7 @@ import Icon from "./components/Icon.vue";
 import { useCloud } from "./stores/cloud";
 import { useJapaneseSpace } from "./stores/japanese-space";
 import { japaneseEnabled, japaneseDevelopment } from "./release-flags";
+import { updateControls } from "./release";
 const cloud = useCloud();
 const japanese = japaneseEnabled ? useJapaneseSpace() : null;
 const app = useApp(),
@@ -79,6 +80,7 @@ async function applyUpdate() {
     app.notice = "The update could not be applied. Save your practice, then try again or refresh.";
   }
 }
+provide(updateControls, { available: updateAvailable, applying: applyingUpdate, apply: applyUpdate });
 watch(
   () => route.path,
   () => {

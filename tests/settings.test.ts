@@ -105,6 +105,7 @@ beforeAll(() => {
     '../components/Icon.vue': { default: { setup: () => () => Vue.h('i') } },
     '../components/CloudAccount.vue': { default: { setup: () => () => Vue.h('section', 'Learning account') } },
     '../components/AccountUsage.vue': { default: { setup: () => () => Vue.h('section', 'Account service preferences') } },
+    '../components/ReleaseStatus.vue': { default: { setup: () => () => Vue.h('section', 'Website release status') } },
   }
   const exports: { default?: Vue.Component } = {}
   new Function('require', 'exports', code)((id: string) => {

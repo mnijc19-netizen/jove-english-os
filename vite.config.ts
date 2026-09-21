@@ -2,6 +2,7 @@ import { defineConfig, loadEnv } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { VitePWA } from "vite-plugin-pwa";
 import { assertCloudBuildConfig, withCloudCsp } from "./src/build/cloud-csp";
+import { releaseMetadata, releaseManifest } from "./src/build/release";
 
 export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_SUPABASE_');
@@ -9,10 +10,13 @@ export default defineConfig(({ command, mode }) => {
   const accountKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? env.VITE_SUPABASE_PUBLISHABLE_KEY ?? '';
   const localTest = command === 'serve' || process.env.JOVE_LOCAL_CLOUD_TEST === '1';
   assertCloudBuildConfig(accountUrl, accountKey, process.env.JOVE_REQUIRE_CLOUD === '1', localTest);
+  const release = releaseMetadata();
   return {
   base: "/jove-english-os/",
+  define: { __JOVE_RELEASE__: JSON.stringify(release) },
   plugins: [
     vue(),
+    releaseManifest(release),
     { name: 'jove-account-csp', transformIndexHtml: (html) => withCloudCsp(html, accountUrl, localTest) },
     VitePWA({
       registerType: "prompt",

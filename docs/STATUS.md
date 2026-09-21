@@ -2,6 +2,13 @@
 
 ## Latest checkpoint — September22 local
 
+### Visible release identity — implemented locally, independent review pending
+
+- Owner clarification: being able to sign in or seeing no update prompt does not establish an installed version. Added a Settings panel showing the embedded build ID/time, the current site's published ID and a timestamped comparison. Each build emits the same public identity into JavaScript and `release.json`; uncommitted/unversioned builds are explicitly labelled. No environment dump, credential, device telemetry or learning data is included.
+- Manual checking makes one bounded, credential-free, cache-bypassing manifest request and checks the existing service worker without activating/reloading it. JSON is excluded from offline precaching. Offline, malformed responses and network/worker deadlines report inability to confirm, clear prior comparison state and never masquerade as latest. Explicit updating reuses the existing App consent/reload/recovery path; account state, drafts and data schemas are unchanged.
+-30 targeted release/Settings/gate tests, typecheck/scoped lint/build and305-file source/build pattern scan pass. Actual built desktop/mobile Chromium and mobile WebKit version/gate journeys pass6/6; existing real-worker desktop/mobile update/recording-preservation journeys pass6/6 without retries. The mobile version panel was visually inspected; no overflow. These synthetic checks are not physical-phone evidence. No paid API, public deployment, account-budget change or source-import/Japanese flag activation occurred.
+- Independent reviewer01a0c51a-8baf-77c3-8e2e-965105ee6f4c could not start its review because the review tool reported a usage limit (retry time05:54). No approval is claimed, no alternative paid/model retry was made and no unchanged full CI was queued. This candidate remains unpublished pending that review and the grouped release gates; public frontend is stillcd9a422.
+
 ### Actual owner desktop acceptance — login, catalog delivery and recovery verified
 
 - The owner signed in manually in a dedicated isolated browser on the existing public release `index-DuZGU8Fd.js`. Actual UI shows signed-in/synced and successful account-AI connection verification. Authenticated normal synchronization and usage/manifest requests return200. Credentials remain in that browser; no token/profile export or permission relaxation was used. Connection verification is not paid-generation acceptance; budgets/usage holds were not changed and no paid call was made.
@@ -34,7 +41,7 @@
 
 ### Remaining full-delivery gates
 
-- English: obtain all-device compatibility-update acknowledgment, enable the separately held BBC/graded-reading imports, and prove an actual recurring catalog reaches a new eligible authenticated Today assignment. Stored catalog counts or synthetic browser fixtures alone do not close this gate.
+- English: establish compatible installed versions on the owner's devices using version evidence, not the ability to log in or a guessed update acknowledgment; then enable the separately held BBC/graded-reading imports and prove an actual recurring catalog reaches a new eligible authenticated Today assignment. Stored catalog counts or synthetic browser fixtures alone do not close this gate.
 - Japanese: controlled production-build gate is implemented and locally browser-verified above; remaining are its grouped release and legitimate owner-account AI/recording/sync acceptance. Do not expose the held switch as completed Japanese learning.
 - Owner/device evidence: the owner desktop login, normal cloud restore, actual audio integrity and offline/reconnect checks now pass above. Android/iPhone/desktop save→switch→resume and the all-device compatibility-update acknowledgment remain open. Initial placement requires the learner's own answers, never agent-filled evidence. Actual paid English/Japanese generation remains unverified for the current release while account budgets are paused. No original Chrome cookies, credentials or identity were extracted. Do not repeat the passed login or unchanged full matrices.
 
