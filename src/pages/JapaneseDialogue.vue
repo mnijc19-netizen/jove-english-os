@@ -12,6 +12,7 @@ import { useRequest } from '../composables/useRequest'
 import type { AudioAsset } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
 import SavedRecording from '../components/SavedRecording.vue'
+import CoachingFeedback from '../components/CoachingFeedback.vue'
 import { japaneseDevelopment } from '../release-flags'
 
 const route = useRoute(), app = useApp(), cloud = useCloud(), space = useJapaneseSpace()
@@ -20,14 +21,13 @@ const provider = japaneseProvider({ database, english, settings: () => app.setti
   useAccount: () => cloud.configured && app.providerMode !== 'byok', assertCurrent: learning.checkOwner })
 const state = shallowRef<Awaited<ReturnType<typeof dialogue.read>>>(), audio = shallowRef<AudioAsset[]>([])
 const answer = reactive({ text: '', audioId: '', confirmed: false }), comparison = ref('')
-const dirty = ref(false), saving = ref(false), capture = ref(false), notice = ref(''), saveError = ref(''), retained = ref(''), showExample = ref(false)
+const dirty = ref(false), saving = ref(false), capture = ref(false), notice = ref(''), saveError = ref(''), retained = ref('')
 const { busy, error, run, cancel } = useRequest()
 const lesson = computed(() => japaneseLessons.find(item => item.id === state.value?.session.materialId))
 const draft = computed(() => state.value?.draft), pending = computed(() => draft.value?.turns.find(item => !item.reply))
 const repair = computed(() => draft.value?.turns.length === 3 && !pending.value)
 const locked = computed(() => busy.value || saving.value || capture.value)
 const canAI = computed(() => app.keySet && app.online)
-const correction = computed(() => draft.value?.feedback?.errors[0])
 let disposed = false, generation = 0, timer: ReturnType<typeof setTimeout> | undefined, saves: Promise<void> = Promise.resolve()
 function restore(value: Awaited<ReturnType<typeof dialogue.read>>) {
   state.value = value; Object.assign(answer, value.draft.answer); comparison.value = value.draft.comparison; dirty.value = false
@@ -162,7 +162,7 @@ onBeforeUnmount(() => {
       <template v-else>
         <h3>现在只改一处，然后完整重说</h3>
         <button v-if="!draft.feedback" class="button secondary" :disabled="locked || !canAI" @click="summarize">{{ draft.feedbackAttempts >= 2 ? '恢复已收到的反馈（不重新调用）' : draft.feedbackAttempts ? '恢复／重试文字反馈（可能再次收费）' : '请 AI 总结三轮表达（可能收费）' }}</button>
-        <template v-if="draft.feedback"><p>{{ draft.feedback.summary }}</p><p v-if="correction">先想一想：{{ correction.hint }}</p><button v-if="correction" class="text-button" @click="showExample = !showExample">{{ showExample ? '收起参考' : '想过后，查看参考改法' }}</button><div v-if="showExample && correction"><p lang="ja">{{ correction.corrected }}</p><p>{{ correction.explanation }}</p></div><p>{{ draft.feedback.nextPrompt }}</p></template>
+        <CoachingFeedback v-if="draft.feedback" :evaluation="draft.feedback" :answer="draft.turns.map(turn => turn.text).join('\n')" language="ja" />
         <details v-else><summary>不用 AI：对照本站表达与中文提示</summary><p lang="ja">{{ lesson.phrase }}</p><p>{{ lesson.grammarZh }}</p><p>{{ lesson.soundZh }}</p></details>
         <label>准备调整的一处表达<textarea v-model="comparison" maxlength="2000" rows="2" :disabled="locked" @input="changed" /></label>
         <Recorder :key="state.session.id + ':retry'" :workspace="recorderWorkspace" :saved-audio-id="draft.retryAudioId" :disabled="busy || saving" label="日语对话：换情境后完整重说" @active="capture = $event" />

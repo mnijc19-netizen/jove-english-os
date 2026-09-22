@@ -127,7 +127,7 @@ function mountPage(name: 'Listen' | 'Speak', evaluate: Record<string, unknown> =
       (practice.usePronunciationSession as (...args: unknown[]) => unknown)(scope, id, options.legacyAcoustic === false ? enabled : true) }, '../speech/events': { ObservedPracticeClock },
     '../cloud/content': { prepareContentAudio: prepareAudio, contentAudioIsTransient: (blob: Blob) => options.transientAudio?.has(blob) ?? false },
   }
-  for (const component of ['AudioPlayer', 'SavedRecording', 'Recorder', 'Icon', 'PronunciationPractice']) dependencies[`../components/${component}.vue`] = { default: Vue.defineComponent({ render: () => Vue.h('div') }) }
+  for (const component of ['AudioPlayer', 'SavedRecording', 'Recorder', 'Icon', 'PronunciationPractice', 'CoachingFeedback']) dependencies[`../components/${component}.vue`] = { default: Vue.defineComponent({ render: () => Vue.h('div') }) }
   dependencies['../components/AudioPlayer.vue'] = { default: Vue.defineComponent({ props: ['src', 'text', 'startSeconds', 'endSeconds', 'synthetic', 'label'],
     setup: (props, { expose }) => { expose({ stop: vi.fn(), toggle: vi.fn() }); return () => Vue.h('div', { 'data-player': true, 'data-src': props.src, 'data-text': props.text, 'data-start': props.startSeconds, 'data-end': props.endSeconds, 'data-synthetic': props.synthetic }, props.label) } }) }
   const filename = fileURLToPath(new URL(`../src/pages/${name}.vue`, import.meta.url))

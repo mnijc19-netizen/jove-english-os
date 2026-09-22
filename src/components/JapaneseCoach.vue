@@ -7,6 +7,7 @@ import { japaneseProvider } from '../ai/workspace-provider'
 import { useApp } from '../stores/app'
 import { useCloud } from '../stores/cloud'
 import { useRequest } from '../composables/useRequest'
+import CoachingFeedback from './CoachingFeedback.vue'
 
 const props = defineProps<{ database: JoveDatabase; sessionId: string; audioId: string; reference: string; target: string; checkOwner: () => Promise<void> }>()
 const emit = defineEmits<{ active: [value: boolean] }>()
@@ -16,11 +17,10 @@ const provider = japaneseProvider({ database: props.database, english, settings:
 // A keyed component binds to a single practice; no route-dependent DB/session pointer.
 const coach = createJapaneseCoach(props.database, props.sessionId, props.checkOwner, provider)
 const draft = shallowRef<Awaited<ReturnType<typeof coach.open>>>(), text = ref(''), confirmed = ref(false), dirty = ref(false), saving = ref(false)
-const savedNotice = ref(''), saveError = ref(''), showExample = ref(false)
+const savedNotice = ref(''), saveError = ref('')
 const retainedText = ref('')
 const { busy, error, run, cancel } = useRequest()
 const selected = computed(() => draft.value?.feedback.find(entry => entry.input === text.value))
-const correction = computed(() => selected.value?.result.errors[0])
 const active = computed(() => busy.value || saving.value || dirty.value)
 watch(active, value => emit('active', value), { immediate: true, flush: 'sync' })
 let timer: ReturnType<typeof setTimeout> | undefined, disposed = false, saves: Promise<void> = Promise.resolve()
@@ -41,7 +41,7 @@ function flush(): Promise<void> {
   return saves
 }
 function schedule() { clearTimeout(timer); timer = setTimeout(() => { void flush().catch(() => {}) }, 500) }
-function changed() { dirty.value = true; showExample.value = false; schedule() }
+function changed() { dirty.value = true; schedule() }
 async function transcribe() {
   await run(async signal => {
     await flush()
@@ -66,7 +66,6 @@ async function feedback() {
     const stored = await coach.feedback(props.reference, props.target, signal, { revision: draft.value.revision, text: text.value, confirmed: confirmed.value })
     signal.throwIfAborted(); if (disposed) return
     draft.value = stored
-    showExample.value = false
     const notices = provider.takeNotices()
     savedNotice.value = notices.some(notice => notice.kind === 'result-cache-unconfirmed')
       ? '已收到反馈，服务端缓存尚未确认。请保留本页；再次点击会先恢复已收到的结果。' : '反馈已保存。先改一个地方，再完整重说。'
@@ -80,7 +79,7 @@ async function reloadSaved() {
     const stored = await coach.open()
     signal.throwIfAborted(); if (disposed) return
     if (stored.text !== text.value) retainedText.value = text.value
-    draft.value = stored; text.value = stored.text; confirmed.value = stored.confirmed; dirty.value = false; saveError.value = ''; showExample.value = false
+    draft.value = stored; text.value = stored.text; confirmed.value = stored.confirmed; dirty.value = false; saveError.value = ''
   })
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' } }
@@ -106,14 +105,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer); window.removeEvent
         <button v-if="busy" class="text-button" @click="cancel">停止等待，保留回答</button>
       </div>
       <div v-if="selected" class="coach-feedback">
-        <p><strong>本次文字反馈：</strong>{{ selected.result.summary }}</p>
-        <template v-if="correction">
-          <p>先试着改一处：{{ correction.hint }}</p>
-          <button class="text-button" @click="showExample = !showExample">{{ showExample ? '收起示例' : '想过后，查看示例与解释' }}</button>
-          <div v-if="showExample"><p lang="ja">{{ correction.corrected }}</p><p>{{ correction.explanation }}</p></div>
-        </template>
-        <p v-else>{{ selected.result.strengths[0] || '保留自然的表达，再换一个情境试试。' }}</p>
-        <p>{{ selected.result.nextPrompt }}</p>
+        <CoachingFeedback :evaluation="selected.result" :answer="selected.input" language="ja" />
         <p class="help-text">针对上面保存的回答给出；不要求逐字照抄，意思相同且合适的表达也可以。</p>
       </div>
     </template>

@@ -14,6 +14,7 @@ import PronunciationPractice from "../components/PronunciationPractice.vue";
 import { usePronunciationSession } from "../speech/practice";
 import { comparableObservation, assessmentEvaluator, planLongitudinal } from "../domain/longitudinal";
 import Icon from "../components/Icon.vue";
+import CoachingFeedback from "../components/CoachingFeedback.vue";
 const app = useApp(),
   route = useRoute(),
   mode = ref(String(route.query.mode || "guided")),
@@ -614,14 +615,7 @@ onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
           <div v-else class="evaluation">
             <p class="eyebrow">YOUR CONVERSATION REFLECTION</p>
             <h3>Keep the message. Refine the expression.</h3>
-            <p>{{ evaluation.summary }}</p>
-            <p
-              v-for="strength in evaluation.strengths"
-              :key="strength"
-              class="success-note"
-            >
-              <Icon name="check" :size="16" />{{ strength }}
-            </p>
+            <CoachingFeedback :evaluation="evaluation" :answer="conversation?.messages.filter(message => message.role === 'user').map(message => message.text).join('\n') || ''" language="en" />
             <div v-if="evaluation.errors.length">
               <h3>
                 Focus on {{ Math.min(3, evaluation.errors.length) }} things
@@ -630,7 +624,6 @@ onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
                 Practice the repairs <Icon name="refresh" :size="16" />
               </button>
             </div>
-            <p>{{ evaluation.nextPrompt }}</p>
             <button class="button primary" @click="start">
               Try a new conversation
             </button>
@@ -706,12 +699,12 @@ onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
         </button>
       </div>
       <div v-for="err in app.errors" :key="err.id" class="panel repair-card">
-        <span class="eyebrow">{{ err.category }} · {{ err.pattern }}</span>
+        <span class="eyebrow">{{ err.category }}</span>
         <h2>Try the whole sentence again.</h2>
         <blockquote>{{ err.original }}</blockquote>
-        <p class="hint">{{ err.hint }}</p>
+        <p class="hint">先保持原意，尝试完整改说一次；需要时再展开提示与参考。</p>
         <Recorder
-          :label="'Repair: ' + err.pattern"
+          :label="'Repair: ' + err.category"
           :saved-audio-id="repairAudio[err.id]"
           :disabled="busy"
           @active="recordingStates[err.id] = $event"
@@ -736,7 +729,8 @@ onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
           {{ repairResults[err.id] }}
         </p>
         <details>
-          <summary>Reveal a model answer</summary>
+          <summary>查看 AI 提示与参考表达</summary>
+          <p>{{ err.hint }}</p>
           <p>{{ err.corrected }}</p>
           <p>{{ err.explanation }}</p>
         </details>

@@ -6,6 +6,8 @@ Owner amendment, 2026-09-13: external publisher playback/links are preferred ove
 
 Read `docs/PRODUCT_SPEC.md`, `docs/ARCHITECTURE.md`, `docs/LEARNING_SCIENCE.md`, `docs/ACCEPTANCE.md`, and `docs/DECISIONS.md` before modifying this project. Preserve requirements through context compaction. Track actual remaining work in `docs/STATUS.md`.
 
+Owner amendment, 2026-09-23: Android physical-device acceptance is no longer required for this delivery. Retain existing Android/responsive compatibility without deleting working support; focus real-device acceptance on desktop and iPhone. The owner supplied an iPhone screenshot showing build `9520397-3d524bd20861`, independently matched to the public manifest. This proves that installed version, not complete save/switch/resume continuity. The owner also approved a correction-test round capped at0.40USD while retaining the existing3USD account monthly limit; preserve historical holds and avoid duplicate paid calls.
+
 This is a personal adaptive English trainer. Real-world listening and spontaneous speaking are the north star. Deliver the complete input → retrieval → output → repair → spaced review → transfer → evidence → adaptive plan loop. Do not replace learning behavior with decorative UI or invented progress.
 
 Quality priority: the owner's root selection is GPT-6 Astra Ultra. Project `.codex/config.toml` overrides the older global default. Subagents inherit Astra/Ultra; never import unrelated Luna/Terra/Sol cost-routing rules. Independent review is required. Do not change global settings or other projects.
