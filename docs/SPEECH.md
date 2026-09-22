@@ -1,4 +1,16 @@
-# Acoustic speech boundary
+# Speech practice and optional acoustic adapter
+
+## Current delivery contract — owner amendment takes precedence
+
+The September13 amendment in [FINAL_UPGRADE.md](FINAL_UPGRADE.md#owner-amendment--2026-09-13-takes-precedence) supersedes conflicting delivery statements in the historical adapter notes below. Automatic pronunciation/prosody scoring, Azure acoustic-provider provisioning and bulk hosted reference audio are **not mandatory release gates**. Do not restart the paused paid content-audio pipeline or purchase/configure an acoustic service to satisfy those obsolete requirements. Existing optional adapter code and its safety boundaries remain intact.
+
+- Primary listening/reference practice uses screened human speech at the publisher. English keeps General American as its stable speaking target; Japanese uses its own native-language course and kana/sound references. An external-link open is not listening/comprehension evidence, and publisher media is not promised offline.
+- Required practice remains listen, record/save, replay, retry, language feedback where available, and delayed/new-context practice. Preserve original recordings before remote calls. STT supplies editable text, not pronunciation, pitch or fluency scores; basic learning and saved work must remain usable when AI is unavailable.
+- Synthetic speech is supplementary and must retain its label. A supported model/voice name, successful generation, decodable waveform or accurate STT round trip does not establish naturalness, accent quality or human-reference approval. Never replace unavailable authentic audio with an unlabelled synthetic voice, or Japanese speech with an English voice.
+- The current Japanese pages link to publisher human dialogue and kana demonstrations. Japanese TTS configuration is not a prerequisite for those paths and has not been accepted by an English synthesis test. Required Japanese dialogue/feedback, recording, review and cross-device acceptance remain separate; this amendment does not declare them complete.
+- Current implementation and real-provider evidence are tracked in [STATUS.md](STATUS.md). The detailed historical contracts below apply only if their optional acoustic/hosted-audio features are used; their old completion statements must not expand the owner-approved scope.
+
+## Historical optional acoustic adapter boundary
 
 Implemented 2026-09-08 within `src/speech/**`, `src/server/speech.ts`, `src/components/PronunciationPractice.vue`, Listen/Speak, the speech/component/handler tests and migration/test 005. Existing framework and shared gateway/runtime/provider/types/database definitions remain main-owned. This is scripted short-sentence practice, not a spontaneous conversation assessor. No production Speech secret, deployment or paid provider call was performed by this worker.
 

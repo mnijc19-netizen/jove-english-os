@@ -2,6 +2,10 @@
 
 ## Latest checkpoint — September22 local
 
+### Speech scope clarification — no new runtime or paid test
+
+- `SPEECH.md` still presented historical mandatory acoustic/hosted-reference gates without the owner's superseding September13 amendment. Added the current contract at its entry point: publisher human listening, saved recording/replay/retry and honest language feedback remain required; automatic acoustic scoring, Azure provisioning and bulk hosted references do not. Existing optional adapters and safety checks are unchanged. Current Japanese pages already use native publisher dialogue/kana links; English synthesis does not certify Japanese speech, and optional Japanese TTS is not a reason to block those external-reference paths. This documentation alignment adds no feature acceptance, changes no release gate for core learning/sync, and triggers no paid request or unchanged full matrix.
+
 ### Bounded live speech checks — functional success, limits retained
 
 - One English transcription through the normal authenticated provider succeeded on `deepgram/nova-3`: the existing public5.20-second synthetic cafe diagnostic matches its reference words,6731ms/0.0003729354USD. One explicit Japanese gateway transcription also succeeded: the public-domain0.83-second「日本語」recording matches,5110ms/0.0000594833USD. The Japanese fixture is [PandaLimitedExpress's PD-self recording](https://commons.wikimedia.org/wiki/File:Ja-nihongo.ogg), with original SHA1 `fb80d7191db55fc689ec3efd83381cd49b8b0a11` verified before normalization. This single-word check is not a connected-speech benchmark or acceptance of the still-disabled Japanese UI. No owner recording or learner evidence was submitted.
