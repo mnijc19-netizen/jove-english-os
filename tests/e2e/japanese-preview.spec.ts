@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 
-// Explicit development-only acceptance; production intentionally has no /ja
-// route until sync/review/AI integration is ready. No live owner/provider calls.
+// Source-module fixtures require the development server. Built production
+// routing is covered by japanese-release.spec.ts. No live owner/provider calls.
 test.skip(process.env.JOVE_JAPANESE_PREVIEW !== '1', 'Japanese workspace is a local development candidate')
 test.use({ serviceWorkers: 'block' })
 
@@ -484,13 +484,17 @@ test('Japanese three-turn dialogue resumes a failed reply, retains turns and fin
   await page.getByRole('button', { name: '发送并继续交流（AI，可能收费）' }).click()
   await expect(page.getByRole('heading', { name: '现在只改一处，然后完整重说' })).toBeVisible()
   await page.getByRole('button', { name: '请 AI 总结三轮表达（可能收费）' }).click()
-  await expect(page.getByText('先想一想：主题后面少了什么？')).toBeVisible()
+  const feedbackHelp = page.getByRole('button', { name: '查看 AI 提示与参考表达', exact: true })
+  await expect(feedbackHelp).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByText('主题后面少了什么？', { exact: true })).toHaveCount(0)
   await expect(page.getByText('私は学生です。', { exact: true })).toHaveCount(0)
-  await page.getByRole('button', { name: '想过后，查看参考改法' }).click()
+  await feedbackHelp.click()
   await expect(page.getByText('私は学生です。', { exact: true })).toBeVisible()
   const used = calls
   await page.reload()
-  await expect(page.getByText('三轮都回应了问题，先调整助词。')).toBeVisible(); expect(calls).toBe(used)
+  await expect(feedbackHelp).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByText('三轮都回应了问题，先调整助词。')).toHaveCount(0)
+  expect(calls).toBe(used)
   await page.screenshot({ path: `test-results/ja-dialogue-${test.info().project.name}.png`, fullPage: true })
   await page.getByRole('textbox', { name: '准备调整的一处表达' }).fill('加上主题助词，换成朋友的身份介绍。')
   await page.getByRole('button', { name: 'Record response', exact: true }).click()
@@ -510,7 +514,7 @@ test('Japanese three-turn dialogue resumes a failed reply, retains turns and fin
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
-test('Japanese AI feedback retains checked input through failure, shows a hint first and reloads without another charge', async ({ page }) => {
+test('Japanese AI feedback retains checked input through failure, reveals help on request and reloads without another charge', async ({ page }) => {
   let calls = 0
   const evaluation = { summary: '意思清楚，先改主题助词。', strengths: ['表达身份'], errors: [{ category: 'grammar', original: '私学生です', corrected: '私は学生です。', hint: '想想用哪个助词标记话题。', explanation: 'は标记这里的话题。' }],
     comprehension: null, accuracy: 0.5, fluency: null, successfulChunks: [], nextPrompt: '换成朋友的身份，完整重说一次。' }
@@ -547,12 +551,16 @@ test('Japanese AI feedback retains checked input through failure, shows a hint f
   await page.reload()
   await expect(answer).toHaveValue('私学生です')
   await page.getByRole('button', { name: '请 AI 帮我改进（可能收费）' }).click()
-  await expect(page.getByText('先试着改一处：想想用哪个助词标记话题。', { exact: true })).toBeVisible()
+  const help = page.getByRole('button', { name: '查看 AI 提示与参考表达', exact: true })
+  await expect(help).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByText(evaluation.summary, { exact: true })).toHaveCount(0)
+  await expect(page.getByText(evaluation.errors[0]!.hint, { exact: true })).toHaveCount(0)
   await expect(page.getByText('私は学生です。', { exact: true })).toHaveCount(0)
-  await page.getByRole('button', { name: '想过后，查看示例与解释' }).click()
+  await help.click()
   await expect(page.getByText('私は学生です。', { exact: true })).toBeVisible()
   await page.reload()
-  await expect(page.getByText('先试着改一处：想想用哪个助词标记话题。', { exact: true })).toBeVisible()
+  await expect(help).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByText('私は学生です。', { exact: true })).toHaveCount(0)
   await page.getByRole('button', { name: '查看已保存的反馈' }).click()
   await expect(page.getByRole('button', { name: '查看已保存的反馈' })).toBeEnabled()
   expect(calls).toBe(2)

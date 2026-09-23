@@ -26,6 +26,9 @@ test('signed-in Library loads and retries the directory before initial learning 
   const continuing = { ...catalog, sourceId: 'bbc-six-minute', entries: [{ id: 'p0abcdef', title: 'Everyday ideas',
     url: 'https://www.bbc.co.uk/learningenglish/english/features/6-minute-english_2026/ep-260917',
     publishedAt: Date.now() - 86400_000, duration: 381 }] }
+  const reading = { ...catalog, sourceId: 'en-bc-reading', entries: ['A1', 'A2', 'B1', 'B2', 'C1'].map(level => ({
+    id: 'fixture-reader', level, title: 'Fixture reader',
+    url: `https://learnenglish.britishcouncil.org/free-resources/reading/${level.toLowerCase()}/fixture-reader` })) }
   let attempts = 0, cursor = 0
   const unexpected: string[] = []
   await page.route('https://*.supabase.co/**', async route => {
@@ -43,8 +46,14 @@ test('signed-in Library loads and retries the directory before initial learning 
     if (path === '/functions/v1/content' && request.postDataJSON().action === 'external-catalog') {
       if (request.postDataJSON().sourceId === 'bbc-six-minute') return json({ catalog: continuing })
       if (request.postDataJSON().sourceId === 'voa-level2') return json({ catalog: intermediate })
-      attempts++
-      return attempts === 1 ? json({ error: 'fixture-unavailable' }, 503) : json({ catalog })
+      if (request.postDataJSON().sourceId === 'en-bc-reading') return json({ catalog: reading })
+      // VOA1 retains the original API shape, which omits the source selector.
+      if (request.postDataJSON().sourceId === undefined || request.postDataJSON().sourceId === 'voa-level1') {
+        attempts++
+        return attempts === 1 ? json({ error: 'fixture-unavailable' }, 503) : json({ catalog })
+      }
+      unexpected.push(`external-catalog:${String(request.postDataJSON().sourceId)}`)
+      return json({ error: 'unexpected-fixture-source' }, 500)
     }
     unexpected.push(path); return json({ error: 'unexpected-fixture-request' }, 500)
   })
@@ -58,6 +67,8 @@ test('signed-in Library loads and retries the directory before initial learning 
   await expect(status).toContainText('Course directory loaded.')
   await expect(page.getByRole('heading', { name: 'Everyday English · Lesson 2', exact: true })).toBeVisible()
   expect((await records(page, 'materials')).filter(m => String(m.id).startsWith('external-voa-'))).toHaveLength(82)
+  expect((await records(page, 'materials')).filter(m => String(m.id).startsWith('en-bc-')))
+    .toHaveLength(process.env.VITE_JOVE_GRADED_READING === '1' ? 5 : 0)
   await page.getByRole('textbox', { name: 'Search materials' }).fill('Everyday English · Intermediate · Lesson 1')
   await expect(page.getByRole('heading', { name: 'Everyday English · Intermediate · Lesson 1', exact: true })).toBeVisible()
   await page.reload()

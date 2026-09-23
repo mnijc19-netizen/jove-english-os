@@ -1,5 +1,11 @@
 # Current status
 
+## Latest checkpoint — September24 local
+
+- Candidate f0f24ae workflow35837094376 passed lint/types/full unit, cold SQL, real local Auth/Storage/content/Deno, build/security and multi-profile migration/offline recovery, then stopped before deployment on the catalog browser fixture. The enabled graded-reading request was incorrectly served a VOA-shaped fixture; no production data or provider failed. The public site remains9520397 until a corrected release actually deploys.
+- The fixture now supplies all five British Council reading levels, accepts the original omitted VOA1 selector, rejects unknown explicit sources, and keeps the intentional first-source failure/retry assertion. Independent review caught the omitted-selector compatibility issue before release and approved its correction. The cloud-configured ON build passes this exact journey on desktop Chromium and mobile WebKit2/2. The remaining built desktop suite passes61, with12 DEV-source fixtures intentionally skipped. The two affected DEV Japanese dialogue/coaching journeys were updated for explicit-help disclosure and pass2/2, preserving failure recovery, recording, usage and language-isolation assertions. Scoped lint and diff checks pass. No unchanged local SQL/full-unit matrix or paid call was repeated.
+- README now describes the actual account/external-course model and the outstanding multilingual/device boundary rather than the obsolete public-V1/no-account state. Android physical acceptance remains waived; desktop/iPhone saved-work continuity, actual enabled imports/new eligible Today delivery and Japanese owner-page acceptance remain open. No backend, model, budget, history or credential configuration changed in this correction.
+
 ## Latest checkpoint — September23 local
 
 - Owner evidence/authority changed: supplied physical-iPhone screenshot shows installed `9520397-3d524bd20861`, independently matched to the current public manifest. Desktop was already verified; Android physical acceptance is now explicitly waived, while responsive support remains. The owner approved<=0.40USD for correction tests with the3USD monthly cap retained. These amendments are recorded in `AGENTS.md` and `FINAL_UPGRADE.md`; do not ask again for Android or the already-supplied iPhone version.

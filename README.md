@@ -1,34 +1,34 @@
 # Jove Language OS
 
-Formerly Jove English OS. The display name is evolving; the repository, public URL, PWA scope and existing English learning data stay unchanged. English is currently available; Japanese is approved future work, not an enabled course yet. The current objective and ordered acceptance gates are in `docs/FINAL_UPGRADE.md`.
+Formerly Jove English OS. The repository, public URL, PWA scope and existing English learning data stay unchanged. English and Japanese share infrastructure, but keep their curricula, learner evidence and reviews separate. Public activation and current acceptance evidence are tracked in `docs/STATUS.md`; the approved objective is in `docs/FINAL_UPGRADE.md`.
 
-A personal, local-first English trainer focused on natural listening and spontaneous speaking. It connects input, comprehension, chunks, retrieval, conversation, correction, delayed review and new-context transfer. Learning estimates carry evidence; completing a page never establishes mastery.
+A personal, local-first language trainer for a native Chinese speaker, focused on natural listening and spontaneous speaking. It connects input, comprehension, chunks, retrieval, conversation, correction, delayed review and new-context transfer. Learning estimates carry evidence; completing a page never establishes mastery.
 
 ## Start learning
 
 Website: [Jove Language OS](https://mnijc19-netizen.github.io/jove-english-os/). Release verification is recorded in `docs/STATUS.md`.
 
-**Release boundary:** the final-upgrade worktree is not yet production-accepted. The public website still serves the accepted V1 runtime. Account synchronization, automated authentic content and acoustic practice described below must not be treated as live until the exact release and production journeys are recorded in `docs/STATUS.md`.
+**Release boundary:** account-backed English, scheduled external-course directories and bounded live AI calls have production evidence. Full multilingual/device acceptance is not yet complete; consult `docs/STATUS.md` for the exact deployed build and outstanding checks. Automatic acoustic scoring and bulk hosted course audio are not required. Desktop and iPhone are the current physical-device acceptance targets; existing Android compatibility remains, without a mandatory Android-device gate.
 
-### Account-enabled first use (release acceptance pending)
+### Account-enabled first use
 
 1. Open **Settings → Learning account** on each device and use the same owner's email sign-in code. Registration is not public. Normal AI/Speech credentials are configured once on the backend, never separately on each device.
 2. First binding journals and merges existing local work; successful synchronization does not delete the local copy. Wait for **Synced** before expecting another device to have the latest work. Offline work remains local until reconnect; selected recording uploads can take longer than text records.
 3. Open **Today** and start the proposed session. Time, energy, goals and interests remain yours; material, practice order and reviews are the system's responsibility. **Library** import is optional, not the normal course-supply requirement.
-4. Initial offline use needs the app shell and audio to finish downloading. Only actually cached material/recordings are available offline; AI analysis requires a connection. Uncached verified clips can play online with an explicit not-saved-offline notice.
+4. Primary courses play on the publisher's site; return to this app for guided recall, expression, saved recordings and review. Opening a link does not complete a lesson. Publisher playback and AI need a connection; only actually cached practice and recordings are available offline.
 5. Keep important original recordings separately if needed. Cloud retention is bounded, not an unlimited archive. Account budgets and unknown-cost holds appear separately in Settings; zero budget stops new paid requests, not local practice.
 
-### Current public V1 / no-account fallback
+### Local practice and advanced no-account fallback
 
 1. Open the deployed site and choose **Find my starting point**. No account or API key is needed for the bundled practice.
-2. Complete the short baseline or skip unobserved speech. Choose 45, 90 or 150 minutes on **Today**, then follow the practice path.
+2. Complete the short baseline or skip unobserved speech. Set the time and energy you have on **Today**, then follow its proposed practice path; you do not need to select a curriculum or plan each modality.
 3. Listen before revealing the transcript. Save useful chunks, express your own meaning, and return when separate review cards are due.
-4. For personalized AI, open **Settings**, enter a dedicated limited OpenRouter key, test the connection, refresh the model list and choose text/STT/TTS models. Keys are entered only in your browser, never in a source file or build environment.
+4. Normal AI uses the signed-in account's backend configuration. Browser-only OpenRouter BYOK is an optional advanced fallback, not required on each device. Never put a private key in source, Git, exports or a public build environment.
 5. Export a JSON backup regularly. Download important recordings from **Library** separately. Install through your browser's app / Add to Home Screen menu where supported.
 
 On the first visit, stay online until **Ready for offline practice** appears in the footer. The app needs to download its bundled audio before offline playback is available. If you kept an early pre-release tab open, save your work and refresh it once to load the corrected update handler.
 
-The six original demo scripts use clearly labeled synthetic speech. They are useful offline practice, not a validated measure of natural-speaker comprehension. Import recordings you have permission to use to practice authentic speech. URL access is best-effort; paste the text when retrieval is restricted. No paywall, login or DRM bypass is provided.
+The six original demo scripts use clearly labeled synthetic speech. They remain supplementary offline practice, not the long-term human listening curriculum or a validated measure of natural-speaker comprehension. Reviewed publisher links and guided in-app practice supply the normal course path; personal imports remain optional and rights-limited. No paywall, login or DRM bypass is provided.
 
 ## Run locally
 
