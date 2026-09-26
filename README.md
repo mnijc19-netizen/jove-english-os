@@ -4,6 +4,17 @@ Formerly Jove English OS. The repository, public URL, PWA scope and existing Eng
 
 A personal, local-first language trainer for a native Chinese speaker, focused on natural listening and spontaneous speaking. It connects input, comprehension, chunks, retrieval, conversation, correction, delayed review and new-context transfer. Learning estimates carry evidence; completing a page never establishes mastery.
 
+## 中文使用说明
+
+1. 电脑和 iPhone 在 [Settings](https://mnijc19-netizen.github.io/jove-english-os/#/settings) 登录同一个学习账号。正常使用不需要在每台设备重新填写 AI 密钥。
+2. 英语从 [Today](https://mnijc19-netizen.github.io/jove-english-os/#/today) 开始；日语从 [日本語](https://mnijc19-netizen.github.io/jove-english-os/#/ja) 开始。首次按实际情况完成各自的小诊断，不会的可以跳过，不用提前准备。
+3. 每天只需告诉系统可用时间、精力，跟着下一项指引学习；英语与日语共用每天的时间预算，学习记录、课程和复习分开。Library 是选看材料的地方，不需要你每天自己编课。
+4. 真人课程在出版社原站播放或阅读，回来保存自己的理解、表达和录音。先独立尝试，需要时再点开 AI 提示；一次改一处，再完整重说。系统会安排后续复习，打开链接或看懂参考答案不等于掌握。
+5. 换设备前等对应语言同步完成；录音可能比文字慢。离线时先留在原设备，联网后再同步。外部课程和 AI 需要网络，已保存的本地练习不会因为 AI 失败而消失。
+6. 更新网站时先保存练习，在 Settings 的“网站版本与更新”点“检查更新”，出现更新按钮再点。不要清空网站数据；能登录不等于已更新。确切发布版本和未完成验收见 [项目状态](docs/STATUS.md)。
+
+AI 提供文字解释、对话和纠错，不提供可靠的自动发音／音高评分，也不能保证固定天数达到某水平。参考发音优先听原站真人；保留自己的录音，回听、对照、重说。预算用尽时，基础练习、保存和复习仍可继续；重要录音请另存备份。
+
 ## Start learning
 
 Website: [Jove Language OS](https://mnijc19-netizen.github.io/jove-english-os/). Release verification is recorded in `docs/STATUS.md`.
