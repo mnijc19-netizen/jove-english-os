@@ -1,6 +1,14 @@
 # Current status
 
-## Latest checkpoint — September26 local
+## Latest checkpoint — September27 local
+
+### Owner saved-practice handoff received on desktop
+
+- In response to the pending iPhone save/sync request, the owner reported saving a Today practice. The existing dedicated desktop acceptance profile received the September27 `Welcome: introduce yourself` attempt from a different sync device, with completion at retell stage2 and a saved57,425-byte recording. The projected session exactly matches the latest remote original; opening through the normal Today link and reloading preserves both the canonical session hash and recording SHA-256. The saved recording player loads with readyState4 and no visible error. Device origin is owner-reported, corroborated as a different sync device; this is not an independent audit of every iPhone capability.
+- Desktop reports `Synced`, zero pending/deferred/blocked items, no remaining audio transfer or history page. Today retains the completed listening task, leaves subsequent tasks unfinished, and offers enabled `Continue my practice` for the expression task. The browser is left on Today. No answer, recording or completion was entered on the owner's behalf; no recording/answer was exported and no paid AI call was made. This saved-work handoff is accepted without repeating the unchanged release/test matrix.
+- Remaining final-delivery evidence: a newly eligible scheduled lesson actually reaching Today after genuine learner progression; owner Japanese learning/output/AI continuity beyond diagnosis entry and separate provider diagnostics. The completed welcome lesson and automatic next practice are not proof of new scheduled course delivery or mastery. The full goal remains incomplete. The previously pending single saved-work handoff is no longer a blocker; Android physical acceptance remains waived. The public runtime remains `debcc85-edfb446fe61e`; this checkpoint changes documentation only.
+
+## September26 checkpoint
 
 ### Startup repair delivered — current public build
 
