@@ -119,7 +119,11 @@ export function createCloudState(database: JoveDatabase = db, client: SupabaseCl
     afterDownload = refresh
     if (started || !client) return
     started = true
-    const subscription = client.auth.onAuthStateChange(() => {
+    const subscription = client.auth.onAuthStateChange(event => {
+      // start() already awaits the current session and verified membership.
+      // The SDK also emits this snapshot for a late-added language listener;
+      // invalidating that initial adoption lets start() return before binding.
+      if (event === 'INITIAL_SESSION') return
       epoch++; userId.value = ''; email.value = ''; lastSynced.value = 0
       // Never await SDK auth from its locked callback. Read current, not stale callback session.
       setTimeout(() => { void (async () => { if (adoption) await adoption; await adoptCurrentSession() })() }, 0)

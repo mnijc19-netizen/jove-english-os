@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createEmptyCard, fsrs, type Card } from 'ts-fsrs'
 import Dexie from 'dexie'
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type AuthChangeEvent, type Session } from '@supabase/supabase-js'
 import { db as repositoryDatabase, JoveDatabase, version1Stores } from '../src/db/db'
 import { defaultProfile, defaultSettings, type Chunk, type StudyEvent, type Material, type DailyPlan } from '../src/domain/types'
 import { makePlan, taskActivity } from '../src/domain/engine'
@@ -229,10 +229,19 @@ function sdkAudioFixture() {
   const client = createClient(config.url, config.publishableKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: transport } })
   vi.spyOn(client.auth, 'getSession').mockImplementation(async () => ({ data: { session: { access_token: token, user: { id: principal, email: 'fixture@example.invalid' } } }, error: null }) as never)
   vi.spyOn(client.auth, 'getUser').mockImplementation(async () => ({ data: { user: { id: principal } }, error: null }) as never)
-  vi.spyOn(client.auth, 'onAuthStateChange').mockReturnValue({ data: { subscription: { unsubscribe() {} } } } as never)
+  const listeners = new Set<(event: AuthChangeEvent, session: Session | null) => void | Promise<void>>()
+  vi.spyOn(client.auth, 'onAuthStateChange').mockImplementation(callback => {
+    listeners.add(callback)
+    return { data: { subscription: { unsubscribe() { listeners.delete(callback) } } } } as never
+  })
   return { config, client, manifests, objects, transport, requests, server,
     access: () => bindSyncAccess(client, owner, config, async () => {}, transport),
-    switchUser() { principal = deviceB; token = 'test-token-b' }, setMember(value: boolean) { member = value },
+    switchUser(value = deviceB) { principal = value; token = value === owner ? 'test-token-a' : 'test-token-b' },
+    emitAuth(event: AuthChangeEvent) {
+      if (event === 'SIGNED_OUT') principal = ''
+      for (const listener of listeners) void listener(event, principal ? { access_token: token, user: { id: principal } } as Session : null)
+    },
+    setMember(value: boolean) { member = value },
     setPolicy(value: string) { policy = value }, setHook(value?: typeof hook) { hook = value },
     setCapacity(value: unknown) { capacity = value },
     setDownloadFailure(value: typeof downloadFailure) { downloadFailure = value },
@@ -395,6 +404,60 @@ describe('private audio uses the real SDK builders with fixed-principal access',
   })
 })
 describe('cloud store reset fences and completion state', () => {
+  it.each(['initial', 'signed-out', 'different-user', 'away-and-back'] as const)('preserves adoption fences during a held membership response: %s', async event => {
+    const db = new JoveDatabase('adoption-' + crypto.randomUUID()); databases.push(db)
+    const fixture = sdkAudioFixture(); vi.stubGlobal('fetch', fixture.transport)
+    const cloud = createCloudState(db, fixture.client, fixture.config)
+    let entered!: () => void, release!: () => void, releaseFresh!: () => void, admissions = 0
+    const waiting = new Promise<void>(resolve => { release = resolve }), dispatched = new Promise<void>(resolve => { entered = resolve })
+    const fresh = new Promise<void>(resolve => { releaseFresh = resolve })
+    fixture.setHook(async path => {
+      if (!path.endsWith('/app_members')) return
+      if (++admissions === 1) { entered(); await waiting }
+      else await fresh // A later legitimate adoption cannot hide a stale bind.
+    })
+    const opening = cloud.start(async () => {})
+    try {
+      await dispatched
+      // PostgREST retries rejected GETs with real backoff. Advance that clock,
+      // retaining every authorization assertion and the deferred auth task.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      if (event === 'initial') fixture.emitAuth('INITIAL_SESSION')
+      else if (event === 'signed-out') fixture.emitAuth('SIGNED_OUT')
+      else {
+        fixture.switchUser(); fixture.emitAuth('SIGNED_IN')
+        if (event === 'away-and-back') { fixture.switchUser(owner); fixture.emitAuth('SIGNED_IN') }
+      }
+      release(); await vi.advanceTimersByTimeAsync(10_000); await opening
+      if (event === 'initial') {
+        expect((await db.syncMeta.get('owner'))?.value).toBe(owner)
+        expect(cloud.userId.value).toBe(owner); expect(cloud.problem.value).toBe('')
+        expect(admissions).toBe(1)
+      } else {
+        expect((await db.syncMeta.get('owner'))?.value).toBeUndefined()
+        expect(cloud.userId.value).toBe('')
+        expect(fixture.requests.some(request => request.path.includes('/rpc/append_'))).toBe(false)
+      }
+    } finally {
+      const stopped = cloud.stop(); release(); releaseFresh()
+      await vi.advanceTimersByTimeAsync(10_000); await opening; await stopped
+      vi.useRealTimers()
+    }
+  })
+  it.each(['nonmember', 'wrong-verified-user'] as const)('initial notification does not bypass admission for %s', async reason => {
+    const db = new JoveDatabase('initial-denied-' + crypto.randomUUID()); databases.push(db)
+    const fixture = sdkAudioFixture(); vi.stubGlobal('fetch', fixture.transport)
+    if (reason === 'nonmember') fixture.setMember(false)
+    else vi.spyOn(fixture.client.auth, 'getUser').mockResolvedValue({ data: { user: { id: deviceB } }, error: null } as never)
+    const cloud = createCloudState(db, fixture.client, fixture.config)
+    try {
+      const opening = cloud.start(async () => {})
+      fixture.emitAuth('INITIAL_SESSION'); await opening
+      expect((await db.syncMeta.get('owner'))?.value).toBeUndefined()
+      expect(cloud.userId.value).toBe(''); expect(cloud.problem.value).not.toBe('')
+      expect(fixture.requests.some(request => request.path.includes('/rpc/append_'))).toBe(false)
+    } finally { await cloud.stop() }
+  })
   it('invalidates an in-flight request before reset and retries its durable identity after resume', async () => {
     const { db, journal } = await local(), fixture = sdkAudioFixture(); vi.stubGlobal('fetch', fixture.transport)
     const cloud = createCloudState(db, fixture.client, fixture.config)

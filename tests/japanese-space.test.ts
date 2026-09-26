@@ -105,7 +105,7 @@ describe('shared-account Japanese lifecycle', () => {
     cloud.problem.value = 'Japanese recording transfer failed'
     expect(state.status.value).toBe('Sync problem'); expect(state.problem.value).toContain('Japanese recording')
   })
-  it('uses the same authenticated SDK client but distinct English/Japanese RPC and journal streams', async () => {
+  it.each([false, true])('uses the shared SDK and separate language journals with late INITIAL_SESSION=%s', async initialSession => {
     const { en, ja } = await setup(), owner = '00000000-0000-4000-8000-000000000051'
     let principal = owner
     const config = { url: 'https://jove-language-test.invalid', publishableKey: 'sb_publishable_fixture_only' }
@@ -142,10 +142,20 @@ describe('shared-account Japanese lifecycle', () => {
     const client = createClient(config.url, config.publishableKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: transport } })
     vi.spyOn(client.auth, 'getSession').mockImplementation(async () => ({ data: { session: { access_token: 'fixture-only-owner-token', user: { id: principal } } }, error: null }) as never)
     vi.spyOn(client.auth, 'getUser').mockImplementation(async () => ({ data: { user: { id: principal } }, error: null }) as never)
-    vi.spyOn(client.auth, 'onAuthStateChange').mockReturnValue({ data: { subscription: { unsubscribe() {} } } } as never)
+    let emitInitial = false
+    vi.spyOn(client.auth, 'onAuthStateChange').mockImplementation(callback => {
+      let active = true
+      if (emitInitial) queueMicrotask(() => {
+        if (active) void callback('INITIAL_SESSION', { access_token: 'fixture-only-owner-token', user: { id: principal } } as never)
+      })
+      return { data: { subscription: { unsubscribe() { active = false } } } } as never
+    })
     const login = vi.spyOn(client.auth, 'signInWithOtp')
     const english = createCloudState(en, client, config); clouds.push(english)
     await english.start(async () => {})
+    // A newly registered language listener receives the SDK's initial snapshot
+    // even though this same client has already admitted the English account.
+    emitInitial = initialSession
     const japanese = createJapaneseSpace(en, { settle: english.settle, signOut: english.signOut, ownerId: () => english.userId.value }, ja,
       (database, guard) => createCloudState(database, client, config, guard)); states.push(japanese)
     await japanese.ensure()
