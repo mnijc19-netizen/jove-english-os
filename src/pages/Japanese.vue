@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch 
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { db as english, createLanguageDatabase } from '../db/db'
 import { createJapaneseWorkspace, japanesePracticeDraft, type JapanesePracticeStep, type JapanesePracticeDraft } from '../db/japanese'
-import { japanesePlacement, japanesePlacementItems, japaneseReadingSupport, kanaMorae } from '../domain/japanese'
+import { japaneseStartingPoint, japanesePlacementItems, japaneseReadingSupport, kanaMorae } from '../domain/japanese'
 import { japaneseLessons, japaneseLessonUrl, japaneseCourseNames, japaneseSource } from '../content/japanese'
 import { japaneseDevelopment } from '../release-flags'
 import { readLanguageDay } from '../db/language-day'
@@ -31,7 +31,8 @@ let navigationGeneration = 0, allowedNavigation = ''
 let saves: Promise<void> = Promise.resolve()
 const lesson = computed(() => japaneseLessons.find(lesson => lesson.id === session.value?.materialId))
 const sourceUrl = computed(() => lesson.value ? japaneseLessonUrl(lesson.value) : '')
-const placement = computed(() => assessment.value?.completedAt ? japanesePlacement(assessment.value.responses) : undefined)
+const placement = shallowRef<ReturnType<typeof japaneseStartingPoint>>()
+const confirmBeginner = ref(false)
 const task = computed(() => plan.value?.tasks.find(task => !task.done && !task.optional))
 const answerCount = computed(() => japanesePlacementItems.filter(item => responses[item.id]).length)
 const originalPlayback = useRecordingUrl(computed(() => audio.value.find(asset => asset.id === draft.audioId)))
@@ -50,6 +51,7 @@ function restore(saved: StudySession) {
 async function refresh() {
   await learning.checkOwner()
   assessment.value = await database.assessments.get(learning.diagnosticId)
+  placement.value = await learning.startingPoint()
   if (assessment.value) Object.assign(responses, assessment.value.responses)
   plan.value = await learning.today()
   allowance.value = await readLanguageDay(english, Date.now(), database)
@@ -113,6 +115,13 @@ async function finishDiagnostic() {
   await flush()
   assessment.value = await learning.saveDiagnostic({ ...responses }, true)
   await refresh()
+}
+async function beginFromZero() {
+  await flush()
+  await learning.confirmBeginnerStart()
+  await refresh()
+  confirmBeginner.value = false
+  notice.value = '已按本人确认的零基础安排。原诊断和已有练习保留，不作为新的能力成绩。'
 }
 async function start() {
   if (!task.value) return
@@ -207,7 +216,18 @@ onBeforeUnmount(() => {
     <p v-if="!ready" role="status">正在打开独立的日语学习记录…</p>
     <template v-else>
       <p class="help-text" role="status">{{ notice }}</p>
-      <section v-if="!assessment?.completedAt" class="panel ja-panel">
+      <div v-if="!session" class="section">
+        <p v-if="placement?.basis === 'self-report'" class="help-text" data-testid="japanese-starting-point">起点：本人确认零基础。先练一小组假名与生活对话，读法提示默认保留；旧诊断不再决定起点，听说能力仍待真实练习观察。</p>
+        <template v-else>
+          <button class="text-button" :disabled="busy || navigating" @click="confirmBeginner = !confirmBeginner">{{ placement ? '起点填错了？按零基础重新起步' : '我是零基础，不猜题直接起步' }}</button>
+          <div v-if="confirmBeginner" class="panel">
+            <p>确认自己是零基础后，从基础生活对话和假名开始。原诊断、已开始的练习和录音都保留；只调整尚未开始的初始安排，不清空进度，也不生成测验分数。</p>
+            <button class="button primary" :disabled="busy || navigating" @click="act(beginFromZero)">确认零基础起点</button>
+            <button class="text-button" :disabled="busy || navigating" @click="confirmBeginner = false">取消</button>
+          </div>
+        </template>
+      </div>
+      <section v-if="!placement" class="panel ja-panel">
         <h2>先了解你，不用提前准备</h2>
         <p>六个小问题，只调整假名提示和第一段练习。不知道就选“跳过”；这不是听说能力评分。</p>
         <form @submit.prevent="act(finishDiagnostic)">

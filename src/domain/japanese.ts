@@ -1,4 +1,4 @@
-import type { Material, StudyEvent } from './types'
+import type { Assessment, Material, StudyEvent } from './types'
 import { unavailableExternalIds } from '../content/external'
 
 export const japanesePlacementItems = [
@@ -20,6 +20,23 @@ export function japanesePlacement(answers: Record<string, string>) {
     furigana: script < 2 ? 'full' as const : 'on-demand' as const,
     conversationProbe: script >= 2 && meaning >= 2 ? 9 : script >= 2 ? 3 : 1,
     listening: 'unknown' as const, speaking: 'unknown' as const, proficiency: 'unverified' as const }
+}
+
+export const japaneseBeginnerStartId = 'ja-beginner-start'
+
+/** A declared starting preference replaces an unreliable initial quiz, not
+ * ability evidence. Preserve that quiz and keep every unmeasured score unknown. */
+export function japaneseStartingPoint(diagnostic?: Assessment, beginner?: Assessment, now = Date.now()) {
+  if (beginner?.id === japaneseBeginnerStartId && beginner.stage === 'self-reported-beginner'
+    && beginner.responses.startingPoint === 'beginner' && beginner.completedAt !== undefined
+    && beginner.completedAt >= beginner.timestamp && beginner.completedAt <= now
+    && ['scriptRecognition', 'sentenceMeaning', 'listening', 'speaking'].every(key => beginner.scores[key] === null)) {
+    return { basis: 'self-report' as const, confirmedAt: beginner.completedAt,
+      scriptCorrect: null, meaningCorrect: null, kanaSupport: true, furigana: 'full' as const,
+      conversationProbe: 1, listening: 'unknown' as const, speaking: 'unknown' as const, proficiency: 'unverified' as const }
+  }
+  return diagnostic?.completedAt ? { ...japanesePlacement(diagnostic.responses), basis: 'diagnostic' as const,
+    confirmedAt: diagnostic.completedAt } : undefined
 }
 
 /** Counts timing units in supplied kana, never guesses kanji readings or scores

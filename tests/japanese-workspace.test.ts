@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { JoveDatabase } from '../src/db/db'
 import { createLearningRepository } from '../src/db/repository'
 import { createJapaneseWorkspace, japanesePracticeDraft } from '../src/db/japanese'
-import { japanesePlacementItems } from '../src/domain/japanese'
+import { japanesePlacementItems, japaneseBeginnerStartId, japaneseStartingPoint } from '../src/domain/japanese'
 import { demoMaterials } from '../src/content/materials'
 import type { AudioAsset } from '../src/domain/types'
 import { readLanguageDay } from '../src/db/language-day'
@@ -26,6 +26,72 @@ function recording(id: string): AudioAsset { return { id, blob: new Blob(['nativ
   createdAt: now, duration: 3, kind: 'recording', processed: false, label: 'Japanese practice' } }
 
 describe('Japanese usable practice persistence', () => {
+  it('starts from a declared beginner preference without fabricated diagnostic answers or scores', async () => {
+    const { learning, ja, en } = await setup()
+    const beforeEnglish = await en.profiles.toArray()
+    const confirmation = await learning.confirmBeginnerStart(now)
+    expect(confirmation).toMatchObject({ stage: 'self-reported-beginner', responses: { startingPoint: 'beginner' },
+      scores: { scriptRecognition: null, sentenceMeaning: null, listening: null, speaking: null } })
+    expect(await ja.assessments.get(learning.diagnosticId)).toBeUndefined()
+    expect(await learning.startingPoint(now)).toMatchObject({ basis: 'self-report', conversationProbe: 1, kanaSupport: true, furigana: 'full', scriptCorrect: null })
+    const plan = (await learning.today(now))!
+    expect(plan.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-1')
+    expect(plan.tasks.some(task => task.materialId?.startsWith('ja-kana-'))).toBe(true)
+    expect(await learning.confirmBeginnerStart(now + 1000)).toEqual(confirmation)
+    expect(await ja.assessments.count()).toBe(1)
+    expect(await ja.events.count()).toBe(0)
+    expect(await ja.cards.count()).toBe(0)
+    expect(await en.profiles.toArray()).toEqual(beforeEnglish)
+    expect(await en.assessments.count()).toBe(0)
+  })
+  it('supersedes an unreliable quiz without replacing its answers, and replans only untouched work', async () => {
+    const { learning, ja, en } = await setup()
+    const original = await learning.saveDiagnostic(Object.fromEntries(japanesePlacementItems.map(item => [item.id, item.answer])), true, now)
+    const before = (await learning.today(now))!
+    expect(before.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-9')
+    await learning.confirmBeginnerStart(now + 1000)
+    const after = (await learning.today(now + 1000))!
+    expect(after.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-1')
+    expect(after.tasks.some(task => task.materialId?.startsWith('ja-kana-'))).toBe(true)
+    expect(after.minutes).toBeLessThanOrEqual(before.minutes)
+    expect(await ja.assessments.get(learning.diagnosticId)).toEqual(original)
+    expect(await ja.sessions.count()).toBe(0)
+    expect(await ja.events.count()).toBe(0)
+    expect(await learning.today(now + 2000)).toEqual(after)
+    const reopened = createJapaneseWorkspace(ja, en)
+    await reopened.open()
+    expect(await reopened.startingPoint(now + 2000)).toMatchObject({ basis: 'self-report', conversationProbe: 1 })
+  })
+  it('keeps already started work and recording originals when the learner corrects their starting preference', async () => {
+    const { learning, ja } = await setup()
+    await learning.saveDiagnostic(Object.fromEntries(japanesePlacementItems.map(item => [item.id, item.answer])), true, now)
+    const before = (await learning.today(now))!
+    const attempt = await learning.start(before.tasks[0]!.id, now)
+    await ja.audio.add(recording('beginner-original'))
+    const saved = await learning.save(attempt.id, { ...japanesePracticeDraft.parse(attempt.draft), response: '保留已写的内容', audioId: 'beginner-original' }, 'listen')
+    const events = await ja.events.toArray()
+    await learning.confirmBeginnerStart(now + 1000)
+    const after = (await learning.today(now + 1000))!
+    expect(after.tasks).toEqual(before.tasks)
+    expect(await ja.sessions.get(saved.id)).toEqual(saved)
+    expect((await ja.audio.get('beginner-original'))?.blob.size).toBeGreaterThan(0)
+    expect(await ja.events.toArray()).toEqual(events)
+  })
+  it.each(['en', 'ja'] as const)('rejects a changed %s owner before saving a beginner confirmation', async language => {
+    const { learning, ja, en } = await setup()
+    await (language === 'en' ? en : ja).syncMeta.put({ id: 'owner', value: 'other-owner' })
+    await expect(learning.confirmBeginnerStart(now)).rejects.toThrow('账号')
+    expect(await ja.assessments.get(japaneseBeginnerStartId)).toBeUndefined()
+    expect((await ja.profiles.get('main'))?.onboarded).toBe(false)
+  })
+  it('does not treat an incomplete, future, or scored record as a beginner declaration', async () => {
+    const { learning } = await setup()
+    const confirmation = await learning.confirmBeginnerStart(now)
+    expect(japaneseStartingPoint(undefined, { ...confirmation, completedAt: undefined }, now)).toBeUndefined()
+    expect(japaneseStartingPoint(undefined, confirmation, now - 1)).toBeUndefined()
+    expect(japaneseStartingPoint(undefined, { ...confirmation, scores: { ...confirmation.scores, scriptRecognition: 1 } }, now)).toBeUndefined()
+    expect(japaneseStartingPoint(undefined, { ...confirmation, stage: 'completed' }, now)).toBeUndefined()
+  })
   it('replaces an inaccessible lesson once, preserving its draft, original and total allowance', async () => {
     const { learning, ja, en } = await setup()
     await learning.saveDiagnostic(skipped, true, now)

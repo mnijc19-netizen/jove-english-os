@@ -8,7 +8,8 @@ import { type LearningLanguage } from '../src/domain/language'
 import { createLearningRepository, exportBackup, restoreBackup } from '../src/db/repository'
 import { japaneseStarterMaterials } from '../src/content/japanese'
 import { parseBackup } from '../src/db/schema'
-import { japanesePracticeDraft } from '../src/db/japanese'
+import { japanesePracticeDraft, createJapaneseWorkspace } from '../src/db/japanese'
+import { japanesePlacementItems } from '../src/domain/japanese'
 import { japaneseReviewDraft } from '../src/db/japanese-review'
 import { SyncJournal } from '../src/sync/journal'
 import { SupabaseSyncRemote, synchronize, type SyncRemote } from '../src/sync/remote'
@@ -91,6 +92,31 @@ describe('immutable local learning-language partitions', () => {
     const capture = vi.spyOn(journal, 'capture'), upload = vi.spyOn(remote, 'upload')
     await expect(synchronize(journal, remote)).rejects.toThrow('Sync language')
     expect(capture).not.toHaveBeenCalled(); expect(upload).not.toHaveBeenCalled()
+  })
+  it('syncs and backs up a beginner correction independently of a late original quiz', async () => {
+    const en = database('en'), first = database('ja'), second = database('ja'), restored = database('ja')
+    const remote = new MemoryRemote('ja'), firstJournal = new SyncJournal(first), secondJournal = new SyncJournal(second)
+    for (const db of [en, first, second, restored]) await new SyncJournal(db).bindOwner(owner)
+    const learning = createJapaneseWorkspace(first, en), other = createJapaneseWorkspace(second, en)
+    await learning.open(); await other.open()
+    const stamp = Date.now() - 2000
+    const quiz = await learning.saveDiagnostic(Object.fromEntries(japanesePlacementItems.map(item => [item.id, item.answer])), true, stamp)
+    await synchronize(firstJournal, remote); await synchronize(secondJournal, remote)
+    const confirmation = await learning.confirmBeginnerStart(stamp + 1000)
+    // A stale client may still retain/update the original quiz. It cannot
+    // overwrite the distinct starting preference or fabricate oral scores.
+    const lateQuiz = { ...quiz, responses: { ...quiz.responses, hiragana: 'reko' } }
+    await second.assessments.put(lateQuiz)
+    await synchronize(secondJournal, remote); await synchronize(firstJournal, remote); await synchronize(secondJournal, remote)
+    expect(await other.startingPoint()).toMatchObject({ basis: 'self-report', conversationProbe: 1, scriptCorrect: null, speaking: 'unknown' })
+    expect(await second.assessments.get(learning.diagnosticId)).toEqual(lateQuiz)
+    expect(remote.rows.some(row => row.entityId === quiz.id && JSON.stringify(row.payload.record) === JSON.stringify(quiz))).toBe(true)
+    expect(await second.assessments.get(confirmation.id)).toEqual(confirmation)
+    await restoreBackup(await exportBackup(second), restored)
+    const recovered = createJapaneseWorkspace(restored, en); await recovered.open()
+    expect(await recovered.startingPoint()).toMatchObject({ basis: 'self-report', kanaSupport: true, furigana: 'full' })
+    expect(await en.assessments.count()).toBe(0)
+    expect(await first.events.count()).toBe(0); expect(await second.events.count()).toBe(0)
   })
   it('exports explicit Japanese backups and rejects both cross-language restore directions atomically', async () => {
     const en = database('en'), ja = database('ja'), restored = database('ja')

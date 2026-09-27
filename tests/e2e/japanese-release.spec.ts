@@ -80,3 +80,48 @@ test('signed-in English opens Japanese on the first attempt without another logi
   expect(cursors.en).toBeGreaterThan(0); expect(cursors.ja).toBeGreaterThan(0)
   expect(unexpected).toEqual([])
 })
+
+test('a beginner can correct a guessed diagnosis without clearing it or changing English', async ({ page }) => {
+  test.skip(process.env.VITE_JOVE_JAPANESE !== '1', 'Japanese build gate is off')
+  const snapshot = () => page.evaluate(async () => {
+    const read = async (name: string) => {
+      const database = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(name); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error)
+      })
+      try {
+        const transaction = database.transaction(['assessments', 'profiles', 'events', 'sessions'])
+        const rows = (store: string) => new Promise<Record<string, unknown>[]>((resolve, reject) => {
+          const request = transaction.objectStore(store).getAll(); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error)
+        })
+        const [assessments, profiles, events, sessions] = await Promise.all(['assessments', 'profiles', 'events', 'sessions'].map(rows))
+        return { assessments, profiles, events, sessions }
+      } finally { database.close() }
+    }
+    return { en: await read('jove-english-os'), ja: await read('jove-english-os-ja') }
+  })
+  await page.goto('#/ja')
+  for (const answer of ['neko', 'koohii', '一拍', '昨天看了电影', 'に', '邀请一起吃饭']) {
+    await page.getByRole('radio', { name: answer, exact: true }).check()
+  }
+  await page.getByRole('button', { name: '保存诊断，安排今天', exact: true }).click()
+  await expect(page.getByRole('heading', { name: /^今日练习：/ })).toBeVisible()
+  const before = await snapshot()
+  await page.getByRole('button', { name: '起点填错了？按零基础重新起步', exact: true }).click()
+  await page.getByRole('button', { name: '取消', exact: true }).click()
+  expect((await snapshot()).ja.assessments).toEqual(before.ja.assessments)
+  await page.getByRole('button', { name: '起点填错了？按零基础重新起步', exact: true }).click()
+  await page.getByRole('button', { name: '确认零基础起点', exact: true }).click()
+  await expect(page.getByTestId('japanese-starting-point')).toContainText('本人确认零基础')
+  await expect(page.getByRole('heading', { name: '今日练习：见面与告别', exact: true })).toBeVisible()
+  await page.reload()
+  await expect(page.getByTestId('japanese-starting-point')).toContainText('本人确认零基础')
+  const after = await snapshot()
+  expect(after.en).toEqual(before.en)
+  expect(after.ja.assessments.find(row => row.id === 'ja-initial-diagnostic')).toEqual(before.ja.assessments[0])
+  expect(after.ja.assessments.find(row => row.id === 'ja-beginner-start')).toMatchObject({
+    stage: 'self-reported-beginner', responses: { startingPoint: 'beginner' },
+    scores: { scriptRecognition: null, sentenceMeaning: null, listening: null, speaking: null },
+  })
+  expect(after.ja.events).toEqual(before.ja.events)
+  expect(after.ja.sessions).toEqual(before.ja.sessions)
+})

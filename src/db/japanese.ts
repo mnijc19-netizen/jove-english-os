@@ -2,7 +2,7 @@ import type { JoveDatabase } from './db'
 import Dexie from 'dexie'
 import { createLearningRepository } from './repository'
 import { japaneseMaterials } from '../content/japanese'
-import { japanesePlacement, japanesePlacementItems, japanesePracticeHistory, nextJapaneseLesson } from '../domain/japanese'
+import { japanesePlacement, japanesePlacementItems, japanesePracticeHistory, nextJapaneseLesson, japaneseStartingPoint, japaneseBeginnerStartId } from '../domain/japanese'
 import { readLanguageDay } from './language-day'
 import { assessmentSchema, eventSchema, planSchema, sessionSchema } from './schema'
 import type { DailyPlan, StudySession } from '../domain/types'
@@ -84,6 +84,27 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       return assessment
     })
   }
+  async function startingPoint(now = Date.now()) {
+    await checkOwner()
+    const [diagnostic, beginner] = await Promise.all([database.assessments.get(diagnosticId), database.assessments.get(japaneseBeginnerStartId)])
+    await checkOwner()
+    return japaneseStartingPoint(diagnostic, beginner, now)
+  }
+  async function confirmBeginnerStart(now = Date.now()) {
+    await checkOwner()
+    return database.transaction('rw', database.assessments, database.profiles, database.syncMeta, async () => {
+      await Dexie.waitFor(Dexie.ignoreTransaction(sharedFence))
+      await fence()
+      const existing = await database.assessments.get(japaneseBeginnerStartId)
+      if (japaneseStartingPoint(undefined, existing, now)) return existing!
+      const confirmation = assessmentSchema.parse({ id: japaneseBeginnerStartId, timestamp: now, variant: 1,
+        stage: 'self-reported-beginner', responses: { startingPoint: 'beginner' },
+        scores: { scriptRecognition: null, sentenceMeaning: null, listening: null, speaking: null }, completedAt: now })
+      await database.assessments.put(confirmation)
+      await database.profiles.update('main', { onboarded: true })
+      return confirmation
+    })
+  }
   async function today(now = Date.now()): Promise<DailyPlan | null> {
     await checkOwner()
     const allowance = await readLanguageDay(english, now, database)
@@ -91,10 +112,18 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     return database.transaction('rw', [database.plans, database.events, database.materials, database.assessments, database.cards, database.chunks, database.sessions, database.syncMeta], async () => {
       await fence()
       const diagnostic = await database.assessments.get(diagnosticId)
-      if (!diagnostic?.completedAt) return null
-      const date = new Date(now).toLocaleDateString('en-CA'), current = await database.plans.get(date)
+      const placement = japaneseStartingPoint(diagnostic, await database.assessments.get(japaneseBeginnerStartId), now)
+      if (!placement) return null
+      const date = new Date(now).toLocaleDateString('en-CA'), savedPlan = await database.plans.get(date)
       const events = await database.events.toArray(), materials = await database.materials.toArray()
-      const placement = japanesePlacement(diagnostic.responses)
+      const sessions = await database.sessions.toArray()
+      // Only replace an untouched initial plan. Started/completed/optional work,
+      // drafts and recordings remain bound to their original tasks.
+      const replaceInitialPlan = placement.basis === 'self-report' && savedPlan && savedPlan.createdAt < placement.confirmedAt
+        && savedPlan.tasks.every(task => !task.done && !task.optional
+          && !events.some(event => event.type === 'TASK_STARTED' && event.data?.taskId === task.id)
+          && !sessions.some(session => session.draft.taskId === task.id))
+      const current = replaceInitialPlan ? undefined : savedPlan
       // Curriculum exposure chooses a next task, not a higher proficiency score.
       const history = japanesePracticeHistory(events, now)
       const completedIds = new Set(history.map(event => event.data?.materialId))
@@ -124,7 +153,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       // After two complete introductory practices, reserve a brief real-life
       // exchange in the SAME daily allowance. Never add it to an already
       // started/finished day's older plan or double the English/Japanese budget.
-      const sessions = await database.sessions.toArray(), selectedReading = nextJapaneseReading(sessions, now)
+      const selectedReading = nextJapaneseReading(sessions, now)
       const selectedKana = nextJapaneseKana(sessions, now, placement.kanaSupport)
       // On very short days rotate foundation with integrated work instead of
       // letting a permanent kana backlog crowd out reading/conversation.
@@ -172,7 +201,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       if (!tasks.length) return null
       const plan = planSchema.parse({ id: date, date, minutes: tasks.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0),
         focus: 'realWorld', tasks,
-        evidenceFingerprint: `ja:${diagnostic.completedAt}:${events.length}:${minutes}`, createdAt: current?.createdAt ?? now })
+        evidenceFingerprint: `ja:${placement.basis}:${placement.confirmedAt}:${events.length}:${minutes}`, createdAt: current?.createdAt ?? now })
       await database.plans.put(plan)
       return plan
     })
@@ -314,5 +343,5 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       return complete
     })
   }
-  return { database, repository, review, dialogue, reading, books, open, checkOwner, saveDiagnostic, today, start, save, replaceUnavailable, finish, diagnosticId }
+  return { database, repository, review, dialogue, reading, books, open, checkOwner, saveDiagnostic, startingPoint, confirmBeginnerStart, today, start, save, replaceUnavailable, finish, diagnosticId }
 }
