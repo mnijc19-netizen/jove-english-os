@@ -9,7 +9,7 @@ import { useCloud } from '../stores/cloud'
 import { useRequest } from '../composables/useRequest'
 import CoachingFeedback from './CoachingFeedback.vue'
 
-const props = defineProps<{ database: JoveDatabase; sessionId: string; audioId: string; reference: string; target: string; checkOwner: () => Promise<void> }>()
+const props = defineProps<{ database: JoveDatabase; sessionId: string; audioId: string; reference: string; target: string; checkOwner: () => Promise<void>; readOnly?: boolean }>()
 const emit = defineEmits<{ active: [value: boolean] }>()
 const app = useApp(), cloud = useCloud()
 const provider = japaneseProvider({ database: props.database, english, settings: () => app.settings,
@@ -76,16 +76,16 @@ async function reloadSaved() {
   await run(async signal => {
     clearTimeout(timer); await saves.catch(() => {})
     signal.throwIfAborted()
-    const stored = await coach.open()
+    const stored = props.readOnly ? await coach.read() : await coach.open()
     signal.throwIfAborted(); if (disposed) return
-    if (stored.text !== text.value) retainedText.value = text.value
-    draft.value = stored; text.value = stored.text; confirmed.value = stored.confirmed; dirty.value = false; saveError.value = ''
+    if (stored?.text !== text.value) retainedText.value = text.value
+    draft.value = stored; text.value = stored?.text ?? ''; confirmed.value = stored?.confirmed ?? false; dirty.value = false; saveError.value = ''
   })
 }
 function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value || saving.value) { event.preventDefault(); event.returnValue = '' } }
 onMounted(async () => {
   window.addEventListener('beforeunload', beforeUnload)
-  await run(async signal => { const stored = await coach.open(); signal.throwIfAborted(); if (!disposed) { draft.value = stored; text.value = stored.text; confirmed.value = stored.confirmed } })
+  await run(async signal => { const stored = props.readOnly ? await coach.read() : await coach.open(); signal.throwIfAborted(); if (!disposed && stored) { draft.value = stored; text.value = stored.text; confirmed.value = stored.confirmed } })
 })
 onBeforeUnmount(() => { disposed = true; clearTimeout(timer); window.removeEventListener('beforeunload', beforeUnload); cancel() })
 </script>
@@ -96,12 +96,13 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer); window.removeEvent
     <p class="help-text">听力和模仿以真人原声为准。AI 只检查文字，不评发音；不用 AI 也能继续练习。</p>
     <p v-if="!app.keySet" class="help-text">账号 AI 暂未连接；回答照常保存在本机。需要时在设置中登录原学习账号。</p>
     <template v-if="draft">
-      <button class="text-button" :disabled="busy || saving || !audioId || !app.online || !app.keySet" @click="transcribe">转写首答录音（可能收费）</button>
-      <details v-if="draft.transcript"><summary>已保存的转写候选 · 需核对</summary><p lang="ja">{{ draft.transcript }}</p><button class="text-button" :disabled="busy || saving" @click="useTranscript">放入回答，再核对</button></details>
-      <label class="coach-input">写下自己刚才说的日语，或核对转写后修改<textarea v-model="text" lang="ja" rows="3" maxlength="10000" :disabled="busy" @input="confirmed = false; changed()" /></label>
-      <label class="row"><input v-model="confirmed" type="checkbox" :disabled="busy" @change="changed">我核对过这段文字；转写错误不当作自己的语言错误</label>
+      <p v-if="readOnly" class="help-text">已完成练习的原回答不再修改。已有反馈直接回看；未完成的请求沿用原请求取回结果。服务端结果过期或未曾请求时，再次请求仍可能收费；不会自动调用。</p>
+      <button v-if="!readOnly" class="text-button" :disabled="busy || saving || !audioId || !app.online || !app.keySet" @click="transcribe">转写首答录音（可能收费）</button>
+      <details v-if="draft.transcript"><summary>已保存的转写候选 · 需核对</summary><p lang="ja">{{ draft.transcript }}</p><button v-if="!readOnly" class="text-button" :disabled="busy || saving" @click="useTranscript">放入回答，再核对</button></details>
+      <label class="coach-input">写下自己刚才说的日语，或核对转写后修改<textarea v-model="text" lang="ja" rows="3" maxlength="10000" :readonly="readOnly" :disabled="busy" @input="confirmed = false; changed()" /></label>
+      <label class="row"><input v-model="confirmed" type="checkbox" :disabled="busy || readOnly" @change="changed">我核对过这段文字；转写错误不当作自己的语言错误</label>
       <div class="row wrap">
-        <button class="button secondary" :disabled="busy || saving || !confirmed || !text.trim() || !app.online || !app.keySet" @click="feedback">{{ selected ? '查看已保存的反馈' : '请 AI 帮我改进（可能收费）' }}</button>
+        <button class="button secondary" :disabled="busy || saving || !confirmed || !text.trim() || !app.online || !app.keySet" @click="feedback">{{ selected ? '查看已保存的反馈' : readOnly ? '取回或请求反馈（可能收费）' : '请 AI 帮我改进（可能收费）' }}</button>
         <button v-if="busy" class="text-button" @click="cancel">停止等待，保留回答</button>
       </div>
       <div v-if="selected" class="coach-feedback">
@@ -109,6 +110,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer); window.removeEvent
         <p class="help-text">针对上面保存的回答给出；不要求逐字照抄，意思相同且合适的表达也可以。</p>
       </div>
     </template>
+    <p v-else-if="readOnly && !busy" class="help-text">这次没有保存可接续的 AI 回答。练习原件不受影响，下一次练习再按需使用。</p>
     <p v-if="savedNotice" class="help-text" role="status">{{ savedNotice }}</p>
     <p v-if="error || saveError" class="error" role="alert">AI 或保存暂未完成，原件和回答不会删除。{{ error || saveError }}</p>
     <button v-if="error || saveError" class="text-button" :disabled="busy || saving" @click="reloadSaved">重新载入已保存的辅导（保留本页文字副本）</button>

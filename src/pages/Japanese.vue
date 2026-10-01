@@ -19,7 +19,8 @@ const database = createLanguageDatabase('ja'), learning = createJapaneseWorkspac
 const ready = ref(false), busy = ref(false), navigating = ref(false), error = ref(''), notice = ref(''), captureActive = ref(false)
 const coachActive = ref(false)
 const assessment = shallowRef<Assessment>(), plan = shallowRef<DailyPlan | null>(null), session = shallowRef<StudySession>()
-const audio = shallowRef<AudioAsset[]>([]), unfinished = shallowRef<StudySession[]>([])
+const audio = shallowRef<AudioAsset[]>([]), unfinished = shallowRef<StudySession[]>([]), recent = shallowRef<StudySession[]>([])
+const savedCoachOpen = ref(false)
 const allowance = shallowRef<Awaited<ReturnType<typeof readLanguageDay>>>(null)
 const responses = reactive<Record<string, string>>({})
 const draft = reactive<JapanesePracticeDraft>({ taskId: '', revision: 0, listened: false, response: '', expression: '', example: '', audioId: '', retryAudioId: '', comparison: '' })
@@ -36,6 +37,7 @@ const confirmBeginner = ref(false)
 const task = computed(() => plan.value?.tasks.find(task => !task.done && !task.optional))
 const answerCount = computed(() => japanesePlacementItems.filter(item => responses[item.id]).length)
 const originalPlayback = useRecordingUrl(computed(() => audio.value.find(asset => asset.id === draft.audioId)))
+const retryPlayback = useRecordingUrl(computed(() => audio.value.find(asset => asset.id === draft.retryAudioId)))
 const nextEnabled = computed(() => step.value === 'listen' ? draft.listened && !!draft.response.trim()
   : step.value === 'notice' ? !!draft.expression.trim() && !!draft.example.trim()
     : step.value === 'speak' ? !!draft.audioId : !!draft.retryAudioId && !!draft.comparison.trim())
@@ -56,9 +58,12 @@ async function refresh() {
   plan.value = await learning.today()
   allowance.value = await readLanguageDay(english, Date.now(), database)
   unfinished.value = await database.sessions.filter(session => ['japanese-practice', 'japanese-review', 'japanese-dialogue', 'japanese-reading', 'japanese-extensive'].includes(session.kind) && !session.completedAt).toArray()
+  recent.value = (await database.sessions.filter(session => session.kind === 'japanese-practice' && !!session.completedAt).toArray())
+    .sort((a, b) => b.completedAt! - a.completedAt!).slice(0, 5)
   await refreshAudio()
 }
 async function loadSession(id: unknown, generation = navigationGeneration) {
+  savedCoachOpen.value = false
   if (typeof id !== 'string') { if (generation === navigationGeneration && !disposed) session.value = undefined; return }
   const saved = await database.sessions.get(id)
   if (generation !== navigationGeneration || disposed) return
@@ -255,9 +260,22 @@ onBeforeUnmount(() => {
         </section>
         <p v-if="space.catalogProblem" class="help-text" role="status">{{ space.catalogProblem }}</p>
         <section v-if="unfinished.length" class="section"><h2>接着上次的练习</h2><p v-for="saved in unfinished" :key="saved.id"><RouterLink :to="{ path: sessionPath(saved), query: { session: saved.id } }">{{ saved.kind === 'japanese-review' ? '日语延迟复习' : saved.kind === 'japanese-dialogue' ? '日语三轮对话' : saved.kind === 'japanese-extensive' ? '日语原版多读' : saved.kind === 'japanese-reading' ? (saved.materialId?.startsWith('ja-kana-') ? '日语假名与节拍' : '日语短篇阅读') : japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title }} · 继续草稿</RouterLink></p></section>
+        <section v-if="recent.length" class="section"><h2>最近完成的练习</h2><p class="help-text">回听原件或接续已有 AI 请求，不重复记为完成。</p><p v-for="saved in recent" :key="saved.id"><RouterLink :to="{ path: '/ja', query: { session: saved.id } }">{{ japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title ?? '日语练习' }} · {{ new Date(saved.completedAt!).toLocaleDateString('zh-CN') }} · 回看</RouterLink></p></section>
       </template>
       <section v-else-if="session.completedAt" class="panel ja-panel">
         <h2>这次练习已保存</h2><p>回答、原始录音和重说录音都已保留。参考词块已加入日语间隔复习；完成练习不等于已掌握。</p>
+        <h3>{{ lesson?.title ?? '日语练习' }}</h3>
+        <p class="help-text">以下是这次提交的原始记录，只回看，不改写。</p>
+        <dl class="saved-responses"><dt>听后回忆</dt><dd>{{ draft.response }}</dd><dt>自己尝试的表达</dt><dd lang="ja">{{ draft.example }}</dd><dt>对照后准备调整</dt><dd>{{ draft.comparison }}</dd></dl>
+        <p>首次回答录音</p><audio v-if="originalPlayback" :src="originalPlayback" controls aria-label="日语首次回答录音" /><p v-else class="help-text">本机暂未取得这段录音；文字仍保留，可联网后同步。</p>
+        <p>完整重说录音</p><audio v-if="retryPlayback" :src="retryPlayback" controls aria-label="日语完整重说录音" /><p v-else class="help-text">本机暂未取得这段录音；文字仍保留，可联网后同步。</p>
+        <template v-if="lesson">
+          <button class="text-button" :aria-expanded="savedCoachOpen" :disabled="coachActive" @click="savedCoachOpen = !savedCoachOpen">查看或接续 AI 辅导</button>
+          <JapaneseCoach
+            v-if="savedCoachOpen" :key="session.id" :database="database" :session-id="session.id" :audio-id="draft.audioId" read-only
+            :reference="`${lesson.canDo}。任务：${lesson.transferZh}。本站表达示例（不是原站字幕）：${lesson.phrase}`" :target="lesson.phrase"
+            :check-owner="learning.checkOwner" @active="coachActive = $event" />
+        </template>
         <RouterLink to="/ja" class="button primary">返回日语今日安排</RouterLink>
       </section>
       <section v-else-if="lesson" class="panel ja-panel">
@@ -320,4 +338,6 @@ legend { margin-bottom: 10px; font-weight: 600; }
 textarea { resize: vertical; }
 .ja-phrase { font-size: 1.5rem; }
 .ja-actions { margin-top: 24px; }
+.saved-responses dd { margin: 8px 0 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ja-panel audio { display: block; max-width: 100%; margin-bottom: 16px; }
 </style>
