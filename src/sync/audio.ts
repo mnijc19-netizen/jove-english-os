@@ -1,3 +1,4 @@
+import Dexie from 'dexie'
 import type { JoveDatabase } from '../db/db'
 import { audioMetadataSchema } from '../db/schema'
 import { withAudioBudget } from '../db/audio'
@@ -35,6 +36,15 @@ function isMissingObject(error: unknown): boolean {
 }
 export async function audioHash(blob: Blob): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))].map(value => value.toString(16).padStart(2, '0')).join('')
+}
+async function localAudioHash(blob: Blob): Promise<string | null> {
+  try { return await audioHash(blob) }
+  catch (error) {
+    // A file-backed IndexedDB Blob may survive after its backing file is lost.
+    // Only that read failure permits recovery, never a readable hash mismatch.
+    if (error instanceof DOMException && ['NotFoundError', 'NotReadableError'].includes(error.name)) return null
+    throw error
+  }
 }
 export function referencedAudio(value: unknown, result = new Set<string>(), depth = 0): Set<string> {
   if (!value || typeof value !== 'object' || depth > 20) return result
@@ -205,6 +215,7 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
     active: active.has(asset.id), assessment: assessmentAudio.has(asset.id), pronunciation: pronunciationAudio.has(asset.id),
   }, now)
   const manifests: AudioManifest[] = []
+  const unreadableIds = new Set<string>()
   let after = ''
   for (;;) {
     const response = await accountRequest(access, () => access.client.from(manifestTable(language)).select('*').eq('user_id', owner)
@@ -234,9 +245,16 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
     if (!meta) { result.blocked++; continue }
     if (!isPrivateAudio(meta.kind)) continue
     const local = await database.audio.get(row.audio_id)
+    let unreadable = false
     if (local) {
-      if (local.blob.size !== row.bytes || await audioHash(local.blob) !== row.sha256) { result.blocked++; continue }
-    } else if (!row.expires_at || Date.parse(row.expires_at) > now) {
+      if (local.blob.size !== row.bytes) { result.blocked++; continue }
+      const hash = await localAudioHash(local.blob)
+      unreadable = hash === null
+      if (unreadable) unreadableIds.add(row.audio_id)
+      if (!unreadable && hash !== row.sha256) { result.blocked++; continue }
+    }
+    if (unreadable && row.expires_at && Date.parse(row.expires_at) <= now) { result.blocked++; continue }
+    if ((!local || unreadable) && (!row.expires_at || Date.parse(row.expires_at) > now)) {
       let asset: AudioAsset
       try { asset = await downloadRecording(access, row, meta, language) }
       catch (error) {
@@ -248,12 +266,23 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
       await access.assertCurrent()
       const added = await withAudioBudget(database, async budget => {
         if ((await database.syncMeta.get('owner'))?.value !== owner) throw new Error('Sync owner changed')
-        if (await database.audio.get(asset.id)) return false
-        if (budget.usedBytes + asset.blob.size > budget.limitBytes) return false
-        await database.audio.add(asset)
+        const current = await database.audio.get(asset.id)
+        if (current && (!unreadable || current.blob.size !== row.bytes
+          || await Dexie.waitFor(localAudioHash(current.blob), 30_000) !== null)) return false
+        await Dexie.waitFor(access.assertCurrent(), 30_000)
+        if (budget.usedBytes - (current?.blob.size ?? 0) + asset.blob.size > budget.limitBytes) return false
+        // Recheck under the write lock and keep concurrent metadata changes.
+        if (current) { asset = { ...current, blob: asset.blob }; await database.audio.put(asset) }
+        else await database.audio.add(asset)
         return true
-      })
-      if (added) { result.downloaded++; assets.push(asset) }
+      }, 200, () => access.assertCurrent())
+      if (added) {
+        unreadableIds.delete(asset.id)
+        result.downloaded++
+        const index = assets.findIndex(item => item.id === asset.id)
+        if (index < 0) assets.push(asset)
+        else assets[index] = asset
+      }
       else { result.blocked++; continue }
     }
     if (result.hasMore) { result.retentionPending = true; continue }
@@ -266,6 +295,7 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
       throw new Error('Invalid recording cleanup response; local originals retained')
     result.retentionPending ||= cleanup.pending || cleanup.candidates.length === 20
     for (const candidate of cleanup.candidates) {
+      if (unreadableIds.has(candidate?.audioId)) { result.retentionPending = true; continue }
       const row = manifests.find(item => item.audio_id === candidate?.audioId)
       const meta = row && metadata.get(row.audio_id)
       if (!row || !meta || candidate.path !== row.object_path || typeof candidate.version !== 'string'
@@ -282,6 +312,7 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
   } else if (result.hasMore || (await journal.pending()).length) result.retentionPending = true
   // Cleanup comes first even if upload fails in Storage's conservative preflight.
   for (const asset of assets) {
+    if (unreadableIds.has(asset.id)) continue
     const meta = metadata.get(asset.id) ?? asset, decision = decisionFor(meta)
     const recovering = manifests.some(row => row.audio_id === asset.id && row.recovery_pending)
     if (recovering || (decision && (decision.expiresAt === null || decision.expiresAt > now))) {

@@ -252,6 +252,52 @@ function recording(id = 'audio-fixture', processed = false) {
     mimeType: 'audio/wav', createdAt: Date.now(), duration: 1, kind: 'recording' as const, processed, label: 'Fixture' }
 }
 describe('private audio uses the real SDK builders with fixed-principal access', () => {
+  it.each(['recover', 'not-readable', 'exact-capacity', 'missing', 'tampered', 'expired', 'changed-owner', 'locked-owner-change', 'concurrent-original', 'capacity', 'unknown-error'])(
+    'recovers only an unreadable local Blob from verified private bytes: %s', async mode => {
+    const { db, journal } = await local(), fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording('lost-file')
+    const manifest = await uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })
+    const missingBlob = new Blob(['missing!'], { type: 'audio/x-missing-file' })
+    await db.audio.put({ ...asset, blob: missingBlob })
+    await db.sessions.put({ id: 'original-answer', kind: 'listen', startedAt: now, stage: 'draft', draft: { answer: 'unchanged', audioId: asset.id } })
+    await synchronize(journal, fixture.server)
+    const sessions = await db.sessions.toArray(), operations = await db.syncOperations.toArray()
+    const read = Blob.prototype.arrayBuffer
+    let missingReads = 0
+    vi.spyOn(Blob.prototype, 'arrayBuffer').mockImplementation(function(this: Blob) {
+      if (this.type === missingBlob.type && ++missingReads === 2 && mode === 'locked-owner-change') fixture.switchUser()
+      if (this.type === missingBlob.type) return Promise.reject(mode === 'unknown-error'
+        ? new Error('unrelated failure') : new DOMException('Fixture backing file missing', mode === 'not-readable' ? 'NotReadableError' : 'NotFoundError'))
+      return read.call(this)
+    })
+    if (mode === 'missing') fixture.setDownloadFailure({ status: 404, code: 'NoSuchKey' })
+    if (mode === 'tampered') fixture.objects.set(manifest.object_path, new Blob(['tampered']))
+    if (mode === 'expired') fixture.manifests.set(asset.id, { ...manifest, expires_at: new Date(Date.now() - 1000).toISOString() })
+    if (mode === 'capacity' || mode === 'exact-capacity') {
+      await db.settings.put({ id: 'main', value: { ...defaultSettings, audioLimitMB: 1 } })
+      await db.audio.put({ ...recording('reusable-cache'), kind: 'generated', blob: new Blob([new Uint8Array(1024 * 1024 - (mode === 'exact-capacity' ? 8 : 0))]) })
+    }
+    if (mode === 'changed-owner' || mode === 'concurrent-original') fixture.setHook(async path => {
+      if (!path.includes('/storage/')) return
+      if (mode === 'changed-owner') fixture.switchUser()
+      else await db.audio.put({ ...asset, blob: new Blob(['new take'], { type: 'audio/wav' }) })
+    })
+    const baseline = fixture.requests.length
+    const recovers = ['recover', 'not-readable', 'exact-capacity'].includes(mode)
+    if (['tampered', 'changed-owner', 'locked-owner-change', 'unknown-error'].includes(mode)) await expect(synchronizeAudio(db, access, 'minimal')).rejects.toThrow()
+    else {
+      const result = await synchronizeAudio(db, access, 'minimal')
+      expect(result).toMatchObject({ downloaded: recovers ? 1 : 0, blocked: recovers ? 0 : 1 })
+    }
+    const saved = (await db.audio.get(asset.id))!
+    if (recovers) {
+      expect(await audioHash(saved.blob)).toBe(manifest.sha256)
+      expect(saved).toMatchObject({ ...asset, blob: expect.any(Blob) })
+    } else if (mode === 'concurrent-original') expect(await saved.blob.text()).toBe('new take')
+    else expect(saved.blob.type).toBe(missingBlob.type)
+    if (mode === 'expired' || mode === 'unknown-error') expect(fixture.requests.slice(baseline).some(r => r.path.includes('/storage/'))).toBe(false)
+    expect(await db.sessions.toArray()).toEqual(sessions)
+    if (mode !== 'capacity' && mode !== 'exact-capacity') expect(await db.syncOperations.toArray()).toEqual(operations)
+  })
   it.each([false, null, { allowed: true }])('retains the original and never uploads without a strict capacity grant: %j', async value => {
     const fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording()
     fixture.setCapacity(value)

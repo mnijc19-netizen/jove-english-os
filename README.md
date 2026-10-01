@@ -107,7 +107,7 @@ Official deployment references: [GitHub Pages workflows](https://docs.github.com
 
 ## Data, privacy and limits
 
-- IndexedDB remains the offline learning store. The account-enabled release adds owner-isolated event synchronization and bounded private recording storage; the current public V1 still has no automatic sync. No analytics or telemetry are added. Clearing site data can delete unsynced work; persistence is requested but cannot be guaranteed.
+- IndexedDB remains the offline learning store. The current account-enabled release synchronizes owner-isolated English/Japanese records and bounded private recordings; signed-out/offline changes stay on the device until a successful account sync. No analytics or telemetry are added. Clearing site data can delete unsynced work; persistence is requested but cannot be guaranteed.
 - JSON backup restores learning records, nonsecret settings and schedules. It excludes keys and audio blobs. Recordings are original user work, not disposable synthesis cache; keep downloaded originals separately. Do not assume a JSON file contains your recordings.
 - Browser BYOK is an optional advanced fallback, isolated from normal server-only production keys. A browser-saved key is not protected against malicious same-origin code. Keep untrusted material escaped; authenticated API traffic is not cached by the service worker.
 - Normal account AI/STT/TTS uses server-configured providers with only the necessary current task material/audio. Acoustic practice uses the separate speech engine; STT and LLM feedback are not acoustic measurements. BYOK model choices and clearly labeled local/synthetic fallback remain advanced paths. Unreviewed synthetic voices cannot qualify as formal pronunciation references.
