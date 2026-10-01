@@ -269,12 +269,13 @@ export async function synchronizeAudio(database: JoveDatabase, access: SyncAcces
         const current = await database.audio.get(asset.id)
         if (current && (!unreadable || current.blob.size !== row.bytes
           || await Dexie.waitFor(localAudioHash(current.blob), 30_000) !== null)) return false
-        await Dexie.waitFor(access.assertCurrent(), 30_000)
-        if (budget.usedBytes - (current?.blob.size ?? 0) + asset.blob.size > budget.limitBytes) return false
-        // Recheck under the write lock and keep concurrent metadata changes.
-        if (current) { asset = { ...current, blob: asset.blob }; await database.audio.put(asset) }
-        else await database.audio.add(asset)
-        return true
+        return access.assertCurrent().then(() => {
+          if (budget.usedBytes - (current?.blob.size ?? 0) + asset.blob.size > budget.limitBytes) return false
+          // Queue the write directly from the guarded Dexie promise. An extra
+          // native await here can outlive the active IndexedDB callback.
+          if (current) asset = { ...current, blob: asset.blob }
+          return (current ? database.audio.put(asset) : database.audio.add(asset)).then(() => true)
+        })
       }, 200, () => access.assertCurrent())
       if (added) {
         unreadableIds.delete(asset.id)

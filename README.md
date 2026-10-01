@@ -15,6 +15,8 @@ A personal, local-first language trainer for a native Chinese speaker, focused o
 
 AI 提供文字解释、对话和纠错，不提供可靠的自动发音／音高评分，也不能保证固定天数达到某水平。参考发音优先听原站真人；保留自己的录音，回听、对照、重说。预算用尽时，基础练习、保存和复习仍可继续；重要录音请另存备份。
 
+日语已完成的练习可从“最近完成的练习”回看原答案、两次录音和已有 AI 反馈。回看不会自动请求 AI；未保存的反馈需明确点击取回，只有仍有效的同一次缓存结果可免于重新生成，新的请求仍可能收费。
+
 ## Start learning
 
 Website: [Jove Language OS](https://mnijc19-netizen.github.io/jove-english-os/). Release verification is recorded in `docs/STATUS.md`.

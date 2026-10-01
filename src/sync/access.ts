@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import Dexie from 'dexie'
 import type { PublicCloudConfig } from '../cloud/client'
 
 /** The client must be private to this access and have an immutable Authorization.
@@ -14,13 +15,15 @@ export async function bindSyncAccess(source: SupabaseClient, ownerId: string, co
   const session = await source.auth.getSession()
   const token = session.data.session?.access_token
   if (session.error || !token) throw new Error('Sign in before synchronizing')
-  const assertCurrent = async () => {
-    await assertLocal()
-    const current = await source.auth.getSession()
+  const assertCurrent = () => Dexie.Promise.resolve(assertLocal()).then(() => {
+    // Keep only the external auth wait alive. assertLocal may read this same
+    // transaction and must never run inside Dexie.waitFor's awaited operation.
+    return Dexie.waitFor(source.auth.getSession(), 30_000)
+  }).then(current => {
     if (current.error || current.data.session?.access_token !== token || current.data.session.user.id !== ownerId)
       throw new Error('Account changed during sync. Local work is safe.')
-    await assertLocal()
-  }
+    return assertLocal()
+  })
   // Cached session.user is not proof of identity. Auth validates this exact JWT.
   const user = await source.auth.getUser(token)
   if (user.error || user.data.user?.id !== ownerId) throw new Error('Sync account does not match this browser owner')

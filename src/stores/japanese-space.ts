@@ -17,9 +17,13 @@ export function createJapaneseSpace(english: JoveDatabase, sharedAccount: Shared
   if (english.language !== 'en' || database.language !== 'ja') throw new Error('Invalid language spaces')
   let epoch = 0
   const signingOut = ref(false)
-  async function admitOwner(owner: string) {
-    if (signingOut.value || !owner || sharedAccount.ownerId() !== owner || (await english.syncMeta.get('owner'))?.value !== owner)
+  function admitOwner(owner: string): Promise<void> {
+    // This guard can run inside a Japanese audio transaction. The English
+    // owner read is a separate transaction, so keep the Japanese one alive.
+    return Dexie.waitFor(Dexie.ignoreTransaction(() => english.syncMeta.get('owner')), 30_000).then(record => {
+      if (signingOut.value || !owner || sharedAccount.ownerId() !== owner || record?.value !== owner)
       throw new Error('英语尚未接纳同一学习账号，日语没有上传任何记录。')
+    })
   }
   const cloud = makeCloud(database, admitOwner), ready = ref(false), opening = ref(false), initializationError = ref(''), revision = ref(0)
   let pending: Promise<void> | undefined, started = false, afterDownload: () => Promise<void> = async () => {}

@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import Dexie from 'dexie'
 import { defineStore } from 'pinia'
 import { cloudClient, publicCloudConfig, type PublicCloudConfig } from '../cloud/client'
 import type { SupabaseClient } from '@supabase/supabase-js'
@@ -8,6 +9,16 @@ import { SupabaseSyncRemote, synchronize } from '../sync/remote'
 import { readRecordingRetention, synchronizeAudio } from '../sync/audio'
 import { accountRequest, bindSyncAccess } from '../sync/access'
 import { protectedLocalChange } from '../sync/local-change'
+
+/** Keep owner reads in the caller's transaction even after a foreign admission. */
+export function assertSyncOwner(journal: SyncJournal, owner: string, assertActive: () => void,
+  admitOwner: (owner: string) => Promise<void>): Promise<void> {
+  assertActive()
+  return Dexie.Promise.resolve(admitOwner(owner)).then(() => journal.owner()).then(bound => {
+    assertActive()
+    if (bound !== owner) throw new Error('Sync owner changed')
+  })
+}
 
 /** Exported to exercise the real store against isolated databases and SDK clients. */
 export function createCloudState(database: JoveDatabase = db, client: SupabaseClient | null = cloudClient, config: PublicCloudConfig = publicCloudConfig,
@@ -35,11 +46,8 @@ export function createCloudState(database: JoveDatabase = db, client: SupabaseCl
     running = Promise.resolve().then(async () => {
       let refresh = false
       try {
-        const access = await bindSyncAccess(client, id, config, async () => {
-          check(generation, id)
-          await admitOwner(id)
-          if (await journal.owner() !== id) throw new Error('Sync owner changed')
-        })
+        const access = await bindSyncAccess(client, id, config,
+          () => assertSyncOwner(journal, id, () => check(generation, id), admitOwner))
         const result = await synchronize(journal, new SupabaseSyncRemote(access.client, access, database.language))
         check(generation, id)
         refresh = result.downloaded > 0

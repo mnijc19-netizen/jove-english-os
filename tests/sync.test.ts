@@ -16,7 +16,8 @@ import { restoreReviewAttempt, reviewAttempt, reviewAttemptCompleted, selectedRe
 import { jsonbBytes, MAX_UPLOAD_BYTES, SupabaseSyncRemote, synchronize, uploadBatch, type SyncRemote } from '../src/sync/remote'
 import { bindSyncAccess } from '../src/sync/access'
 import { audioHash, downloadRecording, readRecordingRetention, referencedAudio, retentionDecision, synchronizeAudio, uploadRecording, type AudioManifest } from '../src/sync/audio'
-import { createCloudState } from '../src/stores/cloud'
+import { assertSyncOwner, createCloudState } from '../src/stores/cloud'
+import { createJapaneseSpace } from '../src/stores/japanese-space'
 import { protectedLocalChange, resetDeviceCacheAndKey } from '../src/sync/local-change'
 import { exportBackup, restoreBackup } from '../src/db/repository'
 
@@ -206,7 +207,7 @@ function sdkAudioFixture() {
       const blob = objects.get(path)
       return blob ? new Response(blob) : new Response('missing', { status: 404 })
     }
-    if (url.pathname.endsWith('/recording_manifest')) {
+    if (url.pathname.endsWith('/recording_manifest') || url.pathname.endsWith('/language_recording_manifest')) {
       if (method === 'POST') {
         const row = JSON.parse(String(init?.body)) as AudioManifest
         if (!manifests.has(row.audio_id)) manifests.set(row.audio_id, row)
@@ -217,7 +218,7 @@ function sdkAudioFixture() {
         .sort((a, b) => a.audio_id < b.audio_id ? -1 : 1).slice(0, Number(url.searchParams.get('limit') ?? 500))
       return json(rows)
     }
-    if (url.pathname.endsWith('/reconcile_recording_retention')) {
+    if (url.pathname.endsWith('/reconcile_recording_retention') || url.pathname.endsWith('/reconcile_language_recording_retention')) {
       const args = JSON.parse(String(init?.body)), row = manifests.get(args.recording_id)
       if (args.expected_policy !== policy || !row) return json(false)
       row.purpose = args.retention_purpose; row.expires_at = args.retention_expires_at
@@ -235,7 +236,7 @@ function sdkAudioFixture() {
     return { data: { subscription: { unsubscribe() { listeners.delete(callback) } } } } as never
   })
   return { config, client, manifests, objects, transport, requests, server,
-    access: () => bindSyncAccess(client, owner, config, async () => {}, transport),
+    access: (assertLocal: () => Promise<void> = async () => {}) => bindSyncAccess(client, owner, config, assertLocal, transport),
     switchUser(value = deviceB) { principal = value; token = value === owner ? 'test-token-a' : 'test-token-b' },
     emitAuth(event: AuthChangeEvent) {
       if (event === 'SIGNED_OUT') principal = ''
@@ -252,14 +253,58 @@ function recording(id = 'audio-fixture', processed = false) {
     mimeType: 'audio/wav', createdAt: Date.now(), duration: 1, kind: 'recording' as const, processed, label: 'Fixture' }
 }
 describe('private audio uses the real SDK builders with fixed-principal access', () => {
-  it.each(['recover', 'not-readable', 'exact-capacity', 'missing', 'tampered', 'expired', 'changed-owner', 'locked-owner-change', 'concurrent-original', 'capacity', 'unknown-error'])(
+  it.each(['fresh-device', 'lost-file'])('keeps Japanese admission live across the separate English owner database: %s', async mode => {
+    const { db: en } = await local(), ja = new JoveDatabase('ja-recovery-' + crypto.randomUUID(), 'ja')
+    databases.push(ja)
+    const journal = new SyncJournal(ja), fixture = sdkAudioFixture(), asset = recording('japanese-original')
+    await journal.bindOwner(owner)
+    let admitOwner!: (owner: string) => Promise<void>
+    const account = { ownerId: () => owner, settle: async () => {}, signOut: async () => {} }
+    createJapaneseSpace(en, account, ja, (database, guard) => { admitOwner = guard; return createCloudState(database, null) })
+    const access = await fixture.access(() => assertSyncOwner(journal, owner, () => {}, admitOwner))
+    const manifest = await uploadRecording(access, asset, { purpose: 'draft', expiresAt: null }, 'ja')
+    await ja.audio.put(asset)
+    await synchronize(journal, Object.assign(fixture.server, { language: 'ja' as const }))
+    const { blob, ...metadata } = asset
+    await ja.syncMeta.put({ id: 'remoteAudio', value: [metadata] })
+    if (mode === 'fresh-device') await ja.audio.delete(asset.id)
+    else {
+      await ja.audio.put({ ...asset, blob: new Blob(['missing!'], { type: 'audio/x-missing-file' }) })
+      const read = Blob.prototype.arrayBuffer
+      vi.spyOn(Blob.prototype, 'arrayBuffer').mockImplementation(function(this: Blob) {
+        return this.type === 'audio/x-missing-file' ? Promise.reject(new DOMException('Missing', 'NotFoundError')) : read.call(this)
+      })
+    }
+    const englishBefore = await en.syncOperations.toArray(), japaneseBefore = await ja.syncOperations.toArray()
+    expect(await synchronizeAudio(ja, access, 'minimal')).toMatchObject({ downloaded: 1, blocked: 0 })
+    expect(await audioHash((await ja.audio.get(asset.id))!.blob)).toBe(await audioHash(blob))
+    expect(manifest.learning_language).toBe('ja')
+    expect(await en.syncOperations.toArray()).toEqual(englishBefore)
+    expect(await ja.syncOperations.toArray()).toEqual(japaneseBefore)
+    expect(await en.audio.count()).toBe(0)
+  })
+  it.each(['recover', 'fresh-device', 'delayed-auth', 'not-readable', 'exact-capacity', 'missing', 'tampered', 'expired', 'changed-owner', 'locked-owner-change', 'concurrent-original', 'capacity', 'unknown-error'])(
     'recovers only an unreadable local Blob from verified private bytes: %s', async mode => {
-    const { db, journal } = await local(), fixture = sdkAudioFixture(), access = await fixture.access(), asset = recording('lost-file')
+    const { db, journal } = await local(), fixture = sdkAudioFixture(), asset = recording('lost-file')
+    const access = await fixture.access(() => assertSyncOwner(journal, owner, () => {}, async () => {}))
     const manifest = await uploadRecording(access, asset, { purpose: 'draft', expiresAt: null })
     const missingBlob = new Blob(['missing!'], { type: 'audio/x-missing-file' })
     await db.audio.put({ ...asset, blob: missingBlob })
     await db.sessions.put({ id: 'original-answer', kind: 'listen', startedAt: now, stage: 'draft', draft: { answer: 'unchanged', audioId: asset.id } })
     await synchronize(journal, fixture.server)
+    if (mode === 'fresh-device') {
+      await db.audio.delete(asset.id)
+      const { blob, ...metadata } = asset
+      expect(blob.size).toBe(manifest.bytes)
+      await db.syncMeta.put({ id: 'remoteAudio', value: [metadata] })
+    }
+    if (mode === 'delayed-auth') {
+      const getSession = vi.mocked(fixture.client.auth.getSession).getMockImplementation()!
+      vi.mocked(fixture.client.auth.getSession).mockImplementation(async () => {
+        if (Dexie.currentTransaction) await new Promise(resolve => setTimeout(resolve, 15))
+        return getSession()
+      })
+    }
     const sessions = await db.sessions.toArray(), operations = await db.syncOperations.toArray()
     const read = Blob.prototype.arrayBuffer
     let missingReads = 0
@@ -282,7 +327,7 @@ describe('private audio uses the real SDK builders with fixed-principal access',
       else await db.audio.put({ ...asset, blob: new Blob(['new take'], { type: 'audio/wav' }) })
     })
     const baseline = fixture.requests.length
-    const recovers = ['recover', 'not-readable', 'exact-capacity'].includes(mode)
+    const recovers = ['recover', 'fresh-device', 'delayed-auth', 'not-readable', 'exact-capacity'].includes(mode)
     if (['tampered', 'changed-owner', 'locked-owner-change', 'unknown-error'].includes(mode)) await expect(synchronizeAudio(db, access, 'minimal')).rejects.toThrow()
     else {
       const result = await synchronizeAudio(db, access, 'minimal')
