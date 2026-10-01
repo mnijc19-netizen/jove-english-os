@@ -7,7 +7,7 @@ A personal, local-first language trainer for a native Chinese speaker, focused o
 ## 中文使用说明
 
 1. 电脑和 iPhone 在 [Settings](https://mnijc19-netizen.github.io/jove-english-os/#/settings) 登录同一个学习账号。正常使用不需要在每台设备重新填写 AI 密钥。
-2. 英语从 [Today](https://mnijc19-netizen.github.io/jove-english-os/#/today) 开始；日语从 [日本語](https://mnijc19-netizen.github.io/jove-english-os/#/ja) 开始。首次按实际情况完成各自的小诊断，不会的可以跳过，不用提前准备。
+2. 英语从 [Today](https://mnijc19-netizen.github.io/jove-english-os/#/today) 开始；日语从 [日本語](https://mnijc19-netizen.github.io/jove-english-os/#/ja) 开始。首次按实际情况完成各自的小诊断，不会的可以跳过，不用提前准备。日语完全零基础可直接点“我是零基础，不猜题直接起步”再确认；若曾随意填写诊断，可用“起点填错了？按零基础重新起步”校正。它只调整起步安排，不产生能力分数，也不清空旧记录。
 3. 每天只需告诉系统可用时间、精力，跟着下一项指引学习；英语与日语共用每天的时间预算，学习记录、课程和复习分开。Library 是选看材料的地方，不需要你每天自己编课。
 4. 真人课程在出版社原站播放或阅读，回来保存自己的理解、表达和录音。先独立尝试，需要时再点开 AI 提示；一次改一处，再完整重说。系统会安排后续复习，打开链接或看懂参考答案不等于掌握。
 5. 换设备前等对应语言同步完成；录音可能比文字慢。离线时先留在原设备，联网后再同步。外部课程和 AI 需要网络，已保存的本地练习不会因为 AI 失败而消失。

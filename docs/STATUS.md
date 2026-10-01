@@ -1,8 +1,21 @@
 # Current status
 
-## Latest checkpoint — September27 local
+## Latest checkpoint — October1 local
 
-### Beginner starting-point correction — local candidate, not yet published
+### Beginner correction published and applied to the legitimate owner
+
+- Release workflow36330713610 successfully verified and deployed exact77ac12fcd589ec5cb10eb34f12ed0e9525bf697d. Public clean build is `77ac12f-33a1b3b54df5`, built2026-09-27T15:49:23.74Z. The release includes210 browser passes/27 documented skips, real local Auth/Storage/content/Deno and multi-profile Chromium/WebKit,321-file source/build scan and0 audit vulnerabilities. These completed results were read back October1 after the interrupted wait; the workflow was not restarted.
+- Fresh public desktop Chromium/mobile WebKit beginner correction/cancel/reload journeys pass2/2. The existing dedicated owner window updated through the normal saved-work/PWA action, retaining its login. Acting on the owner's explicit declaration of zero Japanese knowledge, the normal confirmation UI saved the separate self-reported beginner preference. Its cloud operation has a positive acknowledgement cursor; Japanese reports Synced with pending0/deferred0/no further history page. The original arbitrary quiz retains its exact pre-change SHA-256. No quiz answer, learning response, recording or ability event was fabricated; all four declaration scores remain null.
+- The actual October1 owner plan now selects `ja-irodori-starter-1` (见面与告别) plus `ja-kana-hiragana-1`, with full initial reading support. A normal reload retains the declared starting point and correct lesson. Existing September27 planning history remains stored. The window is left on Japanese Today; session/recording counts remain0 because the agent did not perform learning on the owner's behalf. This correction is delivered; a genuine owner Japanese learning/output/AI journey remains the final outstanding evidence tracked here, not a reason to repeat passed provider diagnostics or English continuity tests. No paid AI calls or budget changes.
+
+## September28 checkpoint
+
+### Scheduled English lesson reached Today after genuine progression
+
+- At the natural local date transition to September28, the legitimate signed-in desktop Today page assigned `2026-09-28:listen:external-voa-level1-2`, displayed `Everyday English · Lesson 2`, and kept it unfinished. The approved material has checkedAt1790511696252, matching the September27 12:21UTC scheduled directory delivery (workflow36318711079). The owner's actual previous welcome reflection remains self-report, with playbackObserved/comprehensionVerified both false. No clock, quiz answer, completion or ability score was fabricated to advance the course.
+- This is the missing observed scheduled-directory → newly eligible lesson → actual Today handoff, not just a Library count. It supersedes the corresponding pending continuity item in earlier checkpoints below. It does not certify external playback, comprehension, guaranteed learning gains or unlimited future publisher availability. Complete owner Japanese learning/output/AI continuity remains separate and incomplete.
+
+### Beginner starting-point correction — candidate evidence (published above)
 
 - The owner completed the six Japanese setup questions, explicitly said the answers were arbitrary, then confirmed being an absolute beginner. The completed setup and generated plan are technical flow evidence, not valid placement/learning evidence. The public account is not changed by the local implementation below.
 - A separate `ja-beginner-start` self-report now preserves the original diagnosis and leaves all four measured scores null. Both planning and reading-help defaults use that declaration instead of the quiz. Only a wholly untouched initial plan is replaced; started/completed/optional tasks, drafts and recordings retain their identities. No English history, FSRS schedule, ability event, cloud schema, model or API budget is changed. The Japanese home page offers a confirmation/cancel action before and after the quiz, and labels the resulting beginner state; it does not pretend that a fresh test was taken.
