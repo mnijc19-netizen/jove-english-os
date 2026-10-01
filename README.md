@@ -11,7 +11,7 @@ A personal, local-first language trainer for a native Chinese speaker, focused o
 3. 每天只需告诉系统可用时间、精力，跟着下一项指引学习；英语与日语共用每天的时间预算，学习记录、课程和复习分开。Library 是选看材料的地方，不需要你每天自己编课。
 4. 真人课程在出版社原站播放或阅读，回来保存自己的理解、表达和录音。先独立尝试，需要时再点开 AI 提示；一次改一处，再完整重说。系统会安排后续复习，打开链接或看懂参考答案不等于掌握。
 5. 换设备前等对应语言同步完成；录音可能比文字慢。离线时先留在原设备，联网后再同步。外部课程和 AI 需要网络，已保存的本地练习不会因为 AI 失败而消失。
-6. 更新网站时先保存练习，在 Settings 的“网站版本与更新”点“检查更新”，出现更新按钮再点。不要清空网站数据；能登录不等于已更新。确切发布版本和未完成验收见 [项目状态](docs/STATUS.md)。
+6. 更新网站时先保存练习，在 Settings 的“网站版本与更新”点“检查更新”，出现更新按钮再点。不要清空网站数据；能登录不等于已更新。确切发布版本、验收范围和使用边界见 [项目状态](docs/STATUS.md)。
 
 AI 提供文字解释、对话和纠错，不提供可靠的自动发音／音高评分，也不能保证固定天数达到某水平。参考发音优先听原站真人；保留自己的录音，回听、对照、重说。预算用尽时，基础练习、保存和复习仍可继续；重要录音请另存备份。
 
@@ -21,7 +21,7 @@ AI 提供文字解释、对话和纠错，不提供可靠的自动发音／音�
 
 Website: [Jove Language OS](https://mnijc19-netizen.github.io/jove-english-os/). Release verification is recorded in `docs/STATUS.md`.
 
-**Release boundary:** account-backed English, scheduled external-course directories and bounded live AI calls have production evidence. Full multilingual/device acceptance is not yet complete; consult `docs/STATUS.md` for the exact deployed build and outstanding checks. Automatic acoustic scoring and bulk hosted course audio are not required. Desktop and iPhone are the current physical-device acceptance targets; existing Android compatibility remains, without a mandatory Android-device gate.
+**Release boundary:** the owner-amended English/Japanese delivery was accepted October1,2026 on public build `cc09cdd-e014269348d5`. Automatic plans, scheduled publisher-course directories, separate language learning/reviews, bounded live AI and account-backed saved-work continuity have implementation and production evidence. See `docs/STATUS.md` for the full evidence map and limits. Desktop and the owner-reported iPhone-to-desktop handoff were accepted; this does not certify every device or OS. Android compatibility remains, with physical Android acceptance waived. Automatic acoustic scoring, bulk hosted course audio, unlimited content and guaranteed learning gains are not claimed.
 
 ### Account-enabled first use
 
