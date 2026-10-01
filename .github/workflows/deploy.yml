@@ -24,6 +24,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
@@ -80,7 +81,6 @@ jobs:
             playwright-report/
           retention-days: 3
           if-no-files-found: error
-      - run: npm audit --audit-level=high
       - name: Verify commit-bound production backend readiness
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: node scripts/verify-release-readiness.mjs
