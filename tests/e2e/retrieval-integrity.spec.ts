@@ -106,7 +106,7 @@ async function reviewFixture(page: Page) {
 }
 async function selectReview(page: Page, modality: Modality) {
   await page.getByRole("combobox", { name: "Practice type" }).selectOption(modality);
-  await expect(page.locator(".flashcard .pill")).toHaveText(modality);
+  await expect(page.locator(".flashcard .pill.capitalize")).toHaveText(modality);
   await expect(page.locator("#review-answer")).toBeEnabled();
 }
 async function draft(page: Page, id: string) {
