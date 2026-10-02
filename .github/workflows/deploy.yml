@@ -63,7 +63,9 @@ jobs:
         env:
           JOVE_LOCAL_BROWSER_TEST: '1'
           JOVE_SYNC_BROWSERS: chromium,webkit
-      - run: npm run test:e2e -- --max-failures=1
+      # Collect independent failures together instead of paying a cold full
+      # pipeline round trip per fixture. Any failure/flakiness still blocks deploy.
+      - run: npm run test:e2e -- --max-failures=3
         id: browser-regression
         env:
           VITE_JOVE_CONTINUING_COURSES: ${{ vars.JOVE_CONTINUING_COURSES_ENABLED == 'true' && '1' || '0' }}

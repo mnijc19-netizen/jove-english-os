@@ -336,7 +336,9 @@ test('English Today shares the daily allowance with an independently saved Japan
 })
 
 test.describe('external spoken retell',()=>{
-  test.use({captureMode:'synthetic'})
+  // The writing provider is deliberately intercepted. WebKit worker fetches
+  // bypass page routes; real offline/PWA behavior is tested separately.
+  test.use({captureMode:'synthetic', serviceWorkers:'block'})
   // Windows WebKit has no audio APIs; Linux CI validates its real PCM recorder.
   test.skip(({browserName})=>process.platform==='win32' && browserName==='webkit','Windows WebKit has no capture APIs')
   test('requires a saved recording and persists reflection before completing',async({page})=>{
