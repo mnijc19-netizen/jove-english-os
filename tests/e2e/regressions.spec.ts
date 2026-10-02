@@ -391,11 +391,11 @@ test("open Today rolls over at local midnight without a reload", async ({
   await open(page, "today");
   await page.clock.pauseAt(new Date("2026-09-08T23:59:20"));
   await expect(page.locator(".page-heading .eyebrow")).toContainText(
-    /September 8/i,
+    /9月8日/,
   );
   await page.clock.runFor(60000);
   await expect(page.locator(".page-heading .eyebrow")).toContainText(
-    /September 9/i,
+    /9月9日/,
   );
 });
 

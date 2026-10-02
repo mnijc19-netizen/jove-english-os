@@ -203,7 +203,7 @@ test("diagnostic needs ended playback, persists balanced choices, and locks firs
   expect(restored.startedAt).toBe(session.startedAt);
   expect(restored.draft.options).toEqual(options);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await expect(page.getByText("LISTENING SAMPLE 2 OF 3", { exact: false })).toBeVisible();
+  await expect(page.getByText("听力片段 2 / 3", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(page.getByRole("radio", { name: wrong, exact: true })).toBeChecked();
   for (const radio of await page.getByRole("radio").all()) await expect(radio).toBeDisabled();
@@ -230,7 +230,7 @@ test("storage failure retains a baseline draft and exposes recovery without hydr
     };
   });
   await page.getByLabel("What should we call you?").fill("Draft survives quota fault");
-  await expect(page.getByRole("alert")).toContainText("Could not save");
+  await expect(page.getByRole("alert")).toContainText("诊断草稿暂未保存");
   await expect(page.getByLabel("What should we call you?")).toHaveValue("Draft survives quota fault");
   await page.evaluate(() => (window as unknown as {restoreBaselineStorage:()=>void}).restoreBaselineStorage());
   await page.getByRole("button", { name: "Retry saving / loading", exact: true }).click();

@@ -149,7 +149,7 @@ test('completed required 45 minutes leaves the original nine-minute draft option
   const source: StudySession = { id: sessionId, kind: 'reading', materialId: material.id, startedAt: now, stage: 'respond',
     draft: { passage: material.transcript, response: 'My original unfinished response about understanding friends.', retell: '', activeMs: 4000 } }
   await put(page, 'plans', [completed]); await put(page, 'sessions', [source]); await page.goto('#/'); await page.reload()
-  await expect(page.getByText('Today’s plan is complete. Let it settle; there is no need to clear the backlog.', { exact: true })).toBeVisible()
+  await expect(page.getByText('今天的练习已保存。', { exact: false })).toBeVisible()
   await expect(page.getByRole('button', { name: /^(Start today’s practice|Continue my practice)$/ })).toHaveCount(0)
   const resume = page.getByRole('button', { name: 'Continue optional practice', exact: true })
   await expect(resume).toHaveCount(1)
@@ -171,7 +171,7 @@ test('completed required 45 minutes leaves the original nine-minute draft option
   expect(events.find(event => event.id === `completed:${taskId}`)?.data?.minutes).toBe(9)
   expect(events.find(event => event.id === `${sessionId}:response`)?.data?.response).toBe(source.draft.response)
   await page.getByRole('button', { name: 'Continue to next task', exact: true }).click()
-  await expect(page.getByText('Today’s plan is complete. Let it settle; there is no need to clear the backlog.', { exact: true })).toBeVisible()
+  await expect(page.getByText('今天的练习已保存。', { exact: false })).toBeVisible()
   await page.reload(); await expect(page.getByRole('button', { name: 'View optional practice', exact: true })).toHaveCount(1)
 })
 

@@ -379,8 +379,8 @@ test("offline browser state saves an editable draft and reconnects without losin
 test("all nine routes render in light and dark with no horizontal overflow", async ({ page, isMobile }, testInfo) => {
   test.setTimeout(90000);
   const headings: Record<string, RegExp> = {
-    today: /A little more natural,\s*every day\./,
-    listen: /Listen for meaning\./,
+    today: /今天，练会一点真实表达。/,
+    listen: /^(听懂，再用出来。|Listen for meaning\.)$/,
     learn: /Make the expression yours\./,
     speak: /Say what you mean\./,
     review: /Bring it back\./,
