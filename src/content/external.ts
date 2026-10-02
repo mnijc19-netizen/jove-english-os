@@ -46,6 +46,37 @@ export function externalCanDo(materialId: string): string {
   return goals[materialId] ?? '听懂一件事，用今天的有用表达给朋友写 1–3 句自己的真实情况，再不照着稿子说出来。'
 }
 
+/** Original post-attempt teaching support, never publisher dialogue or a key.
+ * The default removes curriculum decisions; the learner still writes their own
+ * message. Generic pages get a level-bounded communication frame, not invented
+ * claims about their transcript. No audio or proficiency evidence is created. */
+export function externalExpressionGuide(material: Material) {
+  type Guide = { expression: string; explainZh: string; model: string; promptZh: string }
+  const guides: Record<string, Guide> = {
+    'external-voa-welcome': { expression: 'My name is', explainZh: '介绍名字可以用 My name is + 名字。英语通常需要主语和动词，不能只把中文词序换成英文；再用问句把话题交给对方。',
+      model: "Hi, my name is Lin. What's your name?", promptZh: '换成你的名字，向一个新朋友介绍自己，再问对方的名字。' },
+    'external-voa-level1-2': { expression: "I'm from", explainZh: "I'm 是 I am 的常见缩写；from 说明来处，live in 说明现在住在哪里，两者不一定相同。",
+      model: "I'm from China, and I live in Shanghai. Nice to meet you!", promptZh: '用自己的来处和住处写一条给新朋友的消息，不必使用例句中的地点。' },
+    'external-voa-im-here': { expression: 'Could you help me', explainZh: '先用 I am / I’m at + 地点说明位置，再用 Could you help me? 礼貌求助，让对方知道具体该帮什么。',
+      model: "I'm at the station, but I can't find the exit. Could you help me?", promptZh: '换成你熟悉的地点，说明一个需要帮助的问题，再提出请求。' },
+    'external-voa-level1-4': { expression: 'Do you have', explainZh: 'I have 说明自己有；I don’t have 说明没有。询问对方时用 Do you have ...?，不要直接把陈述句词序当问句。',
+      model: "I have my phone, but I don't have a pen. Do you have one?", promptZh: '说明你带着什么、还缺什么，再问朋友有没有缺的物品。' },
+    'external-voa-level1-5': { expression: "I'm in", explainZh: '在某个房间里可用 I’m in + 房间。Where are you? 问对方在哪里；这里 you 配 are，不配 is。',
+      model: "I'm in the kitchen. Where are you?", promptZh: '换成自己的位置，给正在找你的朋友写两句消息。' },
+    'external-voa-level1-6': { expression: 'Where is', explainZh: 'Where is + 地点? 询问位置；next to 说明相邻关系。设施前常用 the，让对方知道你问的是哪个地点。',
+      model: 'Where is the restroom? Is it next to the exit?', promptZh: '选择你在车站可能需要找的设施，先问位置，再确认一个相邻地点。' },
+    'external-voa-directions': { expression: 'Turn left', explainZh: '指路时可直接用动词开头：Turn left/right。at + 地标说明在哪里转弯，on your right/left 说明目标在哪一侧。',
+      model: 'Turn left at the café. The station is on your right.', promptZh: '想一条你熟悉的路线，换掉转弯地点和目的地，让朋友能照着走。' },
+    'external-esl-first-date': { expression: "I'm going to", explainZh: 'I’m going to + 动作说明打算；at + 时刻说明时间，by + 时刻说明不晚于那个时间。只使用与你真实计划相符的内容。',
+      model: "I'm going to meet a friend at six. I'll be home by nine.", promptZh: '写清一个自己的出行安排，再补一句能让朋友或家人放心的信息。' },
+  }
+  return guides[material.id] ?? (material.externalStudy?.level === 'advanced'
+    ? { expression: 'Although', explainZh: '先说明一个事实，再用 although 引出让步，把看法说得有层次。这里是一种写作支架，不是今天视频的原句。', model: 'Although the idea is promising, we still need to consider the cost.', promptZh: '联系今天听到的话题，写出一个优点和一个需要考虑的问题。' }
+    : material.externalStudy?.level === 'intermediate'
+      ? { expression: 'I think', explainZh: 'I think 引出看法；because 给出原因。比只回答一个词更容易让别人理解你的意思。这里不代替核对原站文本。', model: 'I think this would work because it saves time. What do you think?', promptZh: '就今天的话题说一个自己的看法和原因，再问朋友的意见。' }
+      : { expression: "I'd like to", explainZh: 'I’d like to + 动作可以表达想做什么，比只说单个词更清楚。例句只是支架，可以按真实意思换词，不要求逐字照抄。', model: "I'd like to try this. Could you help me?", promptZh: '联系今天听到的一件事，给朋友写明自己想做什么；需要时加一句请求。' })
+}
+
 /** Self-report is useful reflection, but no third-party playback is observable. */
 export function externalPracticeReady(draft: { listened: boolean; answer: string; expression: string; example: string; audioId: string }) {
   return draft.listened && !!draft.answer.trim() && !!draft.expression.trim() && !!draft.example.trim() && !!draft.audioId

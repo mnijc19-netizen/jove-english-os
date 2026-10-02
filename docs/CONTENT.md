@@ -1,5 +1,7 @@
 # Curated demo content and audio
 
+October3 learner support: externalExpressionGuide supplies eight original early English communication frames and conservative level-based writing frames for unspecified pages. Chinese explanations and examples appear after the first saved attempt; they are not publisher transcripts, audio references or copied exercises. The app recommends a target but never fills the learner's message. Japanese reuses its existing reviewed original lesson phrase/grammar after the independent stage. Nothing here creates listening, pronunciation or proficiency evidence.
+
 October3 Can-do guidance: original Chinese personal-use tasks for the first VOA lessons were checked against the publisher's [lessons1–5 review](https://learningenglish.voanews.com/a/lets-lear-english-review-lessons-1-5/4053916.html) and [lesson6 overview](https://learningenglish.voanews.com/a/lets-learn-english-lesson-6-where-is-the-gym/3345741.html). These are our learning-task designs, not copied worksheets, inferred audio transcripts or claims that an entire course lesson was covered. Remaining metadata-only links use a concrete personal-message/recorded-application goal without inventing their dialogue contents; new delayed practice changes recipient/purpose/context. Preserve source URLs, original-course human playback and the General-American speaking target.
 
 ## Japanese original-book directory — September20 candidate

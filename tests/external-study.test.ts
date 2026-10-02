@@ -1,11 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { externalMaterials, externalPracticeReady, externalLessonCandidates, externalCoursePractice, unavailableExternalIds } from '../src/content/external'
+import { externalMaterials, externalPracticeReady, externalLessonCandidates, externalCoursePractice, unavailableExternalIds, externalExpressionGuide } from '../src/content/external'
 import { materialSchema } from '../src/db/schema'
 import { aggregateSkills, makePlan } from '../src/domain/engine'
 import { defaultProfile, type StudyEvent } from '../src/domain/types'
 import { demoMaterials } from '../src/content/materials'
 
 describe('publisher-linked guided lessons', () => {
+  it('supplies original level-bounded teaching without changing source content or learner evidence', () => {
+    const before = JSON.stringify(externalMaterials)
+    const first = externalExpressionGuide(externalMaterials[0]!)
+    expect(first).toMatchObject({ expression: 'My name is', model: "Hi, my name is Lin. What's your name?" })
+    expect(first.explainZh).toContain('主语和动词')
+    expect(first.promptZh).toContain('你的名字')
+    for (const level of ['beginner', 'intermediate', 'advanced'] as const) {
+      const material = { ...externalMaterials[0]!, id: 'external-unseen', externalStudy: { ...externalMaterials[0]!.externalStudy!, level } }
+      const guide = externalExpressionGuide(material)
+      expect(guide.expression.length).toBeGreaterThan(0)
+      expect(guide.model).toContain(guide.expression)
+      expect(guide.promptZh.length).toBeGreaterThan(5)
+    }
+    expect(JSON.stringify(externalMaterials)).toBe(before)
+  })
   it('treats access problems as temporary exclusions, never learning or site-wide proof', () => {
     const now = Date.UTC(2026, 8, 20), material = externalMaterials[0]!
     const report: StudyEvent = { id: 'unavailable', sessionId: 'draft', type: 'EXTERNAL_LINK_UNAVAILABLE',

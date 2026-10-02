@@ -6,7 +6,7 @@ import { db } from "../db/db";
 import { addChunk, saveError } from "../db/repository";
 import { useRequest } from "../composables/useRequest";
 import { demoMaterials } from "../content/materials";
-import { externalPracticeReady, externalCoursePractice, validExternalReflection } from "../content/external";
+import { externalPracticeReady, externalCoursePractice, validExternalReflection, externalExpressionGuide } from "../content/external";
 import { contentAudioIsTransient, prepareContentAudio } from "../cloud/content";
 import type { Evaluation, MaterialChunk, StudyEvent, StudySession } from "../domain/types";
 import AudioPlayer from "../components/AudioPlayer.vue";
@@ -80,6 +80,7 @@ const externalFeedbackVisible = ref(false);
 const { stage, answer, estimate, listened, selfCheck, sentence, chinese, chunked, feedback } = toRefs(draft);
 const savedAudioId = computed({ get: () => draft.audioId, set: (value: string) => { draft.audioId = value; } });
 const material = computed(() => app.materials.find(m => m.id === materialId.value));
+const externalGuide = computed(() => material.value?.externalStudy ? externalExpressionGuide(material.value) : null);
 const externalReady = computed(() => externalPracticeReady({ listened: draft.listened, answer: draft.answer,
   expression: draft.externalExpression, example: draft.externalExample, audioId: draft.audioId })
   && (draft.externalGuidedVersion !== 1 || !!draft.externalRetryAudioId && draft.externalRetryAudioId !== draft.audioId));
@@ -676,6 +677,14 @@ function externalStep(next: number) {
     || next === 2 && (!draft.externalExpression.trim() || !draft.externalExample.trim() || externalDelayed.value && !draft.listened)) return;
   return safely(async () => {
     if (next === 1 && externalDelayed.value) { draft.externalFirstExample ||= draft.answer; draft.externalExample ||= draft.answer; }
+    if (next === 1) {
+      const token = generation, sessionId = sid.value;
+      await save(); // Commit the first answer before teaching support becomes visible.
+      if (disposed || token !== generation || sid.value !== sessionId) return;
+    }
+    if (next === 1 && draft.externalGuidedVersion === 1 && !draft.externalExpression.trim() && externalGuide.value) {
+      draft.externalExpression = externalGuide.value.expression;
+    }
     if (next === 2) draft.externalFirstExample ||= draft.externalExample;
     stage.value = next; await save();
   });
@@ -831,7 +840,13 @@ onBeforeUnmount(() => {
       </div>
       <div v-if="stage === 1" class="response-area">
       <h3>2 · 核对，再用在自己身上</h3>
-      <p>现在再看原站文本，核对漏听或误解的地方。只选一个日常能用的表达，写一个自己的新情境句，注意英语的主语、时态和词序。</p>
+      <p>现在再看原站文本，核对漏听或误解的地方。用系统推荐或上次保存的表达，写一个自己的新情境句；想用别的表达也可以。</p>
+      <aside v-if="draft.externalGuidedVersion === 1 && !externalDelayed && externalGuide" class="english-task-guide" aria-label="今天的表达小讲解">
+        <p>系统推荐：<strong lang="en">{{ externalGuide.expression }}</strong>。这是本站写作支架，不是原站逐字对白；你不必自己挑句型，也可以换成更合适的表达。</p>
+        <p>{{ externalGuide.explainZh }}</p>
+        <p lang="en">{{ externalGuide.model }}</p>
+        <p>{{ externalGuide.promptZh }} 先理解再写自己的句子，例句不自动填入你的回答。</p>
+      </aside>
       <a v-if="externalDelayed" class="button secondary" aria-label="Open today's listening lesson ↗" :href="material.sourceUrl" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">听原声、核对表达 ↗</a>
       <label v-if="externalDelayed"><input v-model="draft.listened" type="checkbox" aria-label="I listened and have returned (self-report)." :disabled="externalLocked || working" /> 我已听原声并核对（自己确认）。</label>
       <p v-if="externalDelayed && draft.externalFirstExample" class="help-text">首次尝试已保留：<span lang="en">{{ draft.externalFirstExample }}</span></p>

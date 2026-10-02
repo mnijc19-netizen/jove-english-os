@@ -159,6 +159,7 @@ async function move(next: JapanesePracticeStep) {
     await learning.lockIndependentAttempt(session.value.id)
     independentLocked.value = true
   }
+  if (next === 'notice' && guide.value && !draft.expression.trim() && lesson.value) draft.expression = lesson.value.phrase
   const saved = await learning.save(session.value.id, { ...draft }, next)
   restore(saved)
 }
@@ -329,6 +330,7 @@ onBeforeUnmount(() => {
             <p v-if="readingVisible" lang="ja">{{ lesson.reading }} · {{ kanaMorae(lesson.reading).join('・') }}</p>
             <p v-if="readingSupport" class="help-text">{{ readingSupport.reason }}</p>
             <p>{{ lesson.grammarZh }}</p><p class="help-text">{{ lesson.soundZh }}</p>
+            <p v-if="guide" class="help-text">今天的表达已由系统推荐；你只需把它用于自己的情况，也可以按真实意思修改，不必自己挑学习内容。上方例句不会自动变成你的回答。</p>
             <label>选一个想用的日语表达<input v-model="draft.expression" lang="ja" maxlength="10000" @input="changed"></label>
             <label>换成自己的情况，说或写一句<textarea v-model="draft.example" lang="ja" maxlength="10000" rows="3" @input="changed" /></label>
           </template>
