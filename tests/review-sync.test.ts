@@ -14,7 +14,8 @@ import * as attempts from '../src/sync/review'
 import * as longitudinal from '../src/domain/longitudinal'
 import { missions } from '../src/content/materials'
 import { useRequest } from '../src/composables/useRequest'
-import { defaultProfile, type ReviewCard, type StudyEvent, type Chunk } from '../src/domain/types'
+import * as schemas from '../src/ai/schemas'
+import { defaultProfile, type ReviewCard, type StudyEvent, type Chunk, type Evaluation } from '../src/domain/types'
 
 // Compile the actual SFC and dispatch its actual event handlers. Storage,
 // scheduler, journal and alias projection are real; no mocked reviewCard success.
@@ -56,6 +57,7 @@ function makeApp() {
   return Vue.reactive({ profile: { ...defaultProfile(), onboarded: true }, clock: Date.now(),
     plan: { tasks: [{ id: 'review-task', kind: 'review', minutes: 5, done: false }] },
     events: [] as StudyEvent[], cards: [] as ReviewCard[], chunks: [] as Chunk[], due: [] as ReviewCard[],
+    keySet: false, provider: { evaluate: vi.fn<(...args: unknown[]) => Promise<Evaluation>>() },
     beginTask: async () => {}, completeTask: vi.fn(async () => {}),
     refresh: async () => { state.events = await db.events.toArray(); state.cards = await db.cards.toArray(); state.chunks = await db.chunks.toArray(); state.due = state.cards },
     evidence: async (event: Omit<StudyEvent, 'timestamp'>) => {
@@ -71,6 +73,10 @@ function mount() {
   mounted.mount(root); return root
 }
 beforeAll(() => {
+  const feedbackDescriptor = parse(readFileSync(new URL('../src/components/CoachingFeedback.vue', import.meta.url), 'utf8'), { filename: 'CoachingFeedback.vue' }).descriptor
+  const feedbackScript = compileScript(feedbackDescriptor, { id: 'actual-feedback', inlineTemplate: true })
+  const feedbackExports: { default?: Vue.Component } = {}
+  new Function('require', 'exports', transpileModule(feedbackScript.content, { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText)((id: string) => { if (id === 'vue') return Vue; throw new Error(id) }, feedbackExports)
   const { descriptor } = parse(readFileSync(new URL('../src/pages/Review.vue', import.meta.url), 'utf8'), { filename: 'Review.vue' })
   const script = compileScript(descriptor, { id: 'review-sync-test', inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } })
   const code = transpileModule(script.content, { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText
@@ -79,6 +85,7 @@ beforeAll(() => {
     '../stores/app': { useApp: () => state }, '../db/db': { db }, '../db/repository': repository,
     '../sync/journal': journal, '../sync/review': attempts, '../domain/longitudinal': longitudinal,
     '../content/materials': { missions }, '../composables/useRequest': { useRequest },
+    '../ai/schemas': schemas, '../components/CoachingFeedback.vue': feedbackExports,
     ...Object.fromEntries(['AudioPlayer', 'Recorder', 'Icon'].map(name => [`../components/${name}.vue`, { default: { setup: () => () => Vue.h('i') } }])),
   }
   const exports: { default?: Vue.Component } = {}
@@ -100,6 +107,79 @@ async function legacyBlock() {
 }
 
 describe('Review UI durable attempts with actual repository and sync projection', () => {
+  const result = (accuracy: number | null): Evaluation => ({ summary: 'SUMMARY: a useful phrase.', strengths: [],
+    errors: [{ category: 'grammar', original: 'a phrase', corrected: 'a useful phrase', hint: 'HINT: Add a useful detail.', explanation: 'EXPLANATION: Modify the noun.' }],
+    comprehension: null, accuracy, fluency: null, successfulChunks: ['a phrase'], nextPrompt: 'NEXT: Try a different need.',
+    provenance: { provider: 'fixture', model: 'fixture-model' } })
+  async function spokenAttempt(modality: 'speaking' | 'transfer', accuracy: number | null, successful = true) {
+    await db.cards.update('old-card', { modality })
+    const selected = attempts.reviewAttempt('old-card', 0)
+    await db.sessions.put({ id: blockId, kind: 'review-block', stage: 'selection', startedAt: Date.now(), draft: { taskId: 'review-task', items: [selected] } })
+    await db.audio.put({ id: 'original-audio', blob: new Blob(['original']), mimeType: 'audio/webm', createdAt: Date.now(), duration: 1, kind: 'recording', processed: false, label: 'Original' })
+    await db.sessions.put({ id: selected.draftId, kind: 'review', stage: 'answer', startedAt: Date.now(), draft: { response: 'a phrase', recording: 'original-audio', sttText: 'a phrase' } })
+    state.keySet = true
+    state.provider.evaluate.mockImplementation(async () => {
+      expect((await db.sessions.get(selected.draftId))?.draft.response).toBe('a phrase')
+      return { ...result(accuracy), successfulChunks: successful ? ['a phrase'] : [] }
+    })
+    await state.refresh()
+    return selected
+  }
+  it.each(['speaking', 'transfer'] as const)('keeps null %s accuracy unknown and retains explicit feedback/retries without changing the first answer or FSRS', async modality => {
+    const selected = await spokenAttempt(modality, null)
+    let root = mount(); await settle(); await click(root, 'Check my answer')
+    expect(content(root)).not.toContain('HINT:'); expect(content(root)).not.toContain('EXPLANATION:')
+    expect(content(root)).toContain('准确度尚未评定')
+    const original = (await db.sessions.get(selected.draftId))!.draft
+    const cards = await db.cards.toArray()
+    await click(root, '查看 AI 提示与参考表达')
+    expect(content(root)).toContain('HINT:'); expect(content(root)).toContain('EXPLANATION:')
+    const retry = find(root, node => node.props.id === 'review-retry')!
+    ;(retry.props['onUpdate:modelValue'] as (s: string) => void)('This is a useful phrase.')
+    await settle(); await click(root, '保存这次练习')
+    const saved = (await db.sessions.get(selected.draftId))!.draft
+    expect(saved).toMatchObject({ response: original.response, recording: original.recording, evaluated: null,
+      retries: [{ response: 'This is a useful phrase.' }], feedback: { answer: 'a phrase', result: { accuracy: null } } })
+    expect(await db.cards.toArray()).toEqual(cards)
+    expect(await db.events.count()).toBe(0)
+    mounted!.unmount(); mounted = undefined; await settle(); root = mount(); await settle()
+    expect(content(root)).not.toContain('HINT:'); expect(content(root)).toContain('This is a useful phrase.')
+    await click(root, 'Good')
+    const recorded = (await db.events.get(selected.attemptId))!
+    expect(recorded.source).toBe('self-report')
+    const responseEvent = (await db.events.get(selected.responseEventId))!
+    expect(responseEvent.data).toMatchObject({ response: 'a phrase', audioId: 'original-audio', accuracyKnown: false })
+    expect(JSON.parse(responseEvent.data!.feedbackJson as string).accuracy).toBeNull()
+    expect((await db.skills.get(modality === 'speaking' ? 'chunkProduction' : 'realWorld'))?.evidenceCount).toBe(0)
+    expect((await db.audio.get('original-audio'))!.blob.size).toBe(8)
+    expect(state.provider.evaluate).toHaveBeenCalledTimes(1)
+  })
+  it('does not turn missing chunk success plus null accuracy into a zero', async () => {
+    const selected = await spokenAttempt('speaking', null, false)
+    const root = mount(); await settle(); await click(root, 'Check my answer'); await click(root, 'Good')
+    expect((await db.events.get(selected.attemptId))!).toMatchObject({ source: 'self-report', data: { rating: 3, scheduledRating: 3 } })
+  })
+  it('preserves a real numeric AI estimate with its saved response/provenance after reload', async () => {
+    const selected = await spokenAttempt('speaking', 0.8)
+    let root = mount(); await settle(); await click(root, 'Check my answer')
+    mounted!.unmount(); mounted = undefined; await settle(); root = mount(); await settle(); await click(root, 'Good')
+    expect((await db.events.get(selected.attemptId))!).toMatchObject({ source: 'ai', score: 0.8 })
+    const responseEvent = (await db.events.get(selected.responseEventId))!
+    expect(responseEvent.data?.accuracyKnown).toBe(true)
+    expect(JSON.parse(responseEvent.data!.feedbackJson as string).provenance).toEqual({ provider: 'fixture', model: 'fixture-model' })
+    expect((await db.skills.get('chunkProduction'))?.evidenceCount).toBe(1)
+    expect(state.provider.evaluate).toHaveBeenCalledTimes(1)
+  })
+  it('does not revive numeric-only legacy or mismatched-answer feedback as AI evidence', async () => {
+    const selected = await spokenAttempt('speaking', 0.8)
+    const saved = (await db.sessions.get(selected.draftId))!
+    await db.sessions.put({ ...saved, stage: 'checked', draft: { ...saved.draft, revealed: true, evaluated: 0.7,
+      feedback: { answer: 'another answer', context: 'unrelated', result: result(0.8) } } })
+    const root = mount(); await settle(); expect(content(root)).not.toContain('HINT:')
+    await click(root, 'Good')
+    expect((await db.events.get(selected.attemptId))!.source).toBe('self-report')
+    expect(state.provider.evaluate).not.toHaveBeenCalled()
+  })
   it('recovers the original block source among two alias drafts and never completes from the other old attempt', async () => {
     await legacyBlock()
     const sync = new journal.SyncJournal(db); await sync.bindOwner(owner)

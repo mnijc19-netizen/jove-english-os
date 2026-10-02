@@ -1,6 +1,6 @@
 import { skillNames, type DailyPlan, type Material, type Profile, type ReviewCard, type Skill, type SkillName, type StudyEvent, type PlanTask } from './types'
 import { startedTaskIds, planLongitudinal } from './longitudinal'
-import { externalLessonCandidates, externalCatalogFresh, unavailableExternalIds } from '../content/external'
+import { externalLessonCandidates, externalCatalogFresh, externalCanDo, unavailableExternalIds } from '../content/external'
 import { nextEnglishReading } from './english-reading'
 
 // Scores, strengths, confidence and fatigue use 0..1, matching the shared UI/provider contract.
@@ -116,6 +116,25 @@ export function englishTaskGuide(task: PlanTask): { title: string; steps: readon
     assessment: { title: '看看现在能独立完成什么', steps: ['先独立作答，不提前看参考答案。', '听懂、读懂和说出来分别记录。', '不会的地方是下次排课依据，不是考试失败。'] },
     learn: { title: '按当前任务练习', steps: ['跟着页面顺序完成，遇到困难可以用提示。', '先保存自己的尝试，再核对。'] },
   }[task.kind]
+}
+
+/** Explain the intended real-life use, not an achievement awarded for a click. */
+export function englishLearningOutcome(task: PlanTask, material?: Material): { goal: string; check: string; later: string } {
+  const source = material?.id === task.materialId ? material : undefined
+  const activity = taskActivity(task)
+  const goal = activity === 'listen' ? source?.externalStudy ? externalCanDo(source.id)
+    : `围绕「${source?.title || task.title}」，听懂一件事，再用自己的英语讲清楚。`
+    : activity === 'reading' ? '读懂一小段感兴趣的内容；能说出它的重点，而不是逐词翻译。'
+      : activity === 'chunks' ? '把一个有用表达放进与你有关的新句子，练习写出自己的意思。'
+        : activity === 'review' ? '隔了一段时间后，不看原句也能想起并使用学过的表达。'
+          : activity === 'assessment' ? '用独立的新尝试发现现在会什么、哪里需要下一次练习。'
+            : activity === 'shadow' ? '听清一句话的意思和节奏，再脱离文字说一遍。'
+              : '完成一个生活交流：先说或写出自己的意思，再修正最影响理解的一处。'
+  return { goal,
+    check: activity === 'reading' ? '合上原文，说出主旨；原版多读可以只读和享受，不必每次交测验。'
+      : activity === 'review' ? '先尝试，再对照；忘了就按真实情况重练，不用清空所有到期项。'
+        : '关掉范例，能用自己的话完成目标。保存和录音只说明练过，不等于已经掌握。',
+    later: '你保存并核对意思的表达，以及确认的纠错，会进入后续练习；系统再次安排时，先独立想起，再换一个场景使用。' }
 }
 
 export function taskPath(task: PlanTask): { path: string; query: Record<string, string> } {

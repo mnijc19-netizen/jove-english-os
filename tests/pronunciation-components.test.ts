@@ -13,6 +13,8 @@ import { encodeAssessmentWav } from '../src/speech/wav'
 import { SpeechError } from '../src/speech/types'
 import { acousticEvents, ObservedPracticeClock } from '../src/speech/events'
 import * as longitudinal from '../src/domain/longitudinal'
+import * as engine from '../src/domain/engine'
+import * as aiSchemas from '../src/ai/schemas'
 import { defaultProfile, defaultSettings, type StudyEvent, type StudySession, type Conversation, type Material } from '../src/domain/types'
 import { demoMaterials, missions } from '../src/content/materials'
 import * as externalStudy from '../src/content/external'
@@ -99,12 +101,13 @@ function mountPage(name: 'Listen' | 'Speak', evaluate: Record<string, unknown> =
     conversations: { get: async (id: string) => clone(conversations.get(id)), put: async (row: Conversation) => { conversations.set(row.id, clone(row)) },
       filter: (fn: (c: Conversation) => boolean) => ({ count: async () => [...conversations.values()].filter(fn).length }) },
     audio: { get: async (id: string) => audios.get(id) },
+    events: { toArray: async () => clone(appState.events) },
     transaction: async (...args: unknown[]) => (args.at(-1) as () => Promise<void>)(),
   }
   const result = { summary: 'Test language feedback', strengths: [], errors: [], comprehension: 0.8, accuracy: 0.8, fluency: null, successfulChunks: [], nextPrompt: 'Next', ...evaluate }
   const appState = {
     profile: defaultProfile(), settings: defaultSettings, skills: [], cards: [], materials: Vue.reactive(clone(options.materials ?? demoMaterials)), events: [] as StudyEvent[],
-    chunks: [] as { id: string; text: string }[], errors: [], keySet: true, online: true, notice: '', plan: { tasks: [] },
+    chunks: [] as { id: string; text: string }[], audio: [], errors: [], keySet: true, online: true, notice: '', plan: { tasks: [] },
     provider: { evaluate: vi.fn(async () => result), chat: vi.fn(async () => 'What happened next?') },
     evidence: vi.fn(async (event: StudyEvent) => { appState.events.push(clone(event)) }), beginTask: vi.fn(), completeTask: vi.fn(), refresh: vi.fn(),
   }
@@ -121,6 +124,7 @@ function mountPage(name: 'Listen' | 'Speak', evaluate: Record<string, unknown> =
     '../stores/app': { useApp: () => appState }, '../db/db': { db: storage }, '../db/repository': { saveError: vi.fn(), addChunk: vi.fn() },
     '../composables/useRequest': { useRequest: () => ({ busy: Vue.ref(false), error: Vue.ref(''), cancel: vi.fn(), run: async (fn: (s: AbortSignal) => Promise<unknown>) => fn(new AbortController().signal) }) },
     '../content/materials': { demoMaterials, missions }, '../content/external': externalStudy, '../domain/longitudinal': longitudinal,
+    '../domain/engine': engine, '../ai/schemas': aiSchemas,
     // Keep historical recovery coverage of the retained optional adapter. Normal
     // production routes disable it; a separate default-mode assertion is below.
     '../speech/practice': { usePronunciationSession: (scope: Vue.Ref<string>, id?: Vue.Ref<string>, enabled?: boolean) =>
@@ -327,20 +331,20 @@ describe('compiled Listen/Speak page contracts and actual pronunciation persiste
       await entered.promise; await Vue.nextTick()
       // The old browser-test assertion already passes here, while a reload
       // would restore stage one: rendered step/disabled state is not a commit.
-      expect(content(view.root)).toContain('3 · Close the script and retell')
+      expect(content(view.root)).toContain('3 · 说清楚，改一处，再完整重说')
       expect(button(view.root, 'Save practice and continue').props.disabled).toBe(true)
-      expect(view.state.draft).toEqual({ ...draftBefore, stage: 2 })
+      expect(view.state.draft).toEqual({ ...draftBefore, stage: 2, externalFirstExample: fields.externalExample })
       expect(view.state.working).toBe(true)
       expect(find(view.root, node => node.type === 'section' && node.props.class === 'panel')?.props['aria-busy']).toBe(true)
       expect(settled).toBe(false); expect(commits).toBe(0)
-      expect(await sessions.get(sessionId)).toEqual(before)
+      expect(await sessions.get(sessionId)).toEqual({ ...before, draft: { ...before!.draft, externalFirstExample: fields.externalExample } })
       release.resolve(); await transition; await Vue.nextTick()
       expect(commits).toBeGreaterThan(0); expect(settled).toBe(true)
       expect(busyAtCommit.every(busy => busy)).toBe(true)
       expect(view.state.working).toBe(false)
       expect(find(view.root, node => node.type === 'section' && node.props.class === 'panel')?.props['aria-busy']).toBe(false)
       expect(button(view.root, 'Save practice and continue').props.disabled).toBe(true)
-      const expected = { ...before, stage: '2', draft: { ...draftBefore, stage: 2 } }
+      const expected = { ...before, stage: '2', draft: { ...draftBefore, stage: 2, externalFirstExample: fields.externalExample } }
       expect(await sessions.get(sessionId)).toEqual(expected)
       database.close(); await database.open()
       expect(await sessions.get(sessionId)).toEqual(expected)
@@ -380,7 +384,8 @@ describe('compiled Listen/Speak page contracts and actual pronunciation persiste
     const event = view.app.events.find(e => e.id.endsWith('-meaning'))!
     expect(event).toMatchObject({ prompted: false, source: 'ai', skill: 'listeningSentences', data: { rubricVersion: 'listening-main-idea-detail-v1', firstPass: true, priorExposure: false } })
     expect(event.data?.conditionsKey).toContain('actual-model')
-    expect(event.data?.comparisonKey).toContain(demoMaterials[0]!.id)
+    expect(event.data?.comparisonKey).toBe(longitudinal.listeningComparisonKey(demoMaterials[0]!))
+    expect(event.data?.comparisonBasis).toBe('provisional-task-family-not-psychometrically-equated')
     expect(view.app.provider.evaluate.mock.calls[0]).toBeDefined()
     expect(view.sessions.get(event.sessionId!)?.draft.outbox).toEqual([])
   })
@@ -741,7 +746,7 @@ const renderer = Vue.createRenderer<HostNode, HostNode>({
 })
 function content(node: HostNode): string { return node.text + node.children.map(content).join('') }
 function find(node: HostNode, predicate: (n: HostNode) => boolean): HostNode | undefined { if (predicate(node)) return node; for (const child of node.children) { const found = find(child, predicate); if (found) return found } }
-function button(root: HostNode, text: string): HostNode { const node = find(root, n => n.type === 'button' && content(n).includes(text)); if (!node) throw new Error('Missing button ' + text + ': ' + content(root)); return node }
+function button(root: HostNode, text: string): HostNode { const node = find(root, n => n.type === 'button' && (n.props['aria-label'] === text || content(n).includes(text))); if (!node) throw new Error('Missing button ' + text + ': ' + content(root)); return node }
 function click(node: HostNode) { if (node.props.disabled) throw new Error('Cannot click disabled button'); return (node.props.onClick as () => unknown)() }
 async function flush() { for (let i = 0; i < 4; i++) { await yieldImmediate(); await Vue.nextTick() } }
 const db = { audio: { get: vi.fn() } }

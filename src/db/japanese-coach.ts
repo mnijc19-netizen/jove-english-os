@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import Dexie from 'dexie'
 import type { JoveDatabase } from './db'
-import { sessionSchema } from './schema'
+import { sessionSchema, eventSchema } from './schema'
 import { evaluatedResultSchema } from '../ai/schemas'
 import type { LearningProvider } from '../ai/cloud-provider'
 
@@ -102,5 +102,26 @@ export function createJapaneseCoach(database: JoveDatabase, practiceId: string, 
       current.feedback.push({ id: crypto.randomUUID(), input: draft.text, createdAt: Date.now(), result })
     })
   }
-  return { open, read, save, transcribe, feedback }
+  async function confirmCorrection(feedbackId: string, now = Date.now()) {
+    await checkOwner()
+    return database.transaction('rw', database.sessions, database.events, database.syncMeta, async () => {
+      await Dexie.waitFor(checkOwner())
+      const draft = await read(), practice = await database.sessions.get(practiceId)
+      const selected = draft?.feedback.find(entry => entry.id === feedbackId), error = selected?.result.errors[0]
+      if (!practice?.materialId || !draft?.confirmed || selected?.input !== draft.text || !error?.corrected.trim()
+        || !error.original.trim() || !selected.input.includes(error.original)) throw new Error('请先核对原回答和这一处具体纠错，再确认安排。')
+      const eventId = `ja-correction:${practiceId}:${feedbackId}`
+      const existing = await database.events.get(eventId)
+      if (existing) return existing
+      const assignment = await database.events.get(`${practiceId}:course-assignment`)
+      const event = eventSchema.parse({ id: eventId, type: 'JAPANESE_CORRECTION_CONFIRMED', source: 'self-report', timestamp: now,
+        sessionId: practiceId, data: { materialId: practice.materialId, feedbackId, original: selected.input,
+          corrected: error.corrected, hint: error.hint, explanation: error.explanation,
+          contextId: String(assignment?.data?.contextId ?? `${practice.materialId}:context:0`),
+          originalAudioId: String(practice.draft.audioId ?? ''), aiSuggestionConfirmed: true, masteryAssessed: false } })
+      await database.events.add(event)
+      return event
+    })
+  }
+  return { open, read, save, transcribe, feedback, confirmCorrection }
 }

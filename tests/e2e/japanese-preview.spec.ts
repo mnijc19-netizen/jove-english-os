@@ -542,7 +542,7 @@ test('Japanese AI feedback retains checked input through failure, reveals help o
     database.close(); return session.id
   })
   await page.goto('#/ja?session=' + encodeURIComponent(sessionId)); await page.reload()
-  const answer = page.getByRole('textbox', { name: '写下自己刚才说的日语，或核对转写后修改' })
+  const answer = page.getByRole('textbox', { name: '写下自己的日语回答，或核对录音转写后修改' })
   await answer.fill('私学生です')
   await page.getByRole('checkbox', { name: /我核对过这段文字/ }).check()
   await page.getByRole('button', { name: '请 AI 帮我改进（可能收费）' }).click()

@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute } from 'vue-router'
 import { db as english, createLanguageDatabase } from '../db/db'
 import { createJapaneseWorkspace } from '../db/japanese'
-import { japaneseReviewDraft } from '../db/japanese-review'
+import { japaneseReviewDraft, japaneseReviewItemKey } from '../db/japanese-review'
 import { japaneseLessons } from '../content/japanese'
 import type { AudioAsset, Chunk, Material, ReviewCard, StudySession } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
@@ -19,13 +19,17 @@ const draft = computed(() => session.value ? japaneseReviewDraft.parse(session.v
 const item = computed(() => draft.value?.items.find(item => !item.rating && !item.skipped))
 const card = computed(() => cards.value.find(card => card.id === item.value?.cardId))
 const chunk = computed(() => chunks.value.find(chunk => chunk.id === card.value?.chunkId))
-const lesson = computed(() => japaneseLessons.find(lesson => chunk.value?.sourceIds.includes(lesson.id)))
+const correction = computed(() => item.value?.correction)
+const modality = computed(() => correction.value ? correction.value.phase === 'transfer' ? 'transfer' : 'recall' : card.value?.modality)
+const lesson = computed(() => japaneseLessons.find(lesson => correction.value?.materialId === lesson.id || chunk.value?.sourceIds.includes(lesson.id)))
 const source = computed(() => materials.value.find(material => material.language === 'ja' && material.approved && chunk.value?.sourceIds.includes(material.id)))
-const oral = computed(() => card.value?.modality === 'speaking' || card.value?.modality === 'transfer')
+const oral = computed(() => modality.value === 'speaking' || modality.value === 'transfer')
 const modalityLabels = { recognition: '看表达，回忆意思', listening: '听原声，回忆意思', recall: '看意思，回忆日语', cloze: '完整表达一句话', speaking: '不看答案，开口表达', transfer: '换一个情境使用' }
-const prompt = computed(() => card.value?.modality === 'recognition' ? chunk.value?.text
+const prompt = computed(() => correction.value ? correction.value.phase === 'retrieval'
+  ? '回想上次确认的一处表达，重新写出完整句子；先不看修改后的参考。' : item.value?.contextPrompt
+  : card.value?.modality === 'recognition' ? chunk.value?.text
   : card.value?.modality === 'listening' ? '打开这一课的一段真人对话，先不看文字，听完说明意思。原站音频不一定逐字包含本站例句。'
-    : card.value?.modality === 'transfer' ? lesson.value?.transferZh ?? '换成自己的生活场景，用这个意思回应对方。'
+    : card.value?.modality === 'transfer' ? item.value?.contextPrompt ?? '这份旧草稿保留原任务：换成自己的生活场景，用这个意思回应对方。'
       : chunk.value?.meaningZh || chunk.value?.meaningEn)
 const playback = useRecordingUrl(computed(() => audio.value.find(asset => asset.id === response.audioId)))
 let timer: ReturnType<typeof setTimeout> | undefined, disposed = false, saves: Promise<void> = Promise.resolve()
@@ -80,13 +84,13 @@ async function recover() {
   notice.value = '已保留首答并略过已变动卡片，没有再次修改它的复习时间。'
 }
 const recorderWorkspace = computed(() => {
-  const id = session.value?.id, cardId = item.value?.cardId
+  const id = session.value?.id, itemKey = item.value && japaneseReviewItemKey(item.value)
   return { database, audio: () => audio.value, refresh: refreshAudio, assertCurrent: learning.checkOwner,
     attach: async (recorded: { audioId: string }) => {
-      if (!id || !cardId) throw new Error('复习卡片不存在')
+      if (!id || !itemKey) throw new Error('复习任务不存在')
       await flush()
       const stored = await learning.review.read(id), current = stored.draft.items.find(item => !item.rating && !item.skipped)
-      if (current?.cardId !== cardId || current.revealed) throw new Error('首答已锁定，录音原件仍保留在日语区。')
+      if (!current || japaneseReviewItemKey(current) !== itemKey || current.revealed) throw new Error('首答已锁定，录音原件仍保留在日语区。')
       const saved = await learning.review.save(id, stored.draft.revision, { response: current.response, heard: current.heard, audioId: recorded.audioId })
       if (!disposed && session.value?.id === id) restore(saved)
     } }
@@ -123,32 +127,36 @@ onBeforeUnmount(() => {
     <div class="page-heading"><div><p class="eyebrow">JAPANESE · 延迟复习</p><h1 tabindex="-1">先想起来，再对照。</h1></div><RouterLink to="/ja" class="text-button">返回日语今日安排</RouterLink></div>
     <p class="help-text">中文帮助理解任务；认得汉字、听懂声音和自己说出来分别练。这里只根据自评安排复习，不给能力或发音分数。</p>
     <p class="help-text" role="status">日语：{{ space.status }} <span v-if="space.problem"> · {{ space.problem }}</span></p>
-    <p v-if="error" class="error" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="act(session ? flush : openPage)">{{ session ? '重试保存' : '重试打开日语区' }}</button> <button v-if="session && item" class="text-button" :disabled="busy || active" @click="act(recover)">保留首答，略过已变动卡片</button></p>
+    <p v-if="error" class="error" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="act(session ? flush : openPage)">{{ session ? '重试保存' : '重试打开日语区' }}</button> <button v-if="session && item && !correction" class="text-button" :disabled="busy || active" @click="act(recover)">保留首答，略过已变动卡片</button></p>
     <p class="help-text" role="status">{{ notice }}</p>
     <section v-if="session?.completedAt" class="panel ja-review-panel">
-      <h2>这一小组已保存</h2><p>已保存本次回答。只更新已评分卡片的复习时间；有进度冲突的卡片保留另一份记录，不重复计分。剩余学习时间交给系统安排。</p>
+      <h2>这一小组已保存</h2><p>已保存本次回答及后续练习安排。纠错和未绑定原声的听力练习不更新词块记忆卡，也不增加能力分数；有进度冲突的卡片保留另一份记录。剩余学习时间交给系统安排。</p>
       <RouterLink to="/ja" class="button primary">继续今日安排</RouterLink>
     </section>
-    <section v-else-if="card && chunk && item" class="panel ja-review-panel">
+    <section v-else-if="item && (correction || card && chunk)" class="panel ja-review-panel">
       <p v-if="draft?.audioUnavailable" class="help-text" role="status">备份中的部分录音没有恢复，文字首答仍保留。已看过参考的首答不会解锁重写；缺失口语录音时将较早安排再练，不按本次自评延长间隔。</p>
       <p v-else-if="oral && item.revealed && !playback" class="help-text" role="status">这次首答的录音暂时不在本机，可以等同步后再回放。若现在继续，系统会较早安排再练，不将缺失原件当作已验证的口语表现。</p>
-      <p class="eyebrow">{{ modalityLabels[card.modality] }} · {{ draft!.items.filter(item => item.rating || item.skipped).length + 1 }} / {{ draft!.items.length }}</p>
-      <h2 :lang="card.modality === 'recognition' ? 'ja' : 'zh'">{{ prompt }}</h2>
-      <p v-if="card.modality === 'recall'" class="help-text">想得到读法时，可用假名写出完整表达（助词仍按「は／へ／を」书写）。汉字或其他自然说法也可保留，但不会据此认定已记住参考句的读法；这里不评发音。</p>
-      <template v-if="card.modality === 'listening'">
+      <p class="eyebrow">{{ modality ? modalityLabels[modality] : '' }} · {{ draft!.items.filter(item => item.rating || item.skipped).length + 1 }} / {{ draft!.items.length }}</p>
+      <h2 :lang="modality === 'recognition' ? 'ja' : 'zh'">{{ prompt }}</h2>
+      <template v-if="correction"><p>这是你核对并确认过的 AI 建议；仍可判断参考是否适合自己的意思，不要求照抄。</p><p v-if="!item.revealed">上次的原回答：<span lang="ja">{{ correction.original }}</span></p><p v-if="oral">先写不同情境的完整回答，再录一遍；两份首答都会保存。</p></template>
+      <p v-if="item.contextRepeated" class="help-text">已使用过这个情境，本次是重复练习，不算新的迁移证据。</p>
+      <p v-if="modality === 'recall' && !correction" class="help-text">想得到读法时，可用假名写出完整表达（助词仍按「は／へ／を」书写）。汉字或其他自然说法也可保留，但不会据此认定已记住参考句的读法；这里不评发音。</p>
+      <template v-if="modality === 'listening'">
+        <p class="help-text">这是保留的旧听力任务。原站片段未与这个表达核对绑定，本次只保存听力练习，不修改该词块的复习间隔。</p>
         <a v-if="source?.sourceUrl" :href="source.sourceUrl" target="_blank" rel="noopener noreferrer" class="button">打开原站真人音频 ↗</a>
         <label class="row"><input v-model="response.heard" type="checkbox" :disabled="busy || item.revealed" @change="changed">我实际听过原声，再回来作答</label>
       </template>
       <fieldset :disabled="busy || active || item.revealed">
-        <label>先独立回答；想不起来也可以直接看提示<textarea v-model="response.response" :lang="card.modality === 'recognition' || card.modality === 'listening' ? 'zh' : 'ja'" rows="4" maxlength="10000" @input="changed" /></label>
+        <label>先独立回答；想不起来也可以直接看提示<textarea v-model="response.response" :lang="modality === 'recognition' || modality === 'listening' ? 'zh' : 'ja'" rows="4" maxlength="10000" @input="changed" /></label>
       </fieldset>
-      <Recorder v-if="oral && !item.revealed" :key="session!.id + item.cardId" :workspace="recorderWorkspace" :saved-audio-id="response.audioId" :disabled="busy" label="日语复习：不看参考答案开口" @active="active = $event" />
+      <Recorder v-if="oral && !item.revealed" :key="session!.id + japaneseReviewItemKey(item)" :workspace="recorderWorkspace" :saved-audio-id="response.audioId" :disabled="busy" label="日语复习：不看参考答案开口" @active="active = $event" />
       <button v-if="!item.revealed" class="button primary" :disabled="busy || active" @click="act(reveal)">保存首答，查看参考</button>
       <div v-else>
         <p v-if="item.hintUsed" class="help-text">这次用了提示，系统会较早安排再练，不把对照后的答案算独立回忆。</p>
-        <p v-if="card.modality === 'listening'">以下是本站表达参考，不是你刚才所听片段的逐字答案；请回到原站文字核对意思。</p>
-        <p lang="ja" class="ja-reference">{{ chunk.text }}</p><p v-if="lesson" lang="ja">{{ lesson.reading }}</p>
-        <p>{{ chunk.meaningZh || chunk.meaningEn }}</p><p v-if="lesson">{{ lesson.grammarZh }}</p>
+        <p v-if="modality === 'listening'">以下是本站表达参考，不是你刚才所听片段的逐字答案；请回到原站文字核对意思。</p>
+        <p lang="ja" class="ja-reference">{{ correction?.corrected ?? chunk?.text }}</p><p v-if="lesson && !correction" lang="ja">{{ lesson.reading }}</p>
+        <p>{{ correction?.explanation ?? (chunk?.meaningZh || chunk?.meaningEn) }}</p><p v-if="lesson">{{ lesson.grammarZh }}</p>
+        <p v-if="correction" class="help-text">自评只用于安排下一次练习。不会据此增加能力分数，也不宣称这处错误已消失。</p>
         <audio v-if="playback" :src="playback" controls aria-label="日语复习首答录音" />
         <p>按看到参考之前的记忆情况选择，不必追求每次答对。意思相同的合理表达不必逐字一致。</p>
         <div class="row wrap">

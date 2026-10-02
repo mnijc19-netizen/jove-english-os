@@ -148,3 +148,35 @@ export function japaneseStarterMaterials(): Material[] {
   return materialsFor(japaneseStarterLessons)
 }
 export function japaneseMaterials(): Material[] { return materialsFor(japaneseLessons) }
+
+// Original task variants, not publisher audio parts or claims of course mastery.
+const starterContexts: [string, string][] = [
+  ['午后第一次见到邻居，打招呼后告别。', '晚上见到旅店工作人员，问候后结束交流。'],
+  ['在咖啡店没听清店员，请对方再说一遍。', '电话中没听清预约时间，请对方放慢并重复。'],
+  ['在社区活动介绍自己的姓名和家乡，再问对方。', '向新同学介绍自己来自哪里，再询问对方。'],
+  ['向同学说明住在哪一带，再问对方住哪里。', '在社区活动向邻居说明自己的居住地。'],
+  ['和同学商量午餐，说一种喜欢和一种不喜欢的食物。', '做客时向主人说明饮食偏好，再问主人的喜好。'],
+  ['在咖啡店为自己点一份饮品，确认数量。', '在面包店为三个人点餐，确认物品与数量。'],
+  ['向新室友介绍房间里的两个设施。', '向来访的家人说明住处有哪些设施。'],
+  ['在医院询问洗手间的位置，再确认方向。', '在图书馆询问服务台在哪里，再确认一次。'],
+  ['向新同学说明周末的学习起止时间。', '电话中向工作人员确认营业起止时间。'],
+  ['向同学借一块橡皮，礼貌说明需要。', '在办公室向同事借一把伞，并表示感谢。'],
+  ['向同学介绍一种周末爱好，并问对方喜欢做什么。', '在社区活动中介绍自己的兴趣，并继续问一句。'],
+  ['邀请邻居一起散步，对方没空时礼貌回应。', '邀请同学一起吃午饭，商量另一个合适时间。'],
+  ['去医院前向公交司机确认是否到达。', '在车站确认这班车是否到图书馆附近。'],
+  ['向朋友描述集合地点旁边的一栋建筑。', '电话中向来访者描述车站附近的地标。'],
+  ['在文具店询问有没有信封。', '在超市询问有没有雨伞，并问放在哪里。'],
+  ['在书店询问两本书的价格，再决定买哪一本。', '在水果店问两种水果的价格，并确认选择。'],
+  ['向同学说昨天做的一件事，再问对方。', '向邻居说周末去过哪里，再问对方的经历。'],
+  ['向同学说一个假期愿望，并问对方想做什么。', '和朋友商量下一次出行，说明不同的目的地愿望。'],
+]
+
+export function japaneseTransferContexts(materialId: string) {
+  const lesson = japaneseLessons.find(item => item.id === materialId)
+  if (!lesson) return []
+  const alternatives = lesson.course === 'starter' ? starterContexts[lesson.position - 1]! : [
+    `和第一次见面的社区成员交流；换成自己的具体情况，完成这个任务：${lesson.canDo}对方需要你澄清一个细节。`,
+    `给熟悉的朋友留一段语音；更换时间、地点或对象，完成这个任务：${lesson.canDo}补充与上次不同的理由或安排。`,
+  ]
+  return [lesson.transferZh, ...alternatives].map((prompt, index) => ({ id: `${materialId}:context:${index}`, prompt }))
+}

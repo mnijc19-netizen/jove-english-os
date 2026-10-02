@@ -1,5 +1,7 @@
 # Curated demo content and audio
 
+October3 Can-do guidance: original Chinese personal-use tasks for the first VOA lessons were checked against the publisher's [lessons1–5 review](https://learningenglish.voanews.com/a/lets-lear-english-review-lessons-1-5/4053916.html) and [lesson6 overview](https://learningenglish.voanews.com/a/lets-learn-english-lesson-6-where-is-the-gym/3345741.html). These are our learning-task designs, not copied worksheets, inferred audio transcripts or claims that an entire course lesson was covered. Remaining metadata-only links use a concrete personal-message/recorded-application goal without inventing their dialogue contents; new delayed practice changes recipient/purpose/context. Preserve source URLs, original-course human playback and the General-American speaking target.
+
 ## Japanese original-book directory — September20 candidate
 
 The [NPO 多言語多読 free-book directory](https://tadoku.org/japanese/en/free-books-en/) provides original graded books from Start through publisher levels0–5. The pinned page was checked on September20 and its141 entries parsed successfully. Store only canonical book-page links, visible titles, publisher levels and directory freshness; no book text, images, media or machine-generated adaptation. The [publisher's usage guide](https://tadoku.org/japanese/en/free-books-en/note-en/) permits attributed links and prohibits adaptations including translations/tests. Book metadata and publisher levels are not measured learner proficiency or pronunciation certification.

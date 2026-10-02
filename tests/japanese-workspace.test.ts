@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { JoveDatabase } from '../src/db/db'
 import { createLearningRepository } from '../src/db/repository'
 import { createJapaneseWorkspace, japanesePracticeDraft } from '../src/db/japanese'
@@ -10,9 +10,11 @@ import { readLanguageDay } from '../src/db/language-day'
 import { japaneseMaterials } from '../src/content/japanese'
 import { japaneseWrittenExercises } from '../src/content/japanese-reading'
 import { tadokuStarterMaterials } from '../src/content/tadoku-catalog'
+import { japaneseReadingDraft } from '../src/domain/japanese-reading'
+import { extensiveDraftSchema } from '../src/domain/japanese-extensive'
 
 const databases: JoveDatabase[] = [], now = Date.UTC(2026, 8, 20, 4)
-afterEach(async () => { for (const database of databases.splice(0)) await database.delete() })
+afterEach(async () => { vi.useRealTimers(); for (const database of databases.splice(0)) await database.delete() })
 async function setup() {
   const en = new JoveDatabase(`ja-ui-en-${crypto.randomUUID()}`, 'en'), ja = new JoveDatabase(`ja-ui-ja-${crypto.randomUUID()}`, 'ja')
   databases.push(en, ja)
@@ -26,6 +28,153 @@ function recording(id: string): AudioAsset { return { id, blob: new Blob(['nativ
   createdAt: now, duration: 3, kind: 'recording', processed: false, label: 'Japanese practice' } }
 
 describe('Japanese usable practice persistence', () => {
+  it.each(['input', 'application', 'delayed-transfer', 'legacy'] as const)('enforces the frozen %s move/lock contract without new draft fields', async phase => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(now)
+    const { learning, ja } = await setup()
+    await learning.confirmBeginnerStart(now)
+    const plan = (await learning.today(now))!, task = plan.tasks.find(task => task.kind === 'listen')!
+    let session = await learning.start(task.id, now)
+    const assignmentId = `${session.id}:course-assignment`
+    if (phase === 'legacy') await ja.events.delete(assignmentId)
+    else {
+      const assignment = (await ja.events.get(assignmentId))!
+      await ja.events.put({ ...assignment, data: { ...assignment.data, coursePhase: phase } })
+    }
+    const independent = phase === 'application' || phase === 'delayed-transfer'
+    expect((await learning.practiceGuide(session.id))?.independentFirst ?? false).toBe(independent)
+    session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), response: '私は学生です。', example: '私は学生です。' }, 'listen')
+    if (!independent) {
+      await expect(learning.save(session.id, japanesePracticeDraft.parse(session.draft), 'notice')).rejects.toThrow('先听')
+      await expect(learning.lockIndependentAttempt(session.id, now)).rejects.toThrow('应用或延迟')
+      session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), listened: true }, 'notice')
+    } else {
+      if (phase === 'delayed-transfer') {
+        await expect(learning.lockIndependentAttempt(session.id, now)).rejects.toThrow('新的首答录音')
+        await ja.audio.put({ ...recording('old-audio'), createdAt: now - 1 })
+        session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), audioId: 'old-audio' }, 'listen')
+        await expect(learning.lockIndependentAttempt(session.id, now)).rejects.toThrow('新的首答录音')
+        await ja.audio.put(recording('fresh-audio'))
+        session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), audioId: 'fresh-audio' }, 'listen')
+        await expect(learning.save(session.id, japanesePracticeDraft.parse(session.draft), 'notice')).rejects.toThrow('先保存独立')
+        const beforeLock = session
+        const locked = await learning.lockIndependentAttempt(session.id, now)
+        expect(locked?.data).toMatchObject({ response: '私は学生です。', audioId: 'fresh-audio', recordingBeforeHelp: true })
+        expect(await learning.lockIndependentAttempt(session.id, now + 1)).toEqual(locked)
+        expect(await ja.sessions.get(session.id)).toEqual(beforeLock)
+      }
+      session = await learning.save(session.id, japanesePracticeDraft.parse(session.draft), 'notice')
+      expect(japanesePracticeDraft.parse(session.draft).listened).toBe(false)
+      await expect(learning.save(session.id, japanesePracticeDraft.parse(session.draft), 'speak')).rejects.toThrow('实际听过')
+      await expect(learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), response: '看参考后重写' }, 'notice')).rejects.toThrow('首答已锁定')
+      expect((await learning.practiceGuide(session.id))?.firstAttemptSaved).toBe(true)
+    }
+    session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), listened: true, expression: '私は学生です。', example: '私は会社員です。' }, 'speak')
+    expect(japanesePracticeDraft.parse(session.draft)).toMatchObject({ response: '私は学生です。', example: '私は会社員です。' })
+    if (phase === 'legacy') {
+      expect(await learning.practiceGuide(session.id)).toBeNull()
+      expect(await ja.events.get(`${session.id}:independent-attempt`)).toBeUndefined()
+    }
+    await expect(learning.repository.exportBackup()).resolves.toContain(session.id)
+  })
+  it.each([45, 15])('keeps reading and dialogue reachable with a shared %i-minute budget, persistent due cards and durable phases', async dailyMinutes => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(now)
+    const { en, ja, learning } = await setup()
+    await en.profiles.update('main', { dailyMinutes, onboarded: true })
+    await learning.confirmBeginnerStart(now)
+    if (dailyMinutes === 15) {
+      for (const material of japaneseMaterials().slice(0, 5)) {
+        const chunk = await learning.repository.addChunk(material.chunks[0]!, material.id)
+        await ja.chunks.update(chunk.id, { createdAt: now - 86400000 })
+        const englishChunk = await createLearningRepository(en).addChunk({ ...demoMaterials[0]!.chunks[0]!, text: `Existing English expression ${material.id}` }, demoMaterials[0]!.id)
+        await en.chunks.update(englishChunk.id, { createdAt: now - 86400000 })
+      }
+    }
+    const kinds = new Set<string>(), phases: string[] = [], materials: string[] = []
+    let daysWithDue = 0
+    for (let index = 0; index < 8; index++) {
+      const at = now + index * (86400000 + 10000); vi.setSystemTime(at)
+      const shared = (await readLanguageDay(en, at, ja))!
+      const englishMinutes = dailyMinutes === 45 ? 30 : shared.allowances.en.remaining
+      await en.events.add({ id: `en-day-${index}`, type: 'TASK_COMPLETED', source: 'objective', timestamp: at,
+        data: { taskId: `en-day-${index}`, minutes: englishMinutes } })
+      const plan = (await learning.today(at))!
+      const allowance = (await readLanguageDay(en, at, ja))!
+      expect(plan.minutes).toBeLessThanOrEqual(allowance.allowances.ja.planCap)
+      expect(plan.minutes + englishMinutes).toBeLessThanOrEqual(dailyMinutes)
+      if (dailyMinutes === 45) expect(plan.minutes).toBe(15)
+      else {
+        expect(allowance.allowances.ja.remaining).toBeGreaterThanOrEqual(7)
+        expect(allowance.allowances.ja.remaining).toBeLessThanOrEqual(8)
+        expect(plan.tasks.filter(task => task.kind !== 'review').every(task => task.minutes >= 5)).toBe(true)
+      }
+      if (index || dailyMinutes === 15) { expect(plan.tasks.some(task => task.kind === 'review')).toBe(true); daysWithDue++ }
+      for (const task of plan.tasks) {
+        let session = await learning.start(task.id, at)
+        if (session.kind === 'japanese-review') {
+          while (!session.completedAt) {
+            const state = await learning.review.read(session.id), item = state.draft.items.find(item => !item.rating && !item.skipped)!
+            const card = (await ja.cards.get(item.cardId))!, oral = ['speaking', 'transfer'].includes(card.modality)
+            const audioId = oral ? `review-${index}-${item.cardId}` : ''
+            if (oral) await ja.audio.put({ ...recording(audioId), createdAt: at })
+            const saved = await learning.review.save(session.id, state.draft.revision, { response: 'おはようございます。', audioId, heard: false }, true, at + 1)
+            session = await learning.review.rate(session.id, Number(saved.draft.revision), 3, at + 2)
+          }
+        } else if (session.kind === 'japanese-practice') {
+          const guide = (await learning.practiceGuide(session.id))!
+          phases.push(guide.phase); materials.push(session.materialId!)
+          expect((await learning.practiceGuide(session.id))?.contextPrompt).toBe(guide.contextPrompt)
+          await ja.audio.bulkPut([{ ...recording(`first-${index}`), createdAt: at }, { ...recording(`retry-${index}`), createdAt: at + 1 }])
+          const written = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), listened: true, response: '问候的情境',
+            expression: 'おはようございます。', example: 'おはようございます。', audioId: `first-${index}`, retryAudioId: `retry-${index}`,
+            comparison: '换成自己的情境，再完整说一次。', effort: 'okay' }, guide.independentFirst ? 'listen' : 'compare')
+          if (guide.phase === 'delayed-transfer') {
+            await expect(learning.finish(session.id, at + 100)).rejects.toThrow('先保存独立')
+            await expect(learning.save(session.id, japanesePracticeDraft.parse(written.draft), 'notice')).rejects.toThrow('先保存独立')
+            const locked = await learning.lockIndependentAttempt(session.id, at + 101)
+            expect(await learning.lockIndependentAttempt(session.id, at + 102)).toEqual(locked)
+            expect((await learning.practiceGuide(session.id))?.firstAttemptSaved).toBe(true)
+            await learning.save(session.id, japanesePracticeDraft.parse(written.draft), 'compare')
+          } else if (guide.phase === 'application') {
+            await learning.save(session.id, japanesePracticeDraft.parse(written.draft), 'compare')
+          }
+          await learning.finish(session.id, at + 1000)
+        } else if (session.kind === 'japanese-reading') {
+          const state = await learning.reading.read(session.id), draft = japaneseReadingDraft.parse(session.draft)
+          if (!state.reading.kana) kinds.add('reading')
+          const saved = await learning.reading.save(session.id, { ...draft,
+            meaning: state.reading.questions.map(q => q.answer) as [string, string], kana: state.reading.words.map(w => w.reading) as [string, string],
+            sourcePractice: 'heard', note: '保留首答后写一句新的意思。' }, 'lock', at + 1)
+          await learning.reading.finish(session.id, Number(saved.draft.revision), at + 2)
+        } else if (session.kind === 'japanese-extensive') {
+          kinds.add('reading')
+          const draft = extensiveDraftSchema.parse(session.draft)
+          const saved = await learning.books.save(session.id, { ...draft, outcome: 'finished', minutesRead: task.minutes })
+          await learning.books.finish(session.id, extensiveDraftSchema.parse(saved.draft), at + 1000)
+        } else if (session.kind === 'japanese-dialogue') {
+          kinds.add('dialogue')
+          for (let turn = 0; turn < 3; turn++) {
+            const state = await learning.dialogue.read(session.id)
+            const answer = { text: 'はじめまして。よろしくお願いします。', audioId: '', confirmed: true }
+            const saved = await learning.dialogue.save(session.id, state.draft.revision, answer, '')
+            await learning.dialogue.send(session.id, { revision: saved.draft.revision, answer }, undefined, new AbortController().signal)
+          }
+          const state = await learning.dialogue.read(session.id), audioId = `dialogue-retry-${index}`
+          await ja.audio.put({ ...recording(audioId), createdAt: at })
+          const attached = await learning.dialogue.attach(session.id, state.draft.revision, audioId, true)
+          await learning.dialogue.save(session.id, attached.draft.revision, attached.draft.answer, '写明一处调整，再完整重说。')
+          await learning.dialogue.finish(session.id, at + 1000)
+        }
+      }
+      expect((await learning.today(at + 2000))?.tasks.every(task => task.done || task.optional)).toBe(true)
+      expect((await readLanguageDay(en, at + 2000, ja))!.credited).toBeLessThanOrEqual(dailyMinutes)
+    }
+    expect(daysWithDue).toBe(dailyMinutes === 15 ? 8 : 7); expect(kinds).toEqual(new Set(['reading', 'dialogue']))
+    expect(phases.slice(0, 3)).toEqual(['input', 'application', 'delayed-transfer'])
+    expect(new Set(materials.slice(0, 3)).size).toBe(1); expect(materials[3]).not.toBe(materials[0])
+    expect((await ja.skills.toArray()).every(skill => skill.evidenceCount === 0)).toBe(true)
+    expect((await ja.events.toArray()).filter(event => event.type === 'EXTERNAL_LISTEN_REFLECTION')
+      .every(event => event.data?.publisherCoverageVerified === false)).toBe(true)
+  })
   it('starts from a declared beginner preference without fabricated diagnostic answers or scores', async () => {
     const { learning, ja, en } = await setup()
     const beforeEnglish = await en.profiles.toArray()
@@ -168,7 +317,8 @@ describe('Japanese usable practice persistence', () => {
     const session = await learning.start(task.id, now)
     const saved = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), response: '先保存未完成的回答' }, 'listen')
     expect((await learning.start(task.id, now)).draft).toEqual(saved.draft)
-    expect(await ja.events.count()).toBe(1)
+    expect((await ja.events.toArray()).filter(event => event.type === 'TASK_STARTED')).toHaveLength(1)
+    expect((await ja.events.toArray()).filter(event => event.type === 'JAPANESE_COURSE_ASSIGNED')).toHaveLength(1)
     expect((await learning.today(now))?.tasks[0]?.minutes).toBe(task.minutes)
   })
   it('rejects skipped stages, stale writes, foreign recordings and incomplete finish atomically', async () => {
@@ -176,7 +326,7 @@ describe('Japanese usable practice persistence', () => {
     await learning.saveDiagnostic(skipped, true, now)
     const session = await learning.start((await learning.today(now))!.tasks[0]!.id, now)
     const original = japanesePracticeDraft.parse(session.draft)
-    await expect(learning.save(session.id, original, 'notice')).rejects.toThrow('先听')
+    await expect(learning.save(session.id, original, 'notice')).rejects.toThrow('首答')
     const saved = await learning.save(session.id, { ...original, listened: true, response: '问候' }, 'notice')
     await expect(learning.save(session.id, original, 'listen')).rejects.toThrow('其他页面')
     await en.audio.add(recording('foreign'))
@@ -201,7 +351,7 @@ describe('Japanese usable practice persistence', () => {
     expect(after.tasks.find(task => task.kind === 'listen')?.done).toBe(true)
     expect(after.tasks.find(task => task.materialId?.startsWith('ja-kana-'))?.done).toBe(false)
     expect(await en.sessions.count()).toBe(0); expect(await en.audio.count()).toBe(0); expect(await en.cards.count()).toBe(0)
-    expect((await learning.today(now + 86400000))?.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-2')
+    expect((await learning.today(now + 86400000))?.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-1')
   })
   it('stops allocation when English used the account allowance and fences an owner change', async () => {
     const { learning, en, ja } = await setup()

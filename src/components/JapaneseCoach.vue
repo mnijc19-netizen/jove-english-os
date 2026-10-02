@@ -18,6 +18,7 @@ const provider = japaneseProvider({ database: props.database, english, settings:
 const coach = createJapaneseCoach(props.database, props.sessionId, props.checkOwner, provider)
 const draft = shallowRef<Awaited<ReturnType<typeof coach.open>>>(), text = ref(''), confirmed = ref(false), dirty = ref(false), saving = ref(false)
 const savedNotice = ref(''), saveError = ref('')
+const feedbackVisible = ref(false)
 const retainedText = ref('')
 const { busy, error, run, cancel } = useRequest()
 const selected = computed(() => draft.value?.feedback.find(entry => entry.input === text.value))
@@ -72,6 +73,15 @@ async function feedback() {
     if (notices.some(notice => notice.kind === 'schema-fallback' || notice.kind === 'model-fallback')) savedNotice.value += ' 本次采用了兼容格式或备用模型，原设置未改变。'
   })
 }
+async function confirmCorrection() {
+  if (!feedbackVisible.value) return
+  await run(async signal => {
+    await flush(); signal.throwIfAborted()
+    if (!selected.value || !feedbackVisible.value) return
+    await coach.confirmCorrection(selected.value.id)
+    if (!disposed) savedNotice.value = '已确认这一处。至少隔一天先做书面检索，再隔天换情境写和录音；只保存练习，不认定已经掌握。'
+  })
+}
 async function reloadSaved() {
   await run(async signal => {
     clearTimeout(timer); await saves.catch(() => {})
@@ -99,15 +109,20 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(timer); window.removeEvent
       <p v-if="readOnly" class="help-text">已完成练习的原回答不再修改。已有反馈直接回看；未完成的请求沿用原请求取回结果。服务端结果过期或未曾请求时，再次请求仍可能收费；不会自动调用。</p>
       <button v-if="!readOnly" class="text-button" :disabled="busy || saving || !audioId || !app.online || !app.keySet" @click="transcribe">转写首答录音（可能收费）</button>
       <details v-if="draft.transcript"><summary>已保存的转写候选 · 需核对</summary><p lang="ja">{{ draft.transcript }}</p><button v-if="!readOnly" class="text-button" :disabled="busy || saving" @click="useTranscript">放入回答，再核对</button></details>
-      <label class="coach-input">写下自己刚才说的日语，或核对转写后修改<textarea v-model="text" lang="ja" rows="3" maxlength="10000" :readonly="readOnly" :disabled="busy" @input="confirmed = false; changed()" /></label>
+      <label class="coach-input">写下自己的日语回答，或核对录音转写后修改<textarea v-model="text" lang="ja" rows="3" maxlength="10000" :readonly="readOnly" :disabled="busy" @input="confirmed = false; changed()" /></label>
       <label class="row"><input v-model="confirmed" type="checkbox" :disabled="busy || readOnly" @change="changed">我核对过这段文字；转写错误不当作自己的语言错误</label>
       <div class="row wrap">
         <button class="button secondary" :disabled="busy || saving || !confirmed || !text.trim() || !app.online || !app.keySet" @click="feedback">{{ selected ? '查看已保存的反馈' : readOnly ? '取回或请求反馈（可能收费）' : '请 AI 帮我改进（可能收费）' }}</button>
         <button v-if="busy" class="text-button" @click="cancel">停止等待，保留回答</button>
       </div>
       <div v-if="selected" class="coach-feedback">
-        <CoachingFeedback :evaluation="selected.result" :answer="selected.input" language="ja" />
+        <CoachingFeedback :evaluation="selected.result" :answer="selected.input" language="ja" @revealed="feedbackVisible = $event" />
         <p class="help-text">针对上面保存的回答给出；不要求逐字照抄，意思相同且合适的表达也可以。</p>
+        <template v-if="feedbackVisible && selected.result.errors[0]">
+          <p>本次延迟练习只针对第一处：<span lang="ja">{{ selected.result.errors[0].original }}</span> → <span lang="ja">{{ selected.result.errors[0].corrected }}</span></p>
+          <p class="help-text">核对这处 AI 建议确实适合你的意思后，可加入延迟练习。先用到自己的完整句子，再录音重说；原回答继续保留。确认不代表 AI 一定正确，也不会生成能力分数。</p>
+        </template>
+        <button v-if="feedbackVisible && selected.result.errors.length" class="text-button" :disabled="busy || saving || !confirmed || dirty" @click="confirmCorrection">确认这一处，安排延迟书写与开口练习</button>
       </div>
     </template>
     <p v-else-if="readOnly && !busy" class="help-text">这次没有保存可接续的 AI 回答。练习原件不受影响，下一次练习再按需使用。</p>

@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto'
 import { afterEach, describe, expect, it } from 'vitest'
 import { japaneseSource, japaneseStarterLessons, japaneseStarterMaterials, japaneseLessons, japaneseMaterials } from '../src/content/japanese'
-import { kanaMorae, japanesePlacement, japanesePlacementItems, japaneseTextUnits, japaneseReadingSupport, nextJapaneseLesson } from '../src/domain/japanese'
+import { kanaMorae, japanesePlacement, japanesePlacementItems, japaneseTextUnits, japaneseReadingSupport, nextJapaneseLesson, japaneseCoursePractice, japaneseTransferContext } from '../src/domain/japanese'
 import { materialSchema } from '../src/db/schema'
 import { initializeJapanese } from '../src/db/japanese'
 import { createLearningRepository, exportBackup, restoreBackup } from '../src/db/repository'
@@ -23,8 +23,43 @@ function readingAttempt(id: string, timestamp: number, response = 'ガッコウ'
   return [{ id: `${id}:response`, type: 'REVIEW_RESPONSE', source: 'self-report', timestamp: timestamp - 1, sessionId: id, chunkId: 'word', modality: 'recall', prompted, data: { response } },
     { id: `${id}:rating`, type: 'review', source: 'self-report', timestamp, sessionId: id, chunkId: 'word', modality: 'recall', prompted, data: { responseEventId: `${id}:response`, scheduledRating } }]
 }
+function courseCycle(id: string, end = now - 1): StudyEvent[] {
+  return [...['input', 'application', 'delayed-transfer'].map((phase, index) => ({
+    ...reflection(id, end - (2 - index) * 86400000), id: `${id}:${phase}`, sessionId: `${id}:${phase}`,
+    data: { ...reflection(id).data, coursePhase: phase, contextId: `${id}:context:${index}`, ...(index === 2 ? { firstAttemptEventId: `${id}:first` } : {}) },
+  })), { id: `${id}:first`, type: 'JAPANESE_COURSE_FIRST_ATTEMPT', source: 'self-report', timestamp: end,
+    sessionId: `${id}:delayed-transfer`, data: { materialId: id, contextId: `${id}:context:2`, response: 'Saved independent writing', audioId: 'saved-original' } }]
+}
 
 describe('Japanese-specific source and practice support', () => {
+  it('retains a difficult lesson through an easier detour and returns before advancing', () => {
+    const materials = japaneseMaterials(), fourth = materials[3]!, third = materials[2]!
+    const history = materials.slice(0, 3).flatMap(material => courseCycle(material.id, now - 10))
+    for (const offset of [2, 1]) history.push({ ...reflection(fourth.id, now - offset), id: `hard-${offset}`, sessionId: `hard-${offset}`,
+      data: { ...reflection(fourth.id).data, effort: 'hard' } })
+    expect(nextJapaneseLesson(materials, history, fourth.difficulty, now)?.id).toBe(third.id)
+    const returnHistory = [...history, { ...reflection(third.id), id: 'easier', sessionId: 'easier', data: { ...reflection(third.id).data, effort: 'okay' } }]
+    expect(nextJapaneseLesson(materials, returnHistory, fourth.difficulty, now)?.id).toBe(fourth.id)
+  })
+  it('requires three saved practice phases, a real delay and distinct contexts without rewriting legacy exposure', () => {
+    const id = japaneseLessons[0]!.id, legacy = reflection(id, now - 2 * 86400000), snapshot = structuredClone(legacy)
+    expect(japaneseCoursePractice(id, [legacy], now)).toMatchObject({ phase: 'application', complete: false })
+    const cycle = courseCycle(id), application = cycle[1]!, transfer = cycle[2]!
+    expect(japaneseCoursePractice(id, [legacy, application], application.timestamp + 100)).toMatchObject({ phase: 'delayed-transfer', complete: false, availableAt: application.timestamp + 86400000 })
+    expect(japaneseCoursePractice(id, [legacy, application, { ...transfer, timestamp: application.timestamp + 100 }], now).complete).toBe(false)
+    expect(japaneseCoursePractice(id, [legacy, application, { ...transfer, data: { ...transfer.data, contextId: application.data!.contextId! } }], now).complete).toBe(false)
+    expect(japaneseCoursePractice(id, [legacy, application, transfer, cycle[3]!], now).complete).toBe(true)
+    expect(legacy).toEqual(snapshot)
+  })
+  it('chooses saved distinct transfer contexts and labels exhausted variants as repeats', () => {
+    const id = japaneseLessons[0]!.id, events: StudyEvent[] = []
+    const first = japaneseTransferContext(id, events)!
+    events.push({ id: 'first', type: 'JAPANESE_CONTEXT_ASSIGNED', source: 'objective', timestamp: now, contextId: first.id })
+    const second = japaneseTransferContext(id, events)!
+    expect(second.id).not.toBe(first.id); expect(second.prompt).not.toBe(first.prompt); expect(second.repeated).toBe(false)
+    events.push({ id: 'second', type: 'JAPANESE_CONTEXT_ASSIGNED', source: 'objective', timestamp: now, contextId: second.id })
+    expect(japaneseTransferContext(id, events)?.repeated).toBe(true)
+  })
   it('extends the preserved starter course through three ordered graded books with original support', () => {
     const materials = japaneseMaterials()
     expect(materials).toHaveLength(72)
@@ -34,11 +69,11 @@ describe('Japanese-specific source and practice support', () => {
       expect(materialSchema.parse(material)).toEqual(material)
       expect(kanaMorae(japaneseLessons[index]!.reading).length).toBeGreaterThan(0)
     }
-    const starterHistory = materials.slice(0, 18).map((material, index) => reflection(material.id, now - 1000 + index))
+    const starterHistory = materials.slice(0, 18).flatMap(material => courseCycle(material.id))
     expect(nextJapaneseLesson(materials, starterHistory, 0.525, now)?.id).toBe('ja-irodori-elementary01-1')
-    const elementaryHistory = materials.slice(0, 36).map((material, index) => reflection(material.id, now - 1000 + index))
+    const elementaryHistory = materials.slice(0, 36).flatMap(material => courseCycle(material.id))
     expect(nextJapaneseLesson(materials, elementaryHistory, 0.7, now)?.id).toBe('ja-irodori-elementary02-1')
-    const bridgeHistory = materials.slice(0, 54).map((material, index) => reflection(material.id, now - 1000 + index))
+    const bridgeHistory = materials.slice(0, 54).flatMap(material => courseCycle(material.id))
     expect(nextJapaneseLesson(materials, bridgeHistory, 0.89, now)?.id).toBe('ja-irodori-pre-intermediate-1')
     expect(nextJapaneseLesson(materials, bridgeHistory, 0.1, now)?.id).not.toMatch(/pre-intermediate/)
     expect(materials.slice(54).every(material => material.difficulty <= 1 && !material.authenticPlayback)).toBe(true)
@@ -123,7 +158,8 @@ describe('Japanese-specific source and practice support', () => {
     const materials = japaneseStarterMaterials(), first = materials[0]!, second = materials[1]!
     const click: StudyEvent = { id: 'click', type: 'EXTERNAL_LINK_OPENED', source: 'self-report', timestamp: now, data: { materialId: first.id } }
     expect(nextJapaneseLesson(materials, [click], 0.1, now)?.id).toBe(first.id)
-    expect(nextJapaneseLesson(materials, [reflection(first.id)], 0.1, now)?.id).toBe(second.id)
+    expect(nextJapaneseLesson(materials, [reflection(first.id)], 0.1, now)?.id).toBe(first.id)
+    expect(nextJapaneseLesson(materials, courseCycle(first.id), 0.1, now)?.id).toBe(second.id)
     expect(nextJapaneseLesson(materials, [{ ...reflection(first.id), data: { materialId: first.id, listened: true } }], 0.1, now)?.id).toBe(first.id)
     expect(nextJapaneseLesson(materials, [], 0.1, now + 91 * 86400000)?.id).toBe(first.id)
     expect(nextJapaneseLesson([{ ...first, language: 'en' }], [], 0.1, now)).toBeNull()

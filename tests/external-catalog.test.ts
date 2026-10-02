@@ -7,6 +7,7 @@ import { readOrRefreshExternalCatalog, refreshExternalCatalog } from '../src/ser
 import { catalogJobAdmin, createContentHandler } from '../src/server/content'
 import { createContentFetcher, type ContentFetcher } from '../src/server/content-network'
 import { aggregateSkills, makePlan } from '../src/domain/engine'
+import { comparableObservation } from '../src/domain/longitudinal'
 import { defaultProfile, type Skill, type StudyEvent } from '../src/domain/types'
 
 const now = Date.UTC(2026, 8, 13, 8)
@@ -66,9 +67,19 @@ describe('bounded publisher course catalog', () => {
     const lowPlan = makePlan(profile, evidence(0.15), [], history, materials, undefined, now)
     expect(lowPlan.tasks.find(task => task.kind === 'listen')?.materialId).not.toMatch(/^external-voa-level2-/u)
     expect(aggregateSkills(history).every(skill => skill.evidenceCount === 0)).toBe(true)
-    const higherPlan = makePlan(profile, evidence(0.65), [], [], materials, undefined, now)
+    // A numeric aggregate alone cannot establish the difficulty actually tried.
+    // The higher trial requires independent observations at that task difficulty.
+    const observed: StudyEvent[] = [3, 2, 1].map(day => ({ id: `observed-${day}`, type: 'COMPREHENSION_RESPONSE',
+      sessionId: `probe-${day}`, timestamp: now - day * 86400000, skill: 'listeningSentences', source: 'ai', score: 0.7, prompted: false,
+      data: { ...comparableObservation({ rubricVersion: 'listening-main-idea-detail-v1', comparisonKey: 'fresh-listening-family',
+        difficulty: 0.65, evaluator: 'fixture/provider-model', conditions: 'one-play-no-help', firstPass: true, priorExposure: false, prompted: false })! } }))
+    const higherPlan = makePlan(profile, aggregateSkills(observed), [], observed, materials, undefined, now)
     expect(higherPlan.tasks.find(task => task.kind === 'listen')?.materialId).toBe('external-voa-level2-1')
-    const bound = makePlan(profile, evidence(0.65), [], history, materials, lowPlan, now)
+    for (const scores of [[], evidence(0.15), evidence(0.95)]) {
+      const participationOnly = makePlan(profile, scores, [], history, materials, undefined, now)
+      expect(participationOnly.tasks.find(task => task.kind === 'listen')?.materialId).not.toMatch(/^external-voa-level2-/u)
+    }
+    const bound = makePlan(profile, aggregateSkills(observed), [], [...history, ...observed], materials, lowPlan, now)
     expect(bound.tasks.find(task => task.kind === 'listen')?.materialId).toBe(lowPlan.tasks.find(task => task.kind === 'listen')?.materialId)
   })
   it('extracts all 52 distinct positions and only page metadata', () => {

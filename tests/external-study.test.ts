@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { externalMaterials, externalPracticeReady, externalLessonCandidates, unavailableExternalIds } from '../src/content/external'
+import { externalMaterials, externalPracticeReady, externalLessonCandidates, externalCoursePractice, unavailableExternalIds } from '../src/content/external'
 import { materialSchema } from '../src/db/schema'
 import { aggregateSkills, makePlan } from '../src/domain/engine'
 import { defaultProfile, type StudyEvent } from '../src/domain/types'
@@ -117,5 +117,38 @@ describe('external course continuity across weeks', () => {
   it('handles an empty reserve without inventing materials', () => {
     expect(externalLessonCandidates([], [], now)).toEqual([])
     expect(externalLessonCandidates(demoMaterials, [], now)).toEqual([])
+  })
+  it('keeps a new short clip as application practice, then returns for delayed new-context use', () => {
+    const material = pool[0]!, first = reflection(material.id, now - day, { data: {
+      ...reflection(material.id, now - day).data, guidedVersion: 1, coursePhase: 'input-application',
+      contextId: `${material.id}:application:0`, firstExample: 'I am new here.', retryAudioId: 'retry-1' } })
+    expect(externalCoursePractice(material.id, [first], now - 1000)).toMatchObject({ complete: false, phase: 'input-application' })
+    const guide = externalCoursePractice(material.id, [first], now)
+    expect(guide).toMatchObject({ complete: false, phase: 'delayed-application', priorExpression: 'An expression' })
+    expect(guide.contextPrompt).toContain('换成')
+    expect(externalLessonCandidates(pool, [first], now).map(m => m.id)).toEqual([material.id])
+    const transfer = reflection(material.id, now, { data: { ...first.data, coursePhase: guide.phase,
+      contextId: guide.contextId, audioId: 'independent-2', retryAudioId: 'retry-2' } })
+    expect(externalCoursePractice(material.id, [first, transfer], now).complete).toBe(true)
+    expect(externalLessonCandidates(pool, [first, transfer], now).map(m => m.id)).not.toContain(material.id)
+    expect(aggregateSkills([first, transfer]).every(skill => skill.evidenceCount === 0)).toBe(true)
+  })
+  it('does not advance a new course from a premature, same-audio or same-session transfer', () => {
+    const material = pool[0]!, first = reflection(material.id, now - day, { data: {
+      ...reflection(material.id, now - day).data, guidedVersion: 1, coursePhase: 'input-application',
+      contextId: `${material.id}:application:0`, firstExample: 'My sentence', retryAudioId: 'retry-1' } })
+    const transfer = reflection(material.id, now, { data: { ...first.data, coursePhase: 'delayed-application', contextId: `${material.id}:application:1` } })
+    for (const invalid of [{ ...transfer, timestamp: now - 1 }, { ...transfer, sessionId: first.sessionId },
+      { ...transfer, data: { ...transfer.data, retryAudioId: transfer.data!.audioId } }])
+      expect(externalCoursePractice(material.id, [first, invalid], now).complete).toBe(false)
+    expect(externalCoursePractice(material.id, [first, transfer, first, transfer].reverse(), now).complete).toBe(true)
+  })
+  it('keeps a new guided follow-up due even when the same lesson has older participation', () => {
+    const material = pool[0]!, old = reflection(material.id, now - 10 * day)
+    const input = reflection(material.id, now - 2 * day, { data: { ...old.data, guidedVersion: 1,
+      coursePhase: 'input-application', contextId: `${material.id}:application:0`, firstExample: 'My fresh sentence', retryAudioId: 'fresh-retry' } })
+    expect(externalCoursePractice(material.id, [old], now).complete).toBe(true)
+    expect(externalCoursePractice(material.id, [old, input], now)).toMatchObject({ phase: 'delayed-application', complete: false })
+    expect(externalLessonCandidates(pool, [old, input], now).map(item => item.id)).toEqual([material.id])
   })
 })

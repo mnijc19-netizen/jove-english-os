@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useApp } from "../stores/app";
-import { englishTaskGuide, nextAssignedTask, skillLabel, taskPath } from "../domain/engine";
+import { englishTaskGuide, englishLearningOutcome, nextAssignedTask, taskPath } from "../domain/engine";
 import Icon from "../components/Icon.vue";
 import type { PlanTask } from "../domain/types";
 import { planRecovery, selectMeaningfulReviews } from "../domain/longitudinal";
@@ -14,7 +14,7 @@ const reviewSelection = computed(() => selectMeaningfulReviews(app.cards, app.ev
   maxCards: recovery.value.maxReviewCards,
 }));
 const date = computed(() =>
-  new Intl.DateTimeFormat("en", {
+  new Intl.DateTimeFormat("zh-CN", {
     weekday: "long",
     month: "long",
     day: "numeric",
@@ -25,6 +25,8 @@ const optionalTasks = computed(() => app.plan.tasks.filter(task => task.optional
 const completed = computed(() => requiredTasks.value.filter((t) => t.done).length);
 const next = computed(() => nextAssignedTask(app.plan));
 const nextGuide = computed(() => next.value ? englishTaskGuide(next.value) : null);
+const nextMaterial = computed(() => app.materials.find(m => m.id === next.value?.materialId));
+const outcome = computed(() => next.value ? englishLearningOutcome(next.value, nextMaterial.value) : null);
 const path = taskPath;
 const material = computed(
   () =>
@@ -55,55 +57,56 @@ async function start(task: PlanTask) {
 }
 </script>
 <template>
-  <div class="page today-page">
+  <div class="page today-page" lang="zh-CN">
     <div class="page-heading">
       <div>
         <p class="eyebrow">{{ date }}</p>
         <h1 tabindex="-1">
-          A little more natural,<br /><span class="serif">every day.</span>
+          今天，练会一点真实表达。
         </h1>
         <p class="lede">
-          Welcome back, {{ app.profile.name }}. Let’s turn what you know into
-          what you can say.
+          {{ app.profile.name }}，不用选课。跟着下一步，先尝试，再获得帮助。
         </p>
       </div>
       <div class="daily-date">
-        <span>YOUR DAILY SPACE</span><Icon name="audio" :size="36" /><span
-          >Listen. Speak. Make it yours.</span
+        <span>英语学习</span><Icon name="audio" :size="36" /><span
+          >听懂 · 表达 · 以后还会用</span
         >
       </div>
     </div>
     <div v-if="!app.profile.onboarded" class="onboard-banner">
       <span class="small-icon"><Icon name="sparkle" /></span>
       <div>
-        <strong>A plan that starts with you.</strong>
+        <strong>第一次来？先找到合适起点。</strong>
         <p>
-          A short check-in helps us find your first listening and speaking
-          focus.
+          做一次简短了解，之后由系统安排；现在也可以直接开始下面的练习。
         </p>
       </div>
-      <RouterLink to="/onboarding" class="button secondary"
-        >Find my starting point <Icon name="arrow" :size="16"
+      <RouterLink to="/onboarding" class="button secondary" aria-label="Find my starting point"
+        >找到我的学习起点<Icon name="arrow" :size="16"
       /></RouterLink>
     </div>
     <div class="today-grid">
       <section class="training-card">
         <div class="row between">
-          <span class="eyebrow">TODAY’S PRACTICE</span
+          <span class="eyebrow">现在只做这一项</span
           ><span class="pill"
-            ><i class="tiny-dot"></i>Personalized for you</span
+            ><i class="tiny-dot"></i>系统已安排</span
           >
         </div>
         <div class="training-title">
           <h2>
-            From understanding<br />to <span class="serif">speaking.</span>
+            {{ nextGuide?.title || '今天到这里就好。' }}
           </h2>
           <span class="focus-orbit" aria-hidden="true"
             ><Icon name="audio" :size="45"
           /></span>
         </div>
-        <p class="muted">Your focus · {{ skillLabel(app.plan.focus) }}</p>
-        <p class="help-text">具体学什么和先后顺序已由系统安排。你只需告诉系统可用时间和精力；短一点也可以，不必每天做满所有项目。</p>
+        <p v-if="outcome" class="learning-goal" data-testid="daily-learning-goal">{{ outcome.goal }}</p>
+        <button v-if="next" class="button primary wide next-action" :disabled="starting" :aria-label="completed ? 'Continue my practice' : 'Start today’s practice'" @click="start(next)">
+          {{ completed ? '接着练习' : '开始学习' }} · 约 {{ next.minutes }} 分钟<Icon name="arrow" :size="18" />
+        </button>
+        <p class="help-text">只需调整今天的时间与精力；可以暂停，未完成的内容会保留。</p>
         <p v-if="app.contentState === 'loading'" class="help-text" role="status">Preparing suitable lessons and short audio. Your saved practice stays available.</p>
         <p v-else-if="app.contentState === 'empty'" class="help-text" role="status">Publisher lessons open at their source; your guided practice and progress stay here. Saved local lessons are also available.</p>
         <p v-else-if="app.contentState === 'error'" class="help-text" role="status">New lessons or audio could not finish loading. Your saved work is safe.
@@ -129,9 +132,8 @@ async function start(task: PlanTask) {
         <div class="training-progress">
           <div>
             <span
-              >{{ completed }} of {{ requiredTasks.length }} steps
-              complete</span
-            ><span>{{ app.plan.minutes }} min planned</span>
+              >已练 {{ completed }} / {{ requiredTasks.length }} 项 · 不是掌握率</span
+            ><span>今天最多安排 {{ app.plan.minutes }} 分钟</span>
           </div>
           <div class="progress-track">
             <i
@@ -144,19 +146,12 @@ async function start(task: PlanTask) {
         <section v-if="next && nextGuide" class="next-practice-guide" aria-label="下一项学习指引" lang="zh-CN">
           <h3>{{ nextGuide.title }} · 约 {{ next.minutes }} 分钟</h3>
           <ol><li v-for="step in nextGuide.steps" :key="step">{{ step }}</li></ol>
-          <p class="help-text">点击下方开始按钮即可。卡住先保留自己的尝试，再用提示；不用反复硬听到疲惫。</p>
+          <p class="help-text">卡住先保留尝试，再用提示；每次只改一处，不用反复硬听到疲惫。</p>
+          <details v-if="outcome" class="learning-continuity"><summary>怎样知道不是只看过视频？</summary><p>{{ outcome.check }}</p><p>{{ outcome.later }}</p></details>
         </section>
-        <button
-          v-if="next"
-          class="button primary wide"
-          :disabled="starting"
-          @click="start(next)"
-          >{{ completed ? "Continue my practice" : "Start today’s practice"
-          }}<Icon name="arrow" :size="18"
-        /></button>
-        <div v-else class="success-note">
-          <Icon name="check" />{{ completed === requiredTasks.length ? 'Today’s plan is complete.' : 'Your planned time is covered for today. Unfinished work stays saved.' }}
-          Let it settle; there is no need to clear the backlog.
+        <div v-if="!next" class="success-note">
+          <Icon name="check" />{{ completed === requiredTasks.length ? '今天的练习已保存。' : '今天先到这里，未完成的尝试还在。' }}
+          下次从回忆和应用接续，不必为了完成任务再加量。
         </div>
         <RouterLink v-if="!next && app.due.length" :to="{ path: '/review', query: { extra: '1' } }" class="button secondary">Optional extra review</RouterLink>
         <div v-if="optionalTasks.length" class="section" aria-label="Optional saved practice">
@@ -168,32 +163,32 @@ async function start(task: PlanTask) {
         </div>
         <p v-if="startError" class="error" role="alert">{{ startError }}</p>
         <p class="card-footnote">
-          <Icon name="shield" :size="14" />Your progress saves as you go.
+          <Icon name="shield" :size="14" />先保存你的尝试，AI 或网络失败也能接续。
         </p>
       </section>
       <aside class="today-side">
         <section class="panel focus-card">
           <div class="row">
             <span class="small-icon"><Icon name="today" /></span>
-            <p class="eyebrow">WHY THIS FOCUS</p>
+            <p class="eyebrow">为什么这样练</p>
           </div>
-          <h3>Make the familiar<br />feel automatic.</h3>
+          <h3>从看懂，走向自己能用。</h3>
           <p>
             {{
               app.events.length
-                ? "Your recent practice helps choose the next task. Listening, recall and spontaneous speaking are tracked separately."
-                : "Start with a small baseline. Your plan will adapt as we learn what you recognize, hear and can use on your own."
+                ? "今天的输入、你的表达和后续复习连接在一起。AI 分析实际回答，确认的纠错安排再练；不同能力分开记录。"
+                : "先从一小段和一个生活目标开始。系统会根据实际尝试逐步调整，不凭打卡或看过视频给能力分数。"
             }}
           </p>
           <RouterLink to="/progress" class="text-button"
-            >See your learning profile <Icon name="arrow" :size="15"
+            >查看真实学习证据 <Icon name="arrow" :size="15"
           /></RouterLink>
         </section>
         <section class="review-teaser">
           <Icon name="review" :size="25" />
           <div>
-            <strong>{{ reviewSelection.selected.length }} selected to revisit</strong>
-            <p>{{ reviewSelection.deferredCount ? 'Other due cards stay saved for later.' : 'A little retrieval goes a long way.' }}</p>
+            <strong>今天挑选 {{ reviewSelection.selected.length }} 项复习</strong>
+            <p>{{ reviewSelection.deferredCount ? '其他到期项保留，不要求清空积压。' : '复习是把以前的表达再用出来，不是重复看答案。' }}</p>
           </div>
           <RouterLink
             to="/review"
@@ -203,7 +198,7 @@ async function start(task: PlanTask) {
           /></RouterLink>
         </section>
         <label class="energy-row"
-          >Today’s energy<select
+          >今天的精力<select
             :value="app.profile.fatigue"
             @change="
               app.saveProfile({
@@ -211,17 +206,17 @@ async function start(task: PlanTask) {
               })
             "
           >
-            <option :value="0">Feeling fresh</option>
-            <option :value="0.4">Taking it steady</option>
-            <option :value="0.8">Low energy</option>
+            <option :value="0">状态很好</option>
+            <option :value="0.4">正常，稳一点</option>
+            <option :value="0.8">有点累，轻一些</option>
           </select></label
         >
       </aside>
     </div>
     <section class="section">
       <div class="section-title">
-        <h2>Your practice path</h2>
-        <span class="muted">One thing at a time.</span>
+        <h2>今天的接续顺序</h2>
+        <span class="muted">不必自己决定先后，也不必一次做完。</span>
       </div>
       <div class="task-list">
         <RouterLink
@@ -247,8 +242,8 @@ async function start(task: PlanTask) {
                       : task.kind
               " /></span
           ><span class="task-copy"
-            ><strong>{{ task.title }}</strong
-            ><small>{{ task.reason }}</small></span
+            ><strong>{{ englishTaskGuide(task).title }}</strong
+            ><small>{{ task.materialId ? app.materials.find(m => m.id === task.materialId)?.title || task.title : '接续你的表达与复习' }}</small></span
           ><span class="task-duration">{{ task.minutes ? `${task.minutes} min` : 'Saved for later' }}</span
           ><Icon name="right" :size="17"
         /></RouterLink>

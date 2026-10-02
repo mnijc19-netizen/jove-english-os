@@ -28,6 +28,37 @@ async function setup(modality: Modality = 'recall') {
 }
 
 describe('Japanese delayed review with separate recall evidence', () => {
+  it('retains a legacy unrelated-clip answer without changing its expression listening card', async () => {
+    const { learning, ja, session } = await setup()
+    const listening = (await ja.cards.toArray()).find(card => card.modality === 'listening')!
+    const before = structuredClone(listening), draft = japaneseReviewDraft.parse(session.draft)
+    draft.items = [{ cardId: listening.id, reps: listening.card.reps, response: '', audioId: '', heard: false, revealed: false, hintUsed: false }]
+    await ja.sessions.put({ ...session, draft })
+    const saved = await learning.review.save(session.id, draft.revision, { response: '听到的是晚间告别，不是这张早安表达卡', heard: true, audioId: '' }, true, now)
+    await learning.review.rate(session.id, Number(saved.draft.revision), 4, now + 1)
+    expect(await ja.cards.get(listening.id)).toEqual(before)
+    expect((await ja.events.toArray()).filter(event => event.type === 'JAPANESE_UNBOUND_LISTENING')).toHaveLength(1)
+    expect((await ja.events.toArray()).some(event => event.type === 'review' && event.data?.cardId === listening.id)).toBe(false)
+    expect((await learning.review.read(session.id)).draft.items[0]?.response).toContain('晚间告别')
+  })
+  it('persists a transfer prompt on start and rotates it across real later review blocks', async () => {
+    const { learning, ja, session } = await setup('transfer')
+    const first = japaneseReviewDraft.parse(session.draft).items[0]!
+    expect(first.contextId).toBeTruthy(); expect(first.contextRepeated).toBe(false)
+    expect((await learning.review.read(session.id)).draft.items[0]?.contextPrompt).toBe(first.contextPrompt)
+    const audio = { id: 'context-original', kind: 'recording' as const, blob: new Blob(['original']), mimeType: 'audio/webm', duration: 1, createdAt: now, processed: false, label: 'Fixture' }
+    await ja.audio.put(audio)
+    const saved = await learning.review.save(session.id, 0, { response: 'こんばんは。', audioId: audio.id, heard: false }, true, now)
+    await learning.review.rate(session.id, Number(saved.draft.revision), 3, now + 1)
+    const card = (await ja.cards.get(first.cardId))!
+    const later = now + 86400000; vi.setSystemTime(later)
+    await ja.cards.put({ ...card, card: { ...card.card, due: new Date(later) } })
+    for (const sibling of await ja.cards.toArray()) if (sibling.id !== card.id) await ja.cards.put({ ...sibling, card: { ...sibling.card, due: new Date(later + 86400000) } })
+    const second = await learning.review.start({ id: 'later-context', kind: 'review', title: 'Recall', minutes: 1, reason: 'Fixture', done: false }, later)
+    const next = japaneseReviewDraft.parse(second.draft).items[0]!
+    expect(next.contextId).not.toBe(first.contextId); expect(next.contextPrompt).not.toBe(first.contextPrompt)
+    expect((await ja.skills.toArray()).every(skill => skill.evidenceCount === 0)).toBe(true)
+  })
   it('automatically reserves a small review block without duplicating the daily allowance', async () => {
     const { learning, en, ja, task, plan } = await setup()
     expect(task.minutes).toBe(1)

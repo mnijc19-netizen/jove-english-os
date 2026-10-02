@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyCard } from 'ts-fsrs'
-import { aggregateSkills, englishTaskGuide, makePlan, nextAssignedTask, skillLabel, taskPath } from '../src/domain/engine'
+import { externalMaterials } from '../src/content/external'
+import { aggregateSkills, englishTaskGuide, englishLearningOutcome, makePlan, nextAssignedTask, skillLabel, taskPath } from '../src/domain/engine'
 import { defaultProfile, skillNames, type Material, type PlanTask, type Profile, type ReviewCard, type SkillName, type StudyEvent } from '../src/domain/types'
 
 const now = new Date(2026, 8, 7, 12).getTime()
@@ -15,6 +16,21 @@ const card = (id: string): ReviewCard => ({ id, chunkId: id, modality: 'recognit
 const find = (events: StudyEvent[], skill: SkillName) => aggregateSkills(events).find(s => s.id === skill)!
 
 describe('Chinese procedure guidance and short-day admission', () => {
+  it('connects a task to a real-life goal without revealing a listening answer or claiming mastery', () => {
+    const source = { ...externalMaterials[0]!, transcript: 'Do not reveal the original listening answer here.' }
+    const task: PlanTask = { id: 'today:listen', kind: 'listen', title: 'Saved title', materialId: source.id, minutes: 10, reason: '', done: false }
+    const before = structuredClone({ task, source }), outcome = englishLearningOutcome(task, source)
+    expect(outcome.goal).toContain('认识新朋友')
+    expect(outcome.check).toContain('不等于已经掌握')
+    expect(outcome.later).toContain('换一个场景')
+    expect(JSON.stringify(outcome)).not.toContain(source.transcript)
+    expect({ task, source }).toEqual(before)
+  })
+  it('does not borrow an unrelated lesson goal and keeps enjoyable reading low-pressure', () => {
+    const task: PlanTask = { id: 'today:learn:reading', kind: 'learn', title: 'Saved title', materialId: 'own', minutes: 5, reason: '', done: false }
+    expect(englishLearningOutcome(task, material('external-voa-welcome')).check).toContain('不必每次交测验')
+    expect(englishLearningOutcome({ ...task, kind: 'listen' }, material('external-voa-welcome')).goal).not.toContain('认识新朋友')
+  })
   it.each(['review','listen','learn','shadow','speak','repair','retell','assessment'] as const)('guides %s without modifying its saved task or identity', kind => {
     const task: PlanTask = { id: `today:${kind}`, kind, title: 'Saved original title', minutes: 15, reason: 'Saved reason', done: false }
     const snapshot = structuredClone(task), guide = englishTaskGuide(task)

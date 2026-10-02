@@ -4,7 +4,9 @@ import { useRoute, useRouter } from "vue-router";
 import { useApp } from "../stores/app";
 import { reviewCard } from "../db/repository";
 import { useRequest } from "../composables/useRequest";
-import type { Modality, ReviewCard } from "../domain/types";
+import type { Evaluation, Modality, ReviewCard } from "../domain/types";
+import { evaluatedResultSchema } from "../ai/schemas";
+import CoachingFeedback from "../components/CoachingFeedback.vue";
 import AudioPlayer from "../components/AudioPlayer.vue";
 import Recorder from "../components/Recorder.vue";
 import Icon from "../components/Icon.vue";
@@ -29,6 +31,10 @@ const app = useApp(),
   sttText = ref(""),
   evaluated = ref<number | null>(null);
 const ai = useRequest();
+const feedback = ref<{ answer: string; context: string; result: Evaluation } | null>(null);
+const retryResponse = ref('');
+const retries = ref<{ response: string; timestamp: number }[]>([]);
+const currentFeedback = computed(() => feedback.value?.answer === response.value && feedback.value.context === context.value ? feedback.value : null);
 const route = useRoute();
 const router = useRouter();
 const extra = computed(() => typeof route.query.extra === 'string' && /^\d{1,6}$/.test(route.query.extra) ? route.query.extra : null);
@@ -157,6 +163,9 @@ async function persist() {
         heard: heard.value,
         sttText: sttText.value,
         evaluated: evaluated.value,
+        ...(feedback.value ? { feedback: JSON.parse(JSON.stringify(feedback.value)) } : {}),
+        retryResponse: retryResponse.value,
+        retries: JSON.parse(JSON.stringify(retries.value)),
         ...(usesContext(card.value?.modality) ? { context: context.value } : {}),
       },
     });
@@ -184,18 +193,28 @@ watch(
     recording.value = typeof d?.recording === "string" ? d.recording : "";
     heard.value = d?.heard === true;
     sttText.value = typeof d?.sttText === "string" ? d.sttText : "";
-    evaluated.value = typeof d?.evaluated === "number" ? d.evaluated : null;
+    // Legacy numeric-only drafts lack the returned accuracy/provenance. Keep
+    // their originals, but do not relabel a historical 0.7 fallback as AI evidence.
+    const savedFeedback = d?.feedback as { answer?: unknown; context?: unknown; result?: unknown } | undefined;
+    const parsed = evaluatedResultSchema.safeParse(savedFeedback?.result);
+    if (parsed.success && typeof savedFeedback?.answer === 'string' && typeof savedFeedback.context === 'string') {
+      feedback.value = { answer: savedFeedback.answer, context: savedFeedback.context, result: parsed.data };
+    }
+    retryResponse.value = typeof d?.retryResponse === 'string' ? d.retryResponse : '';
+    retries.value = Array.isArray(d?.retries) ? d.retries.filter((item): item is { response: string; timestamp: number } => !!item
+      && typeof item === 'object' && typeof item.response === 'string' && typeof item.timestamp === 'number' && Number.isFinite(item.timestamp)) : [];
     const selected = await contextFor(active, d);
     if (id !== attemptKey.value) return;
     context.value = selected.text;
     contextReused.value = selected.reused;
+    evaluated.value = currentFeedback.value ? scoreFeedback(currentFeedback.value.result, chunk.value!.text) : null;
     loaded.value = true;
     await persist();
   },
   { immediate: true, flush: "sync" },
 );
 watch(
-  [response, revealed, hint, recording, heard, sttText, evaluated],
+  [response, revealed, hint, recording, heard, sttText, evaluated, feedback, retryResponse],
   persist,
   { flush: "sync" },
 );
@@ -219,9 +238,27 @@ function reset() {
   heard.value = false;
   sttText.value = "";
   evaluated.value = null;
+  feedback.value = null;
+  retryResponse.value = '';
+  retries.value = [];
+}
+function scoreFeedback(result: Evaluation, target: string): number | null {
+  if (result.accuracy === null) return null;
+  return result.successfulChunks.some(s => s.toLowerCase() === target.toLowerCase()) ? result.accuracy : 0;
+}
+async function saveRetry() {
+  if (!loaded.value || !revealed.value || saving.value || !retryResponse.value.trim()) return;
+  saving.value = true;
+  const response = retryResponse.value.trim(), key = attemptKey.value;
+  try {
+    // Separate supported practice; never overwrite or re-score the first answer.
+    retries.value.push({ response, timestamp: Date.now() });
+    retryResponse.value = '';
+    if (!await persist() && key === attemptKey.value) { retries.value.pop(); retryResponse.value = response; }
+  } finally { saving.value = false; }
 }
 async function check() {
-  if (!loaded.value || saving.value || ai.busy.value || recorderActive.value || !card.value || !chunk.value) return;
+  if (!loaded.value || revealed.value || saving.value || ai.busy.value || recorderActive.value || !card.value || !chunk.value) return;
   const submitted = { key: attemptKey.value, response: response.value, context: context.value, chunkText: chunk.value.text, modality: card.value.modality };
   // Lock recording before the draft-save await, not only once evaluation starts.
   saving.value = true;
@@ -244,12 +281,10 @@ async function check() {
       ),
     );
     if (submitted.key !== attemptKey.value || submitted.response !== response.value || submitted.context !== context.value) return;
-    if (result)
-      evaluated.value = result.successfulChunks.some(
-        (s) => s.toLowerCase() === submitted.chunkText.toLowerCase(),
-      )
-        ? (result.accuracy ?? 0.7)
-        : 0;
+    if (result) {
+      feedback.value = { answer: submitted.response, context: submitted.context, result };
+      evaluated.value = scoreFeedback(result, submitted.chunkText);
+    }
   }
   if (submitted.key === attemptKey.value && submitted.response === response.value) revealed.value = true;
   } finally { saving.value = false; }
@@ -260,6 +295,7 @@ async function rate(rating: 1 | 2 | 3 | 4) {
     active: card.value, chunk: chunk.value, sessionId: attemptKey.value, attempt: attempt.value!,
     response: response.value, hint: hint.value, heard: heard.value,
     recording: recording.value, sttText: sttText.value, evaluated: evaluated.value,
+    feedback: currentFeedback.value ? JSON.parse(JSON.stringify(currentFeedback.value.result)) as Evaluation : null,
     context: usesContext(card.value.modality) ? context.value : undefined,
   };
   saving.value = true;
@@ -299,6 +335,8 @@ async function rate(rating: 1 | 2 | 3 | 4) {
       data: {
         attemptId: submitted.attempt.attemptId,
         response: submitted.response,
+        ...(submitted.feedback ? { feedbackJson: JSON.stringify(submitted.feedback),
+          accuracyKnown: submitted.feedback.accuracy !== null } : {}),
         ...(submitted.recording ? { audioId: submitted.recording } : {}),
         transcriptVerified: verified,
       heard: submitted.heard,
@@ -413,7 +451,7 @@ async function rate(rating: 1 | 2 | 3 | 4) {
         v-if="['speaking', 'transfer'].includes(card.modality)"
         :key="card.id"
         :saved-audio-id="recording"
-        :disabled="ai.busy.value || saving"
+        :disabled="revealed || ai.busy.value || saving"
         @active="recorderActive = $event"
         @recorded="
           recording = $event.audioId;
@@ -439,7 +477,7 @@ async function rate(rating: 1 | 2 | 3 | 4) {
         :disabled="!loaded"
       />
       <div v-if="!revealed" class="row between">
-        <button class="text-button" @click="hint = true">Need a hint?</button
+        <button class="text-button" :disabled="saving || ai.busy.value || recorderActive" @click="hint = true">Need a hint?</button
         ><button
           class="button primary"
           :disabled="
@@ -457,6 +495,15 @@ async function rate(rating: 1 | 2 | 3 | 4) {
         Starts with “{{ chunk.text.split(" ")[0] }}…” · {{ chunk.meaningZh }}
       </p>
       <div v-if="revealed" class="review-answer">
+        <template v-if="currentFeedback">
+          <CoachingFeedback :key="attemptKey" :evaluation="currentFeedback.result" :answer="currentFeedback.answer" language="en" />
+          <p v-if="currentFeedback.result.accuracy === null" class="help-text">准确度尚未评定；表达被识别不等于准确度得分。下方自评只安排复习，不建立能力分数。</p>
+          <label for="review-retry">完整重说后记下新表达，或写一次修改（保留首次回答）</label>
+          <textarea id="review-retry" v-model="retryResponse" rows="3" :readonly="saving" maxlength="10000" />
+          <button class="button secondary" :disabled="saving || !retryResponse.trim()" @click="saveRetry">保存这次练习，不请求 AI</button>
+          <p class="help-text">提示后的重试仅供自我比较，不增加能力证据，也不重复调整复习间隔。</p>
+          <div v-for="(retry, index) in retries" :key="index"><p>已保存重试 {{ index + 1 }}</p><blockquote>{{ retry.response }}</blockquote></div>
+        </template>
         <p class="eyebrow">COMPARE WITH YOUR RESPONSE</p>
         <h2>{{ chunk.text }}</h2>
         <p>{{ chunk.meaningEn }}</p>

@@ -778,6 +778,23 @@ textarea:focus {
   border-top: 1px solid var(--line);
 }
 .next-practice-guide h3 { font-size: 1rem; }
+.today-page .page-heading { margin-bottom: 20px; }
+.today-page .page-heading h1 { font-size: clamp(27px, 3vw, 37px); }
+.today-page .training-title { margin: 20px 0 14px; }
+.today-page .training-title h2 { font-size: clamp(23px, 2.3vw, 30px); }
+.today-page .focus-orbit { display: none; }
+.learning-goal { font-size: 1rem; line-height: 1.75; }
+.next-action { margin: 8px 0 16px; }
+.learning-continuity { margin: 14px 0; }
+.learning-continuity summary { color: var(--accent); cursor: pointer; }
+.learning-continuity p { margin-top: 12px; font-size: 14px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 800px) {
+  .today-page .daily-date { display: none; }
+  .today-page .onboard-banner { margin-bottom: 16px; padding: 14px; }
+  .today-page .training-card { padding: 20px; }
+  .today-page .training-title { margin-top: 16px; }
+}
 .next-practice-guide ol { padding-left: 1.4rem; line-height: 1.7; }
 .next-practice-guide li + li { margin-top: .3rem; }
 .time-options {

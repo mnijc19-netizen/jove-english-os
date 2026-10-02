@@ -3,12 +3,14 @@ import { computed, ref, watch } from 'vue'
 import type { Evaluation } from '../domain/types'
 
 const props = defineProps<{ evaluation: Evaluation; answer: string; language: 'en' | 'ja' }>()
+const emit = defineEmits<{ revealed: [value: boolean] }>()
 const shown = ref(false)
 const correction = computed(() => props.evaluation.errors[0])
 // Only quote a fragment actually present in the saved learner answer. AI may
 // otherwise put a correction in any field, including "original" or "hint".
 const original = computed(() => correction.value && props.answer.includes(correction.value.original) ? correction.value.original : '')
-watch(() => JSON.stringify([props.evaluation, props.answer, props.language]), () => { shown.value = false }, { flush: 'sync' })
+function reveal(value: boolean) { shown.value = value; emit('revealed', value) }
+watch(() => JSON.stringify([props.evaluation, props.answer, props.language]), () => { reveal(false) }, { immediate: true, flush: 'sync' })
 </script>
 
 <template>
@@ -18,7 +20,7 @@ watch(() => JSON.stringify([props.evaluation, props.answer, props.language]), ()
       <blockquote v-if="original" :lang="language">{{ original }}</blockquote>
     </template>
     <p v-else>文字反馈已保存，可以查看后继续练习。</p>
-    <button class="text-button" :aria-expanded="shown" @click="shown = !shown">{{ shown ? '收起文字反馈' : '查看 AI 提示与参考表达' }}</button>
+    <button class="text-button" :aria-expanded="shown" @click="reveal(!shown)">{{ shown ? '收起文字反馈' : '查看 AI 提示与参考表达' }}</button>
     <div v-if="shown" class="coaching-details">
       <p class="help-text">这里只分析已保存文字，不代表发音、听力或真实沟通结果；参考表达不是唯一答案。</p>
       <p>{{ evaluation.summary }}</p>

@@ -3,7 +3,7 @@ import Dexie from 'dexie'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createEmptyCard, fsrs, Rating } from 'ts-fsrs'
 import { db, JoveDatabase, version1Stores } from '../src/db/db'
-import { addChunk, exportBackup, initialize, rebuildSkills, recordEvent, recordRepairAttempt, restoreBackup, reviewCard, saveError, REPAIR_RETEST_DELAY, REPAIR_TRANSFER_DELAY } from '../src/db/repository'
+import { addChunk, createLearningRepository, exportBackup, initialize, rebuildSkills, recordEvent, recordRepairAttempt, restoreBackup, reviewCard, saveError, REPAIR_RETEST_DELAY, REPAIR_TRANSFER_DELAY } from '../src/db/repository'
 import { aggregateSkills, makePlan } from '../src/domain/engine'
 import { demoMaterials } from '../src/content/materials'
 import { modalities, planSchema } from '../src/db/schema'
@@ -190,6 +190,65 @@ describe('transactional persistence and FSRS', () => {
     expect((await db.errors.get(first.id))!.attempts).toBe(2)
     expect(await db.chunks.count()).toBe(2)
   })
+  it('adopts a deterministic correction once across concurrent calls and reload without rescheduling', async () => {
+    await initialize([])
+    const identity = { eventId: 'writing-correction-1', sessionId: 'writing-session' }
+    await db.sessions.put({ id: identity.sessionId, kind: 'listen', stage: 'writing', startedAt: now, draft: { response: errorInput.original } })
+    const [first, duplicate] = await Promise.all([saveError(errorInput, identity), saveError(errorInput, identity)])
+    expect(duplicate).toEqual(first)
+    expect(first).toMatchObject({ attempts: 1, failures: 1 })
+    await reviewCard(`${first.chunkId}:cloze`, 3, { source: 'text', score: 1 })
+    const before = { cards: await db.cards.toArray(), errors: await db.errors.toArray(), events: await db.events.toArray() }
+    db.close(); await db.open()
+    expect((await saveError(errorInput, identity)).id).toBe(first.id)
+    expect({ cards: await db.cards.toArray(), errors: await db.errors.toArray(), events: await db.events.toArray() }).toEqual(before)
+    for (const [error, key] of [[{ ...errorInput, corrected: 'A different correction.' }, identity],
+      [errorInput, { ...identity, sessionId: 'another-session' }]] as const) {
+      await expect(saveError(error, key)).rejects.toThrow('Correction event ID already used')
+    }
+    expect({ cards: await db.cards.toArray(), errors: await db.errors.toArray(), events: await db.events.toArray() }).toEqual(before)
+    const backup = await exportBackup(); await restoreBackup(backup)
+    expect((await saveError(errorInput, identity)).attempts).toBe((await db.errors.get(first.id))!.attempts)
+    expect(await db.events.where('type').equals('error-detected').count()).toBe(1)
+  })
+  it('rejects unrelated deterministic event collisions and retains a later revised correction on replay', async () => {
+    await initialize([])
+    await recordEvent(evidence('occupied'))
+    await expect(saveError(errorInput, { eventId: 'occupied' })).rejects.toThrow('Correction event ID already used')
+    expect(await db.errors.count()).toBe(0)
+    const first = await saveError(errorInput, { eventId: 'original' })
+    const revised = await saveError({ ...errorInput, corrected: 'Yesterday, I went there.' }, { eventId: 'revised' })
+    const cards = await db.cards.toArray()
+    expect(await saveError(errorInput, { eventId: 'original' })).toEqual(revised)
+    expect((await db.errors.get(first.id))!.attempts).toBe(2)
+    expect(await db.cards.toArray()).toEqual(cards)
+  })
+  it('recovers a matching correction alias and rejects a divergent alias without writes', async () => {
+    await initialize([])
+    const original = await saveError(errorInput, { eventId: 'correction-source' })
+    const event = (await db.events.get('correction-source'))!
+    await db.events.put({ ...event, id: 'correction-alias' }); await db.events.delete(event.id)
+    await db.syncMeta.put({ id: 'eventAliases', value: { [event.id]: ['correction-alias'] } })
+    expect(await saveError(errorInput, { eventId: event.id })).toEqual(original)
+    expect(await db.events.get(event.id)).toBeUndefined()
+    await db.events.update('correction-alias', { sessionId: 'unrelated-session' })
+    const before = await db.cards.toArray()
+    await expect(saveError(errorInput, { eventId: event.id })).rejects.toThrow('Correction event ID already used')
+    expect(await db.cards.toArray()).toEqual(before)
+  })
+  it('keeps deterministic correction IDs local to their immutable language database', async () => {
+    const japanese = new JoveDatabase('correction-isolation-test', 'ja')
+    try {
+      await japanese.open(); await initialize([])
+      const other = createLearningRepository(japanese)
+      const english = await saveError(errorInput, { eventId: 'same-id' })
+      const ja = await other.saveError({ ...errorInput, original: '駅を行きます。', corrected: '駅に行きます。' }, { eventId: 'same-id' })
+      expect(english.id).not.toBe(ja.id)
+      expect(await db.errors.get(ja.id)).toBeUndefined()
+      expect(await japanese.errors.get(english.id)).toBeUndefined()
+      expect((await saveError(errorInput, { eventId: 'same-id' })).id).toBe(english.id)
+    } finally { await japanese.delete() }
+  })
 })
 
 describe('repair retests and review submission concurrency', () => {
@@ -213,17 +272,30 @@ describe('repair retests and review submission concurrency', () => {
     expect(await db.chunks.get(error.chunkId!)).toMatchObject({ productionStrength: 0, spontaneousUses: 0 })
     expect(await db.events.get('repair-1')).toMatchObject({ source: 'text', prompted: true, score: 1, data: { response: error.corrected, fullSentence: true } })
   })
-  it('does not defer cards for incomplete, incorrect or self-reported repairs', async () => {
+  it('keeps unmatched repairs unknown without deferring cards or inventing failures', async () => {
     await initialize([])
     const error = await saveError(errorInput), before = await db.cards.toArray()
     const partial = await recordRepairAttempt(error.id, { eventId: 'partial', response: 'went' })
-    expect(partial.score).toBe(0)
+    expect(partial.score).toBeUndefined()
     await recordRepairAttempt(error.id, { eventId: 'wrong', response: 'I went tomorrow.' })
     await recordEvent(evidence('self', { type: 'SPEAK_RETRY', source: 'self-report', prompted: true, score: 1, chunkId: error.chunkId,
       modality: 'cloze', data: { errorId: error.id, fullSentence: true } }))
     expect(await db.cards.toArray()).toEqual(before)
-    expect((await db.events.get('partial'))!.score).toBe(0)
-    expect((await db.errors.get(error.id))!.failures).toBe(3)
+    expect((await db.events.get('partial'))!.score).toBeUndefined()
+    expect((await db.errors.get(error.id))!.failures).toBe(1)
+  })
+  it('accepts an alternative as unverified, preserving originals, cards and ability across replay', async () => {
+    await initialize([])
+    const error = await saveError({ ...errorInput, original: 'I student.', corrected: "I'm a student." })
+    const cards = await db.cards.toArray(), skills = await db.skills.toArray()
+    const options = { eventId: 'alternative', response: 'I am a student.' }
+    const saved = await recordRepairAttempt(error.id, options)
+    expect(saved).toMatchObject({ source: 'self-report', data: { response: options.response, verification: 'unverified-alternative', fullSentence: false } })
+    expect(saved.score).toBeUndefined()
+    expect(await recordRepairAttempt(error.id, options)).toEqual(saved)
+    expect(await db.cards.toArray()).toEqual(cards); expect(await db.skills.toArray()).toEqual(skills)
+    expect((await db.errors.get(error.id))!.original).toBe('I student.')
+    expect((await db.errors.get(error.id))!.failures).toBe(1)
   })
   it('preserves a linked card\'s mature FSRS memory state when a full-sentence retry defers its retest', async () => {
     await initialize([])
@@ -241,7 +313,8 @@ describe('repair retests and review submission concurrency', () => {
     await initialize([])
     const error = await saveError({ ...errorInput, corrected: 'The temperature is -5 degrees.' })
     await recordRepairAttempt(error.id, { eventId: 'wrong-sign', response: 'The temperature is 5 degrees.' })
-    expect((await db.events.get('wrong-sign'))!.score).toBe(0)
+    expect((await db.events.get('wrong-sign'))!.score).toBeUndefined()
+    expect((await db.events.get('wrong-sign'))!.data?.fullSentence).toBe(false)
   })
   it('is idempotent under concurrent retries and rejects conflicting repair IDs', async () => {
     await initialize([])

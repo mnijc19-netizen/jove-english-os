@@ -1,5 +1,7 @@
 # Product specification — approved scope
 
+October3 learner-path refinement: this is a language coach for real expression and writing, not a video-attendance journal. Show a concrete communicative goal and one next action in Chinese; guide first attempts, proportionate help, preserved repair and delayed different-context application. Keep extensive input low-pressure. AI responds to the learner's actual language, with concise optional guidance and confirmed targeted retrieval, not fabricated listening/acoustic results or universal guarantees. The current English/Japanese release and the newly authorized remediation are separately evidenced in STATUS.md.
+
 Current final-upgrade requirements, the approved Jove Language OS English/Japanese objective and the September13 external-playback/optional-acoustics/partial-release amendments are in `FINAL_UPGRADE.md`; they supersede conflicting historical V1 boundaries below. Shared infrastructure must not blend language-specific learner evidence or curricula. Japanese ships only after its own real-life learning path and migration/isolation acceptance; the current runtime remains English until then.
 
 Jove English OS serves one Chinese-native learner pursuing real-world English independence. Priority: natural listening, spontaneous speaking, high-frequency chunks, intelligibility/prosody, productive grammar, reading, writing. Exams are secondary transfer benefits. This complete V1 includes all requirements below; milestones do not redefine completion.

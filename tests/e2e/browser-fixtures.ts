@@ -192,9 +192,9 @@ export async function openPractice(page: Page, route = "today") {
   await expect(page.locator("main h1")).toBeVisible();
 }
 
-export async function records(page: Page, table: string): Promise<Record<string, unknown>[]> {
-  return page.evaluate(name => new Promise<Record<string, unknown>[]>((resolve, reject) => {
-    const request = indexedDB.open("jove-english-os");
+export async function records(page: Page, table: string, databaseName = 'jove-english-os'): Promise<Record<string, unknown>[]> {
+  return page.evaluate(({ name, databaseName }) => new Promise<Record<string, unknown>[]>((resolve, reject) => {
+    const request = indexedDB.open(databaseName);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const database = request.result;
@@ -203,7 +203,7 @@ export async function records(page: Page, table: string): Promise<Record<string,
       transaction.oncomplete = () => { database.close(); resolve(read.result); };
       transaction.onabort = () => { database.close(); reject(transaction.error); };
     };
-  }), table);
+  }), { name: table, databaseName });
 }
 
 export async function recordingEvidence(page: Page) {

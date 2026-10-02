@@ -1,6 +1,37 @@
 import { test, expect, records } from './browser-fixtures'
-import type { StudyEvent, StudySession } from '../../src/domain/types'
+import type { DailyPlan, StudyEvent, StudySession } from '../../src/domain/types'
 import { externalMaterials } from '../../src/content/external'
+import { nextAssignedTask, taskPath } from '../../src/domain/engine'
+
+async function enableWritingFixture(page: import('@playwright/test').Page) {
+  let requests = 0
+  await page.route('https://openrouter.ai/api/v1/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/models')) return route.fulfill({ json: { data: [{ id: 'test/writing', name: 'Fixture writing coach',
+      architecture: { input_modalities: ['text'], output_modalities: ['text'] }, supported_parameters: ['structured_outputs'] }] } })
+    if (path.endsWith('/key')) return route.fulfill({ json: { data: {} } })
+    if (!path.endsWith('/chat/completions')) return route.abort()
+    requests++
+    return route.fulfill({ json: { model: 'test/writing', choices: [{ message: { content: JSON.stringify({
+      summary: '用英语清楚说明自己刚到这里。', strengths: ['问候对象很清楚'],
+      errors: [{ category: 'grammar', original: 'I new here.', corrected: 'I am new here.', hint: '主语后还缺什么？', explanation: '说明身份或状态，需要 be。' }],
+      comprehension: null, accuracy: null, fluency: null, successfulChunks: [], nextPrompt: '换成向新同事介绍自己。',
+    }) }, finish_reason: 'stop' }], usage: { total_tokens: 20, cost: 0 } } })
+  })
+  await page.evaluate(async () => {
+    const request = indexedDB.open('jove-english-os')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) })
+    try { await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction(['settings', 'secrets'], 'readwrite'), settings = tx.objectStore('settings').get('main')
+      settings.onsuccess = () => tx.objectStore('settings').put({ id: 'main', value: { ...settings.result.value, fastModel: 'test/writing', strongModel: 'test/writing' } })
+      tx.objectStore('secrets').put({ id: 'openrouter', value: 'fixture-only-browser-key' })
+      tx.objectStore('secrets').put({ id: 'provider-mode', value: 'byok' })
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
+    }) } finally { database.close() }
+  })
+  await page.reload()
+  return () => requests
+}
 
 test.describe('catalog delivery', () => {
 // Route interception must not be shadowed by a service worker. Real PWA/offline
@@ -88,6 +119,7 @@ test('signed-in Library loads and retries the directory before initial learning 
   await expect(page.getByRole('heading', { name: '6 Minute English · Everyday ideas', exact: true })).toBeVisible()
   await page.getByRole('link', { name: 'Explore', exact: false }).click()
   await expect(page.getByRole('link', { name: "Open today's listening lesson ↗" })).toHaveAttribute('href', continuing.entries[0]!.url)
+  await page.locator('summary').filter({ hasText: '今天为什么这样练？' }).click()
   await expect(page.getByText('不改变你的美式口语目标', { exact: false })).toBeVisible()
   await page.locator('#external-summary').fill('我先记下听懂的主题，稍后继续。')
   await expect.poll(async () => (await records(page, 'sessions')).some(s =>
@@ -160,6 +192,76 @@ test('external lesson saves a guided draft without media downloads or invented a
   expect(Math.abs(title!.x-description!.x)).toBeLessThan(1)
 })
 
+test('English returns to a delayed different-context application before showing old help', async ({ page }) => {
+  await page.goto('#/today')
+  await expect(page.getByRole('button', { name: 'Start today’s practice', exact: true })).toBeVisible()
+  await page.evaluate(async () => {
+    const request = indexedDB.open('jove-english-os')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) })
+    try { await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction('events', 'readwrite')
+      tx.objectStore('events').put({ id: 'fixture-guided-first', type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report',
+        timestamp: Date.now() - 2 * 86400000, sessionId: 'fixture-input-session', data: { materialId: 'external-voa-welcome',
+          response: 'They meet.', expression: 'Nice to meet you', meaning: '很高兴见到你', example: 'Nice to meet you, Sam.',
+          firstExample: 'Nice to meet you, Sam.', audioId: 'fixture-first', retryAudioId: 'fixture-retry', guidedVersion: 1,
+          coursePhase: 'input-application', contextId: 'external-voa-welcome:application:0', listened: true, playbackObserved: false, comprehensionVerified: false } })
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
+    }) } finally { database.close() }
+  })
+  await page.goto('#/listen?material=external-voa-welcome')
+  await expect(page.getByText('隔天应用 · 换场景表达', { exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: "Open today's listening lesson ↗" })).toHaveCount(0)
+  await expect(page.locator('#external-expression')).toHaveCount(0)
+  await page.locator('#external-summary').fill('Hello, I am Jove. What do you work on?')
+  await page.getByRole('button', { name: 'Continue to notice an expression' }).click()
+  await expect(page.getByRole('link', { name: "Open today's listening lesson ↗" })).toBeVisible()
+  await expect(page.locator('#external-expression')).toHaveValue('Nice to meet you')
+  await page.locator('#external-example').fill('Hello, I am Jove. What do you do?')
+  await expect.poll(async () => (await records(page, 'sessions') as unknown as StudySession[]).some(row => row.kind === 'listen'
+    && row.draft.externalExample === 'Hello, I am Jove. What do you do?')).toBe(true)
+  await page.reload()
+  const session = (await records(page, 'sessions') as unknown as StudySession[]).find(row => row.kind === 'listen' && row.materialId === 'external-voa-welcome')!
+  expect(session.draft).toMatchObject({ externalCoursePhase: 'delayed-application', externalFirstExample: 'Hello, I am Jove. What do you work on?',
+    externalExample: 'Hello, I am Jove. What do you do?' })
+  expect((await records(page, 'events')).some(row => row.skill !== undefined || row.score !== undefined)).toBe(false)
+})
+
+test('a persisted external reflection can finish after metadata-only restoration without inventing audio', async ({ page }) => {
+  let paid = 0
+  await page.route('https://openrouter.ai/**', route => { paid++; return route.abort() })
+  await page.route('**/functions/v1/ai', route => { paid++; return route.abort() })
+  await page.goto('#/listen?material=external-voa-welcome')
+  await expect(page.locator('#external-summary')).toBeVisible()
+  const reflection = await page.evaluate(async () => {
+    const request = indexedDB.open('jove-english-os')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) })
+    try { return await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const tx = database.transaction(['sessions', 'events'], 'readwrite'), store = tx.objectStore('sessions'), read = store.getAll()
+      let event: Record<string, unknown>
+      read.onsuccess = () => {
+        const row = read.result.find(row => row.kind === 'listen' && row.materialId === 'external-voa-welcome')
+        event = { id: `${row.id}-external-reflection`, type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report', timestamp: Date.now(), sessionId: row.id,
+          data: { materialId: row.materialId, listened: true, response: 'Two people meet.', expression: 'Nice to meet you', example: 'Nice to meet you, Sam.',
+            audioId: 'fixture-missing-first', retryAudioId: 'fixture-missing-retry', audioAvailable: false, playbackObserved: false, comprehensionVerified: false,
+            guidedVersion: 1, coursePhase: 'input-application', contextId: 'external-voa-welcome:application:0', firstExample: 'Nice to meet you, Sam.' } }
+        tx.objectStore('events').put(event)
+        store.put({ ...row, stage: '2', draft: { ...row.draft, stage: 2, audioId: '', externalRetryAudioId: '', externalOriginalAudioId: 'fixture-missing-first',
+          answer: 'Two people meet.', externalExpression: 'Nice to meet you', externalExample: 'Nice to meet you, Sam.',
+          externalFirstExample: 'Nice to meet you, Sam.', externalReflection: event, audioUnavailable: true } })
+      }
+      tx.oncomplete = () => resolve(event); tx.onabort = () => reject(tx.error)
+    }) } finally { database.close() }
+  })
+  await page.reload()
+  await expect(page.getByRole('button', { name: 'Save practice and continue' })).toBeEnabled()
+  await page.getByRole('button', { name: 'Save practice and continue' }).click()
+  await expect.poll(async () => (await records(page, 'sessions') as unknown as StudySession[]).find(row => row.id === reflection.sessionId)?.completedAt).toBeTruthy()
+  expect((await records(page, 'events')).find(row => row.id === reflection.id)).toEqual(reflection)
+  expect((await records(page, 'events')).some(row => row.skill !== undefined || row.score !== undefined)).toBe(false)
+  expect(await records(page, 'audio')).toEqual([])
+  expect(paid).toBe(0)
+})
+
 test('an unavailable external lesson gets an automatic alternative without completing or erasing the original draft', async ({ page }) => {
   await page.goto('#/')
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
@@ -225,7 +327,7 @@ test('English Today shares the daily allowance with an independently saved Japan
   await page.reload()
   await expect(page.getByText(/两种语言共用今天的 45 分钟/u)).toBeVisible()
   await expect(page.getByText(/英语还可安排 5 分钟，日语 0 分钟/u)).toBeVisible()
-  await expect(page.getByText('5 min planned', { exact: true })).toBeVisible()
+  await expect(page.getByText('今天最多安排 5 分钟', { exact: true })).toBeVisible()
 })
 
 test.describe('external spoken retell',()=>{
@@ -234,21 +336,56 @@ test.describe('external spoken retell',()=>{
   test.skip(({browserName})=>process.platform==='win32' && browserName==='webkit','Windows WebKit has no capture APIs')
   test('requires a saved recording and persists reflection before completing',async({page})=>{
     await page.goto('#/listen?material=external-voa-welcome')
+    await expect(page.locator('#external-summary')).toBeVisible()
+    const writingRequests = await enableWritingFixture(page)
     await page.getByRole('checkbox',{name:/I listened and have returned/}).check()
     await page.locator('#external-summary').fill('The neighbors meet and check a name.')
     await page.getByRole('button',{name:'Continue to notice an expression'}).click()
     await page.locator('#external-expression').fill('Nice to meet you')
-    await page.locator('#external-example').fill('Nice to meet you. I am new here.')
+    await page.locator('#external-example').fill('Nice to meet you. I new here.')
     await page.getByRole('button',{name:'Continue to spoken retell'}).click()
     await page.getByRole('button',{name:'Record response',exact:true}).click()
     await expect(page.locator('.record-status')).toContainText('3s / 180s')
     await page.getByRole('button',{name:'Stop & save',exact:true}).click()
+    await expect(page.getByRole('button',{name:'Save practice and continue'})).toBeDisabled()
+    await page.getByRole('button', { name: '让 AI 帮我改清楚这段英语' }).click()
+    const feedback = page.getByRole('region', { name: '已保存的文字反馈' })
+    await expect(feedback.getByRole('button')).toHaveAttribute('aria-expanded', 'false')
+    await feedback.getByRole('button').click()
+    await expect(feedback).toContainText('I am new here.')
+    await page.getByRole('button', { name: '这条纠错符合我的意思，加入后续复习' }).click()
+    await expect(page.getByRole('button', { name: '已加入针对性复习' })).toBeDisabled()
+    await page.reload()
+    await expect(page.getByRole('button', { name: '已加入针对性复习' })).toBeDisabled()
+    await expect(feedback.getByRole('button')).toHaveAttribute('aria-expanded', 'false')
+    await page.getByRole('button', { name: '让 AI 帮我改清楚这段英语' }).click()
+    expect(writingRequests()).toBe(1)
+    await page.locator('#external-retry-text').fill('Nice to meet you. I am new here.')
+    const retry = page.locator('.recorder').nth(1)
+    await expect(retry.getByRole('button', { name: 'Record response', exact: true })).toBeEnabled()
+    await retry.getByRole('button', { name: 'Record response', exact: true }).click()
+    await expect(retry.locator('.record-status')).toContainText('3s / 180s')
+    await retry.getByRole('button', { name: 'Stop & save', exact: true }).click()
     await expect(page.getByRole('button',{name:'Save practice and continue'})).toBeEnabled()
+    const active = (await records(page, 'sessions') as unknown as StudySession[]).find(row => row.kind === 'listen' && !row.completedAt)!
+    const plan = (await records(page, 'plans') as unknown as DailyPlan[]).find(row => row.tasks.some(task => task.id === active.draft.taskId))
+    const next = plan && nextAssignedTask({ ...plan, tasks: plan.tasks.map(task => task.id === active.draft.taskId ? { ...task, done: true } : task) }, String(active.draft.taskId))
+    const destination = next ? taskPath(next) : { path: '/today', query: {} }
     await page.getByRole('button',{name:'Save practice and continue'}).click()
-    await expect(page).toHaveURL(/#\/today$/u)
+    await expect.poll(() => page.evaluate(() => location.hash.split('?')[0])).toBe(`#${destination.path === '/' ? '/today' : destination.path}`)
+    if (next) expect(new URLSearchParams(page.url().split('?')[1]).get('task')).toBe(next.id)
     const events=await records(page,'events') as unknown as StudyEvent[]
-    expect(events.find(e=>e.type==='EXTERNAL_LISTEN_REFLECTION')).toMatchObject({source:'self-report',data:{playbackObserved:false,comprehensionVerified:false}})
+    const reflection = events.find(e=>e.type==='EXTERNAL_LISTEN_REFLECTION')!
+    expect(reflection).toMatchObject({source:'self-report',data:{playbackObserved:false,comprehensionVerified:false,
+      guidedVersion: 1, coursePhase: 'input-application', publisherLessonCoverage: false}})
+    expect(reflection.data!.audioId).not.toBe(reflection.data!.retryAudioId)
+    expect(events.find(e=>e.type==='EXTERNAL_RETELL_RETRY')).toMatchObject({source:'objective',prompted:true,data:{acousticAssessed:false}})
     expect(events.find(e=>e.type==='EXTERNAL_RETELL_RECORDED')).toMatchObject({source:'objective',data:{acousticAssessed:false}})
     expect(events.filter(e=>e.type.startsWith('EXTERNAL_')).every(e=>e.score===undefined)).toBe(true)
+    expect(events.filter(e => e.type === 'error-detected')).toHaveLength(1)
+    expect((await records(page, 'cards')).filter(card => !!card.errorId)).toHaveLength(3)
+    const session = (await records(page, 'sessions') as unknown as StudySession[]).find(row => row.id === reflection.sessionId)!
+    expect(session.draft.externalFirstExample).toBe('Nice to meet you. I new here.')
+    expect(session.draft.externalRetryText).toBe('Nice to meet you. I am new here.')
   })
 })

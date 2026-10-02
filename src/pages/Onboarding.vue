@@ -30,6 +30,7 @@ const { step, name, goal, interests, clip, vocab, speech, audioId, reading } = t
 const saving = ref(false), loading = ref(true), loaded = ref(false), error = ref("");
 let startedAt = Date.now(), pending: Promise<unknown> = Promise.resolve(), disposed = false;
 const topics = ["Technology", "AI", "Music", "Movies", "Everyday life", "Living abroad", "New Zealand", "Work"];
+const topicNames: Record<string, string> = { Technology: "科技", AI: "人工智能", Music: "音乐", Movies: "影视", "Everyday life": "日常生活", "Living abroad": "海外生活", "New Zealand": "新西兰", Work: "工作" };
 // Comparable, scene-specific alternatives; no unrelated subject gives the answer away.
 const distractors: Record<string, [string, string]> = {
   "cafe-delay": [
@@ -73,7 +74,19 @@ const vocabulary = [
   { text: "it depends", answer: "the answer changes with the situation", other: "it always happens the same way" },
   { text: "be supposed to", answer: "be expected to do something", other: "be unable to imagine something" },
 ];
-const steps = ["Your direction", "Listening", "Expressions", "Speaking", "Reading", "Ready to begin"];
+const steps = ["学习方向", "听懂大意", "理解表达", "开口尝试", "阅读理解", "开始练习"];
+// Explain the procedure, never the content, correct choice or unseen transcript.
+// Procedural Chinese is not a translation hint or a scored language response.
+const guidance = [
+  "先填写称呼（可以用中文），选择最想使用英语的场景，再选感兴趣的话题。这一步只是偏好设置，不评英语能力。",
+  "共三段不同难度的音频。点击 Play audio 播放，听到结尾后才会出现英文选项；选择最符合大意的一项，再点 Continue。可以重听，但重听和第一次作答会分别记录，不必听懂每个词。",
+  "逐个看英文表达，选出对应的英文释义，再点 Continue。先按自己的理解作答，不查词典；这里检查的是认得意思，不代表已经能在对话中说出来。",
+  "按下方英文问题，用英语说几句。点 Record response 开始，点 Stop & save 停止并保存；等待保存完成后再继续。暂时不能录音可写几句英文，或点 Skip for now 跳过，不会因此得到口语或发音成绩。",
+  "先读英文短文，再按短文内容选择答案，最后点 Continue。这一步检查书面理解；中文只解释操作，不翻译短文、问题或答案。",
+  "点击 Build my daily practice 完成设置，进入今日安排，从第一项任务开始。系统会按后续真实练习继续调整；没有做过的项目仍是未知，不等于能力差。",
+];
+const continueLabel = computed(() => step.value === 5 ? "Build my daily practice" : step.value === 3 && !speech.value && !audioId.value ? "Skip for now" : "Continue");
+const continueChinese = computed(() => step.value === 5 ? "进入今日安排" : step.value === 3 && !speech.value && !audioId.value ? "暂时跳过" : "保存并继续");
 function shuffle(values: string[]) {
   const result = [...values];
   for (let i = result.length - 1; i > 0; i--) {
@@ -94,7 +107,7 @@ function save(): Promise<unknown> {
   return operation;
 }
 watch(draft, () => {
-  void save().catch(() => { error.value = "Could not save your baseline draft. Keep this page open and retry saving."; });
+  void save().catch(() => { error.value = "诊断草稿暂未保存。请保留此页，检查浏览器存储后重试保存。"; });
 }, { deep: true, flush: "sync" });
 async function load() {
   if (saving.value) return;
@@ -137,12 +150,12 @@ async function load() {
     loaded.value = true;
   } catch {
     loaded.value = false;
-    error.value = "Could not restore your baseline. Nothing was overwritten. Retry loading.";
+    error.value = "暂时无法恢复诊断，原记录没有被覆盖。请重试读取。";
   } finally {
     loading.value = false;
   }
   if (loaded.value) {
-    try { await save(); } catch { error.value = "Could not save your baseline. Keep this page open and retry saving."; }
+    try { await save(); } catch { error.value = "诊断暂未保存，请保留此页并重试保存。"; }
   }
 }
 function played() {
@@ -215,7 +228,7 @@ async function next() {
     }
     step.value++; await save();
   } catch {
-    error.value = "Could not save this step. Your first response and draft are unchanged. Retry Continue when storage is available.";
+    error.value = "这一步未能保存，已记录的首答和当前草稿仍保留。请在存储恢复后重试“保存并继续”。";
   } finally { saving.value = false; }
 }
 function back() {
@@ -227,28 +240,27 @@ async function retrySave() {
   if (!loaded.value) { await load(); return; }
   saving.value = true;
   try { await save(); error.value = ""; }
-  catch { error.value = "Still unable to save. Keep this page open; your draft has not been cleared."; }
+  catch { error.value = "仍无法保存。请保留此页，草稿没有被清除。"; }
   finally { saving.value = false; }
 }
 onMounted(() => { void load(); });
 onBeforeRouteLeave(async () => {
   try { await save(); }
   catch {
-    error.value = "Could not save before leaving. Retry saving; your baseline draft is still here.";
+    error.value = "离开前未能保存，已暂缓切换页面。诊断草稿仍在，请先重试保存。";
     return false;
   }
 });
 onBeforeUnmount(() => { disposed = true; });
 </script>
 <template>
-  <div class="page onboarding-page">
+  <div class="page onboarding-page" lang="zh-CN">
     <div class="page-heading">
       <div>
-        <p class="eyebrow">YOUR STARTING POINT · {{ step + 1 }} OF 6</p>
-        <h1 tabindex="-1">Let’s start <span class="serif">with you.</span></h1>
+        <p class="eyebrow">英语起点了解 · 第 {{ step + 1 }} 步 / 共 6 步</p>
+        <h1 tabindex="-1" lang="en">Let’s start <span class="serif">with you.</span></h1>
         <p class="lede">
-          A short check-in, not an exam. We’ll refine the picture as you
-          practice.
+          先了解起点，不是考试。操作用中文说明，英语内容用来了解你目前会什么；不需要先读懂英文界面才能开始。
         </p>
       </div>
     </div>
@@ -257,36 +269,43 @@ onBeforeUnmount(() => { disposed = true; });
         v-for="(s, i) in steps"
         :key="s"
         :class="{ current: step === i, complete: step > i }"
+        :aria-current="step === i ? 'step' : undefined"
         ><i>{{ i + 1 }}</i
         >{{ s }}</span
       >
     </div>
-    <p v-if="loading" role="status">Restoring your baseline…</p>
+    <p v-if="loading" role="status">正在恢复上次的诊断草稿…</p>
     <p v-if="error" class="error" role="alert">{{ error }}
-      <button class="text-button" :disabled="saving || loading" @click="retrySave">Retry saving / loading</button>
+      <button class="text-button" lang="en" aria-label="Retry saving / loading" :disabled="saving || loading" @click="retrySave"><span lang="zh-CN">重试保存／读取 · </span>Retry saving / loading</button>
     </p>
     <section v-if="loaded && !loading" class="panel onboarding-card" :aria-busy="saving">
+      <p id="onboarding-guidance" class="help-text" lang="zh-CN"><strong>这一步怎么做：</strong>{{ guidance[step] }}</p>
+      <p v-if="saving" role="status">正在保存，请稍候…</p>
       <template v-if="step === 0"
-        ><h2>What would English make possible?</h2>
-        <label for="name">What should we call you?</label
+        ><h2 lang="en">What would English make possible?</h2>
+        <label for="name"><span lang="en">What should we call you?</span> · 称呼</label
         ><input
           id="name"
           v-model="name"
           maxlength="50"
           autocomplete="given-name"
-        /><label for="goal">Your main direction</label
-        ><select id="goal" v-model="goal">
-          <option>Real-world conversation</option>
-          <option>Living in an English-speaking country</option>
-          <option>Work & interviews</option>
-          <option>Movies & natural listening</option>
-          <option>IELTS foundations</option></select
-        ><label>What do you naturally get curious about?</label>
+          aria-label="What should we call you?"
+          aria-describedby="onboarding-guidance"
+        /><label for="goal"><span lang="en">Your main direction</span> · 学习方向</label
+        ><select id="goal" v-model="goal" aria-label="Your main direction">
+          <option value="Real-world conversation">日常交流 · Real-world conversation</option>
+          <option value="Living in an English-speaking country">英语环境生活 · Living in an English-speaking country</option>
+          <option value="Work & interviews">工作与面试 · Work & interviews</option>
+          <option value="Movies & natural listening">影视与自然听力 · Movies & natural listening</option>
+          <option value="IELTS foundations">雅思基础 · IELTS foundations</option></select
+        ><p>哪些话题让你感兴趣？可多选，也可保留当前选择。</p>
         <div class="topic-chips">
           <button
             v-for="t in topics"
             :key="t"
             :aria-pressed="interests.includes(t)"
+            :aria-label="t"
+            lang="en"
             :class="{ selected: interests.includes(t) }"
             @click="
               interests.includes(t)
@@ -294,26 +313,27 @@ onBeforeUnmount(() => { disposed = true; });
                 : interests.push(t)
             "
           >
-            {{ t }}
+            <span lang="zh-CN">{{ topicNames[t] }}</span> · {{ t }}
           </button>
         </div></template
       ><template v-else-if="step === 1 && material"
         ><p class="eyebrow">
-          LISTENING SAMPLE {{ clip + 1 }} OF {{ clips.length }}
+          听力片段 {{ clip + 1 }} / {{ clips.length }}
         </p>
-        <h2>Listen. Then choose the main idea.</h2>
+        <h2 lang="en">Listen. Then choose the main idea.</h2>
         <AudioPlayer
           :key="material.id"
+          lang="en"
           :src="material.audioPath"
           :synthetic="material.synthetic"
           label="No transcript yet. It is fine to miss some words."
           @played="played"
           @ended="ended"
         />
-        <p class="help-text">Original reviewed demo · synthetic speech. Three graded samples check supported meaning recognition, not natural conversation, CEFR level or independent recall.</p>
-        <p v-if="!current?.ended && !listeningLocked" role="status">Listen to the end before choosing. Pausing alone does not finish the sample.</p>
-        <p v-if="listeningLocked" role="status">First response saved and locked. Replaying or going back cannot replace it.</p>
-        <fieldset v-if="current?.ended || listeningLocked" class="answer-options" :disabled="listeningLocked || saving">
+        <p class="help-text">本站原创示例，使用合成语音。三段分级选择题只提供有限的意思识别线索，不代表真实对话、独立回忆或 CEFR 等级。</p>
+        <p v-if="!current?.ended && !listeningLocked" role="status">请先听到结尾再选择；只点暂停不算听完。</p>
+        <p v-if="listeningLocked" role="status">第一次提交的答案已保存并锁定；重听或返回不会覆盖它。</p>
+        <fieldset v-if="current?.ended || listeningLocked" lang="en" class="answer-options" :disabled="listeningLocked || saving">
           <legend>What was the speaker talking about?</legend>
           <label
             v-for="option in choices"
@@ -327,13 +347,12 @@ onBeforeUnmount(() => { disposed = true; });
           >
         </fieldset></template
       ><template v-else-if="step === 2"
-        ><h2>Everyday expressions, in context.</h2>
+        ><h2 lang="en">Everyday expressions, in context.</h2>
         <p class="muted">
-          Choose the meaning. Recognition and spoken recall are different
-          skills.
+          选择你理解的意思。认得表达与独立说出来，是两种不同的能力。
         </p>
-        <p v-if="vocabLocked" role="status">First expression responses saved and locked.</p>
-        <fieldset v-for="v in vocabulary" :key="v.text" class="answer-options" :disabled="vocabLocked || saving">
+        <p v-if="vocabLocked" role="status">第一次提交的表达理解答案已保存并锁定。</p>
+        <fieldset v-for="v in vocabulary" :key="v.text" lang="en" class="answer-options" :disabled="vocabLocked || saving">
           <legend>{{ v.text }}</legend>
           <label v-for="option in [v.other, v.answer]" :key="option"
             ><input
@@ -345,12 +364,13 @@ onBeforeUnmount(() => { disposed = true; });
           >
         </fieldset></template
       ><template v-else-if="step === 3"
-        ><h2>Tell us a little about yourself.</h2>
-        <p>
+        ><h2 lang="en">Tell us a little about yourself.</h2>
+        <p lang="en">
           What did you do yesterday? Why would you like to use English in daily
           life?
         </p>
         <Recorder
+          lang="en"
           :saved-audio-id="audioId"
           :disabled="saving"
           label="Baseline speaking sample"
@@ -358,25 +378,26 @@ onBeforeUnmount(() => { disposed = true; });
           @recorded="audioId = $event.audioId"
           @transcribed="speech = $event"
         /><label for="baseline-speech"
-          >Optional transcript or written sample</label
+          ><span lang="en">Optional transcript or written sample</span> · 可选：英文转写或书面回答</label
         ><textarea
           id="baseline-speech"
           v-model="speech"
+          lang="en"
+          aria-label="Optional transcript or written sample"
           rows="4"
           placeholder="Even a few sentences help."
         />
         <p class="help-text">
-          You can skip this for now. Skipped or text-only samples do not receive
-          an acoustic speaking score.
+          录音用于保留真实尝试，不自动给发音打分。跳过或只写文字，不会产生声学口语成绩；之后仍可继续练习。
         </p></template
       ><template v-else-if="step === 4"
-        ><h2>One small reading check.</h2>
-        <blockquote>
+        ><h2 lang="en">One small reading check.</h2>
+        <blockquote lang="en">
           Maya was going to walk to work, but it started raining. She took the
           bus instead. She arrived ten minutes early and had time for a coffee.
         </blockquote>
-        <p v-if="readingLocked" role="status">First reading response saved and locked.</p>
-        <fieldset class="answer-options" :disabled="readingLocked || saving">
+        <p v-if="readingLocked" role="status">第一次提交的阅读答案已保存并锁定。</p>
+        <fieldset lang="en" class="answer-options" :disabled="readingLocked || saving">
           <legend>Why did Maya take the bus?</legend>
           <label
             ><input
@@ -403,45 +424,41 @@ onBeforeUnmount(() => { disposed = true; });
         </fieldset></template
       ><template v-else-if="step === 5"
         ><span class="round-icon"><Icon name="check" :size="35" /></span>
-        <h2>Your first picture is taking shape.</h2>
+        <h2 lang="en">Your first picture is taking shape.</h2>
         <p>
-          Your responses are saved. Today will start with your current listening
-          and active-recall needs, while keeping speaking in the plan.
+          回答已保存。今日安排会结合当前听力和主动回忆的需要，并保留开口练习。
         </p>
         <p class="help-text">
-          These synthetic, multiple-choice samples provide limited recognition evidence.
-          They do not establish natural listening, spontaneous conversation, transfer or a proficiency level.
-          Skipped skills and skills without independent evidence remain uncertain.
+          合成语音和选择题只提供有限的识别证据，不能据此确定自然听力、即兴交流、迁移能力或语言等级。跳过或缺少独立证据的能力仍待了解。
         </p>
         <div class="row">
           <span class="pill"
             >{{
               app.events.filter((e) => e.type.startsWith("DIAGNOSTIC")).length
             }}
-            baseline observations</span
-          ><span class="pill">Listening → speaking</span>
+            条起点观察（不是等级成绩）</span
+          ><span class="pill">听懂 → 开口尝试</span>
         </div></template
       >
       <div class="onboard-actions">
         <button
           v-if="step > 0"
           class="text-button"
+          lang="en"
+          aria-label="Back"
           :disabled="saving || captureActive"
           @click="back"
         >
-          Back</button
+          <span lang="zh-CN">上一步 · </span>Back</button
         ><button
           class="button primary"
+          lang="en"
+          :aria-label="continueLabel"
+          aria-describedby="onboarding-guidance"
           :disabled="!canContinue || saving || captureActive"
           @click="next"
         >
-          {{
-            step === 5
-              ? "Build my daily practice"
-              : step === 3 && !speech && !audioId
-                ? "Skip for now"
-                : "Continue"
-          }}<Icon name="arrow" :size="16" />
+          <span lang="zh-CN">{{ continueChinese }} · </span>{{ continueLabel }}<Icon name="arrow" :size="16" />
         </button>
       </div>
     </section>

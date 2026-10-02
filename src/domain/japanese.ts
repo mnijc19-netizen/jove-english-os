@@ -1,5 +1,6 @@
 import type { Assessment, Material, StudyEvent } from './types'
 import { unavailableExternalIds } from '../content/external'
+import { japaneseTransferContexts } from '../content/japanese'
 
 export const japanesePlacementItems = [
   { id: 'hiragana', area: 'script', prompt: '「ねこ」对应哪一种罗马字读法？这只检查字形识别，不是听力。', choices: ['neko', 'reko', 'mero'], answer: 'neko' },
@@ -118,6 +119,62 @@ export function japanesePracticeHistory(events: StudyEvent[], now: number): Stud
     && japaneseCoursePosition(String(event.data.materialId)) !== null).sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id))
   return [...new Map(valid.map(event => [event.sessionId!, event])).values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id))
 }
+
+export type JapaneseCoursePhase = 'input' | 'application' | 'delayed-transfer'
+export function japanesePracticePhaseGoal(phase: JapaneseCoursePhase) {
+  return phase === 'input' ? '听一小段，保存自己的理解，再写和录一句有用表达。'
+    : phase === 'application' ? '先在不同场景独立写一句，再听原声和核对表达，最后录音与重说。'
+      : '隔天先独立写和录下新场景的回答，再听原声核对，修正一处后完整重说。'
+}
+const day = 86400000
+/** Participation across separate saved attempts. Legacy completions are retained
+ * as exposure only, never retroactively upgraded to all three practice phases. */
+export function japaneseCoursePractice(materialId: string, events: StudyEvent[], now: number) {
+  const history = japanesePracticeHistory(events, now).filter(event => event.data?.materialId === materialId)
+  const contexts = japaneseTransferContexts(materialId)
+  const input = history.find(event => !event.data?.coursePhase || event.data.coursePhase === 'input')
+  const application = input && history.find(event => event.timestamp > input.timestamp && event.data?.coursePhase === 'application'
+    && event.data.contextId === contexts[1]?.id)
+  const transfer = application && history.find(event => event.timestamp >= application.timestamp + day
+    && event.data?.coursePhase === 'delayed-transfer' && event.data.contextId === contexts[2]?.id
+    && events.some(first => first.id === event.data?.firstAttemptEventId && first.type === 'JAPANESE_COURSE_FIRST_ATTEMPT'
+      && first.source === 'self-report' && first.sessionId === event.sessionId && first.timestamp <= event.timestamp
+      && first.timestamp >= application.timestamp + day && first.data?.contextId === event.data.contextId
+      && typeof first.data.response === 'string' && first.data.response.trim() && typeof first.data.audioId === 'string' && first.data.audioId))
+  const phase: JapaneseCoursePhase = !input ? 'input' : !application ? 'application' : 'delayed-transfer'
+  const context = contexts[phase === 'input' ? 0 : phase === 'application' ? 1 : 2]
+  return { phase, contextId: context?.id ?? '', contextPrompt: context?.prompt ?? '',
+    availableAt: application ? application.timestamp + day : 0, complete: !!transfer }
+}
+
+/** Persist the selected prompt in the session. Exhausted variants are explicitly
+ * repeats; a changed session ID alone is never a new learning context. */
+export function japaneseTransferContext(materialId: string, events: StudyEvent[], originalContextId = `${materialId}:context:0`) {
+  const contexts = japaneseTransferContexts(materialId).filter(context => context.id !== originalContextId)
+  if (!contexts.length) return undefined
+  const used = new Set(events.map(event => event.contextId ?? event.data?.contextId))
+  const fresh = contexts.find(context => !used.has(context.id))
+  const previous = events.filter(event => contexts.some(context => context.id === (event.contextId ?? event.data?.contextId)))
+    .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id)).at(-1)
+  const index = contexts.findIndex(context => context.id === (previous?.contextId ?? previous?.data?.contextId))
+  const selected = fresh ?? contexts[(index + 1) % contexts.length]
+  return selected ? { ...selected, repeated: !fresh } : undefined
+}
+
+export function japaneseCorrectionsDue(events: StudyEvent[], now: number) {
+  return events.filter(event => event.type === 'JAPANESE_CORRECTION_CONFIRMED' && event.source === 'self-report'
+    && event.timestamp <= now && typeof event.data?.corrected === 'string' && event.data.corrected.trim()
+    && typeof event.data.materialId === 'string').flatMap(confirmation => {
+    const history = events.filter(event => event.type === 'JAPANESE_CORRECTION_REVIEW' && event.source === 'self-report'
+      && event.data?.correctionId === confirmation.id && event.timestamp >= confirmation.timestamp && event.timestamp <= now)
+      .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id))
+    const last = history.at(-1)
+    const successful = last && !last.prompted && Number(last.data?.rating) >= 3
+    const phase = successful && last.data?.phase === 'retrieval' ? 'transfer' as const : 'retrieval' as const
+    const dueAt = (last?.timestamp ?? confirmation.timestamp) + (successful && last?.data?.phase === 'transfer' ? 7 : 1) * day
+    return dueAt <= now ? [{ confirmation, phase, dueAt }] : []
+  }).sort((a, b) => a.dueAt - b.dueAt || a.confirmation.id.localeCompare(b.confirmation.id))
+}
 export function nextJapaneseLesson(materials: Material[], events: StudyEvent[], targetDifficulty: number, now: number): Material | null {
   if (!Number.isFinite(targetDifficulty) || targetDifficulty < 0 || targetDifficulty > 1 || !Number.isFinite(now)) throw new Error('Invalid Japanese planning context')
   const unavailable = unavailableExternalIds(events, now)
@@ -147,6 +204,19 @@ export function nextJapaneseLesson(materials: Material[], events: StudyEvent[], 
       return easier[0] ?? previous
     }
   }
-  const unseen = eligible.filter(material => !last.has(material.id)).sort((a, b) => position(a) - position(b))
-  return unseen[0] ?? [...eligible].sort((a, b) => (last.get(a.id) ?? 0) - (last.get(b.id) ?? 0) || position(a) - position(b))[0] ?? null
+  // Returning to an easier lesson never clears the original difficult topic.
+  const pendingHard = new Map<string, StudyEvent>()
+  for (const event of history) {
+    const id = String(event.data!.materialId)
+    if (event.data?.effort === 'hard') pendingHard.set(id, event)
+    else if (event.data?.effort === 'okay' || event.data?.effort === 'easy') pendingHard.delete(id)
+  }
+  const returning = [...pendingHard.keys()].map(id => eligible.find(material => material.id === id)).find(Boolean)
+  if (returning) return returning
+  const ordered = [...eligible].sort((a, b) => position(a) - position(b))
+  const unfinished = ordered.filter(material => !japaneseCoursePractice(material.id, events, now).complete)
+  // Wait for a delayed phase without skipping that lesson permanently. A fresh
+  // topic may fill the wait, then the earlier due phase regains precedence.
+  const available = unfinished.find(material => japaneseCoursePractice(material.id, events, now).availableAt <= now)
+  return available ?? (!unfinished.length ? [...eligible].sort((a, b) => (last.get(a.id) ?? 0) - (last.get(b.id) ?? 0) || position(a) - position(b))[0] : null) ?? null
 }

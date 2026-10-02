@@ -12,7 +12,7 @@ import type { Conversation, Evaluation, StudyEvent } from "../domain/types";
 import Recorder from "../components/Recorder.vue";
 import PronunciationPractice from "../components/PronunciationPractice.vue";
 import { usePronunciationSession } from "../speech/practice";
-import { comparableObservation, assessmentEvaluator, planLongitudinal } from "../domain/longitudinal";
+import { comparableObservation, assessmentEvaluator, planLongitudinal, speakingComparisonKey } from "../domain/longitudinal";
 import Icon from "../components/Icon.vue";
 import CoachingFeedback from "../components/CoachingFeedback.vue";
 const app = useApp(),
@@ -285,7 +285,7 @@ async function finish() {
       data: { audioObserved: allSpoken, transcriptVerified: allSpoken, textOnlyEvaluation: true, missionId: missionId.value,
         ...(observation.value?.sessionId === c.id ? { priorExposure: observation.value.priorExposure,
           ...(comparableObservation({ rubricVersion: speakingRubric,
-            comparisonKey: JSON.stringify(['conversation', c.mode, c.scenario, c.messages.filter(m => m.role === 'assistant').map(m => m.text)]),
+            comparisonKey: speakingComparisonKey(c.mode, c.messages.filter(m => m.role === 'assistant').map(m => m.text)) ?? '',
             difficulty: observation.value.difficulty, evaluator: assessmentEvaluator(result),
             conditions: allSpoken ? JSON.stringify({ transcriptVerified: true, mode: c.mode,
               chineseFallback: c.messages.some(m => m.role === 'user' && /[\u3400-\u9fff]/.test(m.text)), level: observation.value.level }) : null,
@@ -337,30 +337,35 @@ async function repair(id: string) {
   const err = app.errors.find((e) => e.id === id);
   const attempt = repairAnswers.value[id]?.trim();
   if (!err || !attempt) return;
+  const savedAudio = repairAudio.value[id];
   await persist();
   const normalize = (s: string) =>
     s
+      .normalize('NFKC')
       .toLowerCase()
-      .replace(/[^a-z0-9\s']/g, "")
+      .replace(/[‘’]/g, "'")
+      .replace(/[,;:“”"]/g, '')
+      .replace(/[.!?。！？]+$/u, '')
       .replace(/\s+/g, " ")
       .trim();
   const correct = normalize(attempt) === normalize(err.corrected);
-  repairResults.value[id] = correct
+  if (repairAnswers.value[id]?.trim() === attempt) repairResults.value[id] = correct
     ? "Full sentence repaired. Next: retrieve it in a new situation."
-    : "Try once more. Check the hint, then say the whole sentence.";
+    : "已保存另一种表达，尚未验证，不判为错误。按需查看提示与参考，自行比较原意，再完整重说；不会自动请求 AI。";
   await recordEvidence({
     type: "SPEAK_RETRY",
-    source: "text",
+    source: correct ? "text" : "self-report",
     skill: "grammarProduction",
-    score: correct ? 1 : 0,
+    ...(correct ? { score: 1 } : {}),
     prompted: true,
     chunkId: err.chunkId,
     modality: "cloze",
     data: {
       errorId: id,
       response: attempt,
-      ...(repairAudio.value[id] ? { audioId: repairAudio.value[id] } : {}),
+      ...(savedAudio ? { audioId: savedAudio } : {}),
       fullSentence: correct,
+      verification: correct ? 'reference-match' : 'unverified-alternative',
     },
   });
   await app.refresh();
@@ -615,6 +620,7 @@ onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
           <div v-else class="evaluation">
             <p class="eyebrow">YOUR CONVERSATION REFLECTION</p>
             <h3>Keep the message. Refine the expression.</h3>
+            <p class="help-text">同类新情境的首次独立回答可供谨慎比较；题目未经等值校准，不代表标准化能力或发音测量。</p>
             <CoachingFeedback :evaluation="evaluation" :answer="conversation?.messages.filter(message => message.role === 'user').map(message => message.text).join('\n') || ''" language="en" />
             <div v-if="evaluation.errors.length">
               <h3>
@@ -712,12 +718,13 @@ onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
             repairAudio[err.id] = $event.audioId;
             persist();
           "
-          @transcribed="repairAnswers[err.id] = $event"
+          @transcribed="repairAnswers[err.id] = $event; delete repairResults[err.id]"
         /><label :for="err.id">Your repaired sentence</label
         ><input
           :id="err.id"
           v-model="repairAnswers[err.id]"
           placeholder="Regenerate the complete sentence."
+          @input="delete repairResults[err.id]"
         /><button
           class="button primary"
           :disabled="captureActive || !repairAnswers[err.id]?.trim()"
@@ -743,9 +750,7 @@ onBeforeRouteLeave(beforeNavigation); onBeforeRouteUpdate(beforeNavigation);
         to="/review"
         class="button secondary mt"
         @click="
-          Object.values(repairResults).some((s) =>
-            s.startsWith('Full sentence repaired'),
-          ) &&
+          Object.values(repairResults).some(Boolean) &&
           app.completeTask('repair', {
             taskId:
               typeof route.query.task === 'string'

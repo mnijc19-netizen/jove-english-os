@@ -3,6 +3,7 @@ import { createEmptyCard, State } from 'ts-fsrs'
 import {
   analyzeLongitudinal, assessReadingFit, planLongitudinal, planRecovery, selectMeaningfulReviews,
   assessmentEvaluator, comparableObservation, hasTaskStarted, startedTaskIds, readingComparisonKey, readingRubric, selectReadingAssessment,
+  listeningComparisonKey, speakingComparisonKey,
   type LongitudinalInput, type ReadingObservationData, type Strand,
 } from '../src/domain/longitudinal'
 import type { Material, Modality, Profile, ReviewCard, Skill, SkillName, StudyEvent } from '../src/domain/types'
@@ -689,6 +690,47 @@ describe('daily-plan integration and supported acoustic practice', () => {
 describe('prospective comparison contracts and real adjustment integration', () => {
   const facts = { rubricVersion: readingRubric.version, comparisonKey: 'family', difficulty: 0.35,
     evaluator: 'actual-provider/model', conditions: 'without-help', firstPass: true, priorExposure: false, prompted: false }
+  it.each(['listening', 'speaking'] as const)('builds a reachable %s cohort from eight fresh task-family observations, never exact prompt IDs', kind => {
+    const target = kind === 'listening' ? 'listeningSentences' : 'speakingAccuracy'
+    const events = comparable([0.7, 0.7, 0.7, 0.7], target).map((e, i) => {
+      const fresh = material(`fresh-${i}`)
+      fresh.transcript = fresh.transcript.replace('We', `Person${i}`)
+      const key = kind === 'listening' ? listeningComparisonKey(fresh) : speakingComparisonKey('free', [`Please explain your plan for situation ${i}.`])
+      const data = comparableObservation({ ...facts, comparisonKey: key!, rubricVersion: kind === 'listening' ? 'listening-main-idea-detail-v1' : 'conversation-language-accuracy-v1',
+        conditions: kind === 'listening' ? JSON.stringify({ completedPlays: 1, playbackRates: [1], synthetic: false, chineseUsed: false }) : JSON.stringify({ transcriptVerified: true, mode: 'free', chineseFallback: false, level: 'beginner' }) })!
+      return { ...e, type: kind === 'listening' ? 'COMPREHENSION_RESPONSE' : 'CONVERSATION_EVALUATION', source: 'ai' as const,
+        data: { ...data, materialId: fresh.id, audioObserved: true, transcriptVerified: true } }
+    })
+    expect(findTrend(events, target)).toMatchObject({ status: 'plateau', comparableDays: 8 })
+    expect(findTrend(events, target).reason).toBe('provisional-task-family-not-psychometrically-equated')
+    expect(events.every(e => e.data.comparisonBasis === 'provisional-task-family-not-psychometrically-equated')).toBe(true)
+    for (const patch of [{ priorExposure: true }, { firstPass: false }, { conditionsKey: 'different-help-or-evaluator' }, { difficulty: 0.4 }]) {
+      expect(findTrend(events.map((e, i) => i > 3 ? { ...e, data: { ...e.data, ...patch } } : e), target).status).toBe('unknown')
+    }
+    expect(findTrend(events.map(e => ({ ...e, prompted: true })), target).status).toBe('unknown')
+    expect(speakingComparisonKey('guided', ['A supported prompt'])).toBeNull()
+    expect(listeningComparisonKey({ ...material('empty'), transcript: '' })).toBeNull()
+    expect(listeningComparisonKey(material('complex', 0.35, 'Technology', 25))).not.toBe(listeningComparisonKey(material('simple')))
+  })
+  it.each(['listeningSentences', 'reading'] as const)('anchors %s difficulty to attempted tasks with bounded changes, not a high accuracy as level', target => {
+    const events = comparable([0.95, 0.95, 0.95, 0.95], target).map(e => ({ ...e, data: { ...e.data, difficulty: 0.2 } }))
+    const plan = planLongitudinal(input({ skills: aggregateSkills(events), events: [...events, ...dailyPractice()] }))
+    const difficulty = target === 'reading' ? plan.adjustments.readingTargetDifficulty : plan.adjustments.targetDifficulty
+    expect(difficulty).toBe(0.25)
+    const low = events.map(e => ({ ...e, score: 0.3, data: { ...e.data, difficulty: 0.6 } }))
+    const reduced = planLongitudinal(input({ events: [...low, ...dailyPractice()], skills: aggregateSkills(low) }))
+    expect(target === 'reading' ? reduced.adjustments.readingTargetDifficulty : reduced.adjustments.targetDifficulty).toBe(0.5)
+    const legacy = events.map(e => ({ ...e, data: {} }))
+    const unknown = planLongitudinal(input({ events: [...legacy, ...dailyPractice()], skills: aggregateSkills(events) }))
+    expect(target === 'reading' ? unknown.adjustments.readingTargetDifficulty : unknown.adjustments.targetDifficulty).toBe(0.35)
+  })
+  it('does not raise a task-difficulty anchor from repeats, help, one-day bursts or fatigue', () => {
+    const events = comparable([0.95, 0.95, 0.95, 0.95], 'listeningSentences').map(e => ({ ...e, data: { ...e.data, difficulty: 0.2 } }))
+    for (const changed of [events.map(e => ({ ...e, prompted: true })), events.map(e => ({ ...e, data: { ...e.data, priorExposure: true } })), events.map(e => ({ ...e, timestamp: NOW }))]) {
+      expect(planLongitudinal(input({ events: [...changed, ...dailyPractice()] })).adjustments.targetDifficulty).toBe(0.35)
+    }
+    expect(planLongitudinal(input({ events: [...events, ...dailyPractice()], profile: { ...profile, fatigue: 0.8 } })).adjustments.targetDifficulty).toBe(0.2)
+  })
   it.each(['READING_OBSERVATION', 'READING_RESPONSE', 'READING_RETELL', 'TASK_COMPLETED', 'PRACTICE_LOGGED'])('never projects %s participation as ability even if an imported record contains a score', type => {
     const observation = event('activity', NOW, { type, source: 'objective', score: 1, skill: 'reading' })
     expect(evidenceWeight(observation)).toBe(0)

@@ -226,6 +226,7 @@ export function selectMeaningfulReviews(cards: readonly ReviewCard[], events: re
 export interface ComparableObservationData {
   rubricVersion: string; comparisonKey: string; conditionsKey: string; difficulty: number
   firstPass: true; priorExposure: false
+  comparisonBasis?: 'provisional-task-family-not-psychometrically-equated'
 }
 /** Missing facts are not defaults. Only explicit independent, first-pass observations enter trends. */
 export function comparableObservation(facts: {
@@ -237,7 +238,8 @@ export function comparableObservation(facts: {
     || facts.priorExposure !== false || facts.prompted !== false) return null
   return { rubricVersion: facts.rubricVersion, comparisonKey: facts.comparisonKey,
     conditionsKey: JSON.stringify([facts.conditions, facts.evaluator]), difficulty: facts.difficulty,
-    firstPass: true, priorExposure: false }
+    firstPass: true, priorExposure: false,
+    ...(facts.comparisonKey.includes('-family-v1:') ? { comparisonBasis: 'provisional-task-family-not-psychometrically-equated' as const } : {}) }
 }
 /** The model selected in Settings is not proof of the model which actually evaluated a response. */
 export function assessmentEvaluator(result: unknown): string | null {
@@ -267,6 +269,19 @@ export function readingComparisonKey(material: Material): string | null {
   const count = words(material.transcript), complexity = sentenceWords(material)
   if (!unit(material.difficulty) || count < 40 || count > 600 || !finite(complexity) || complexity <= 0) return null
   return `reading-main-idea-detail:${count < 120 ? 'short' : count < 240 ? 'medium' : 'long'}:sentence-${complexity <= 14 ? 'short' : complexity <= 24 ? 'medium' : 'long'}`
+}
+/** Coarse fresh-probe families, not psychometrically equivalent forms. Exposure,
+ * exact editorial difficulty, evaluator and help/playback conditions stay separate. */
+export function listeningComparisonKey(material: Material): string | null {
+  const textBand = readingComparisonKey(material)
+  if (!textBand || !finite(material.duration) || material.duration <= 0 || material.duration > 600) return null
+  return `listening-meaning-family-v1:${textBand}:${material.duration <= 60 ? 'brief' : material.duration <= 180 ? 'short' : 'extended'}`
+}
+export function speakingComparisonKey(mode: string, partnerTurns: readonly string[]): string | null {
+  if (!['free', 'mission'].includes(mode) || !partnerTurns.length || partnerTurns.some(turn => !nonempty(turn))) return null
+  const count = partnerTurns.length, average = mean(partnerTurns.map(words))
+  if (count > 12 || average > 100) return null
+  return `conversation-language-family-v1:${mode}:turns-${count <= 3 ? 'short' : count <= 6 ? 'medium' : 'long'}:prompt-${average <= 25 ? 'short' : average <= 50 ? 'medium' : 'long'}`
 }
 /** The approved passage is frozen into the assessment before the learner sees it. */
 export function selectReadingAssessment(profile: Profile, materials: readonly Material[], events: readonly StudyEvent[], now: number): Material | null {
@@ -337,7 +352,8 @@ function trendFor(skill: SkillName, events: readonly StudyEvent[], now: number):
   if (!noisy && delta <= -0.1 && scores.slice(2).every(s => s <= early - 0.08)) status = 'regression'
   else if (!noisy && delta >= 0.08 && scores.slice(2).every(s => s >= early + 0.05)) status = 'improving'
   else if (!noisy && Math.abs(delta) <= 0.03 && Math.max(...scores) - Math.min(...scores) <= 0.05) status = late >= 0.85 ? 'maintaining' : 'plateau'
-  return { ...base, status, delta, reason: noisy ? 'within-week-variation-too-large' : 'descriptive-comparable-observations-not-a-clinical-or-causal-diagnosis' }
+  return { ...base, status, delta, reason: noisy ? 'within-week-variation-too-large' : chosen.key.includes('-family-v1:')
+    ? 'provisional-task-family-not-psychometrically-equated' : 'descriptive-comparable-observations-not-a-clinical-or-causal-diagnosis' }
 }
 function targetActivity(kind: unknown): TargetActivity | null {
   return kind === 'speak' || kind === 'speaking' || kind === 'retell' ? 'speaking'
@@ -504,16 +520,36 @@ export interface LongitudinalPlan {
     maxRepairTargets: 1 | 2 | 3; reasons: string[]
   }
 }
+/** A planning trial, not a proficiency conversion. Require three recent independent
+ * sessions over at least two days; retries/help/legacy unknown conditions cannot
+ * move the anchor. Medians limit a single unusually hard/easy task's influence. */
+function observedTaskFit(events: readonly StudyEvent[], skills: readonly SkillName[], now: number) {
+  const sessions = new Set<string>()
+  const recent = cleanEvents(events, now).ordered.filter(e => e.timestamp >= now - WINDOW && skills.includes(skillOf(e)!)
+    && measuredScore(e) && e.prompted === false && nonempty(e.sessionId)
+    && e.data?.firstPass === true && e.data.priorExposure === false && unit(e.data.difficulty)
+    && nonempty(e.data.rubricVersion) && nonempty(e.data.conditionsKey)).reverse().filter(e => {
+    if (sessions.has(e.sessionId!)) return false
+    sessions.add(e.sessionId!); return true
+  }).slice(0, 6)
+  if (recent.length < 3 || new Set(recent.map(e => dayOf(e.timestamp))).size < 2) return null
+  const accuracy = median(recent.map(e => e.score!))
+  return { difficulty: median(recent.map(e => e.data!.difficulty as number)), step: accuracy < 0.55 ? -0.1 : accuracy >= 0.85 ? 0.05 : 0 }
+}
 /** Integrate these actual queue/material/budget fields into the existing persisted plan. */
 export function planLongitudinal(input: LongitudinalInput): LongitudinalPlan {
-  const { profile, skills, events, cards, materials, now } = input
+  const { profile, events, cards, materials, now } = input
   checkNow(now)
   const recovery = planRecovery(profile, events, now), signals = analyzeLongitudinal(events, now)
   const reviews = selectMeaningfulReviews(cards, events, now, { budgetSeconds: recovery.reviewBudgetSeconds, maxCards: recovery.maxReviewCards })
-  const usableSkills = skills.filter(s => s.evidenceCount >= 3 && unit(s.confidence) && s.confidence >= 0.25 && unit(s.score) &&
-    validTime(s.updatedAt) && s.updatedAt <= now && s.updatedAt >= now - WINDOW)
-  const observedInput = usableSkills.filter(s => ['naturalListening', 'listeningWords', 'listeningSentences'].includes(s.id))
-  const baseDifficulty = observedInput.length ? mean(observedInput.map(s => s.score)) : 0.35
+  const inputFit = observedTaskFit(events, ['naturalListening', 'listeningWords', 'listeningSentences'], now)
+  const readingFit = observedTaskFit(events, ['reading'], now)
+  // Without observed task difficulty, start at an available editorial beginner
+  // entry. Exhausting its participation log cannot unlock the next course via
+  // the caller's stretch allowance; an aggregate accuracy is not a level either.
+  const beginnerEntry = materials.filter(m => m.approved && !m.synthetic && m.externalStudy?.level === 'beginner'
+    && unit(m.difficulty) && validTime(m.createdAt) && m.createdAt <= now).sort((a, b) => a.difficulty - b.difficulty)[0]
+  const baseDifficulty = inputFit?.difficulty ?? Math.min(0.35, beginnerEntry?.difficulty ?? 0.35)
   const regression = signals.trends.some(t => t.status === 'regression')
   const plateau = signals.trends.some(t => t.status === 'plateau')
   const improvingInput = signals.trends.some(t => ['naturalListening', 'listeningWords', 'listeningSentences'].includes(t.skill) && t.status === 'improving')
@@ -523,11 +559,16 @@ export function planLongitudinal(input: LongitudinalInput): LongitudinalPlan {
   if (regression) reasons.push('reduce-difficulty-and-new-input-until-comparable-recheck')
   if (plateau) reasons.push('vary-context-and-use-short-meaningful-output')
   if (avoidance.length) reasons.push('short-familiar-interest-matched-start')
-  if (!observedInput.length) reasons.push('input-difficulty-is-provisional-not-a-proficiency-score')
-  const difficultyDelta = clamp(recovery.difficultyDelta + (regression ? -0.1 : improvingInput && recovery.mode === 'none' && profile.fatigue < 0.6 ? 0.05 : 0), -0.25, 0.05)
+  if (!inputFit) reasons.push('input-difficulty-is-provisional-not-a-proficiency-score')
+  else reasons.push('bounded-trial-relative-to-observed-task-difficulty-not-accuracy-as-level')
+  const canIncrease = recovery.mode === 'none' && profile.fatigue < 0.6 && !regression
+  const difficultyDelta = clamp(recovery.difficultyDelta + (regression ? -0.1 : improvingInput && canIncrease ? 0.05 : 0)
+    + (inputFit ? Math.min(inputFit.step, canIncrease ? 0.05 : 0) : 0), -0.25, 0.05)
   const targetDifficulty = round(clamp(baseDifficulty + difficultyDelta, 0.1, 0.9))
-  const readingSkill = usableSkills.find(s => s.id === 'reading')
-  const targetReading = clamp((readingSkill?.score ?? 0.35) + difficultyDelta, 0.1, 0.9)
+  const readingTrend = signals.trends.find(t => t.skill === 'reading')?.status
+  const readingDelta = clamp(recovery.difficultyDelta + (readingTrend === 'regression' ? -0.1 : readingTrend === 'improving' && canIncrease ? 0.05 : 0)
+    + (readingFit ? Math.min(readingFit.step, canIncrease ? 0.05 : 0) : 0), -0.25, 0.05)
+  const targetReading = clamp((readingFit?.difficulty ?? 0.35) + readingDelta, 0.1, 0.9)
   const samples = readingSamples(events, materials, now)
   const rank = { 'likely-fit': 0, unknown: 1, stretch: 2, 'too-hard': 3 }
   const byId = new Map(materials.map(m => [m.id, m]))

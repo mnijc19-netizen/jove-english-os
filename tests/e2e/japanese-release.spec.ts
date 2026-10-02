@@ -1,11 +1,14 @@
 import { test, expect } from '@playwright/test'
+import { test as storageTest, records } from './browser-fixtures'
 
 // Built-bundle contract, unlike japanese-preview's DEV-only source fixtures.
 // Fresh synthetic profiles only; no owner login, provider call or PWA claim.
 test.use({ serviceWorkers: 'block' })
+storageTest.use({ serviceWorkers: 'block' })
 test('Japanese production gate matches its navigation, diagnosis and data controls', async ({ page }) => {
   await page.goto('#/ja')
-  const japanese = page.getByRole('link', { name: '日本語 · 日语', exact: true })
+  // Closed mobile navigation is deliberately inert, not absent from the build.
+  const japanese = page.getByRole('link', { name: '日本語 · 日语', exact: true, includeHidden: true })
   if (process.env.VITE_JOVE_JAPANESE !== '1') {
     await expect(page).toHaveURL(/#\/today$/)
     await expect(japanese).toHaveCount(0)
@@ -29,6 +32,65 @@ test('Japanese production gate matches its navigation, diagnosis and data contro
   await expect(page.locator('#data-language')).toBeVisible()
   await page.locator('#data-language').selectOption('ja')
   await expect(page.getByText('当前操作只针对日语。', { exact: false })).toBeVisible()
+})
+
+storageTest('Japanese delayed application saves a first answer before exposing reference help', async ({ page }) => {
+  storageTest.skip(process.env.VITE_JOVE_JAPANESE !== '1', 'Japanese build gate is off')
+  let paid = 0
+  await page.route('https://openrouter.ai/**', route => { paid++; return route.abort() })
+  await page.route('**/functions/v1/ai', route => { paid++; return route.abort() })
+  await page.goto('#/ja')
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  await page.getByRole('button', { name: '我是零基础，不猜题直接起步', exact: true }).click()
+  await page.getByRole('button', { name: '确认零基础起点', exact: true }).click()
+  await expect(page.getByRole('heading', { name: /^今日练习：/ })).toBeVisible()
+  await page.evaluate(async () => {
+    const request = indexedDB.open('jove-english-os-ja')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) })
+    const now = Date.now(), id = 'fixture-delayed-practice', materialId = 'ja-irodori-starter-1', contextId = `${materialId}:context:2`
+    // A native Blob fixture proves storage/disclosure wiring, not learner speech quality.
+    const blob = new Blob([await (await fetch('audio/train-change-1.wav')).arrayBuffer()], { type: 'audio/wav' })
+    try { await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction(['sessions', 'events', 'audio'], 'readwrite')
+      tx.objectStore('sessions').put({ id, kind: 'japanese-practice', materialId, startedAt: now - 1000, stage: 'listen',
+        draft: { taskId: 'fixture-delayed-task', revision: 0, listened: false, response: '', expression: '', example: '', audioId: 'fixture-delayed-first-audio', retryAudioId: '', comparison: '' } })
+      tx.objectStore('audio').put({ id: 'fixture-delayed-first-audio', blob, mimeType: 'audio/wav', createdAt: now, duration: 1, kind: 'recording', processed: false, label: 'Synthetic independent-answer fixture' })
+      tx.objectStore('events').put({ id: `${id}:course-assignment`, type: 'JAPANESE_COURSE_ASSIGNED', source: 'objective', timestamp: now,
+        sessionId: id, contextId, data: { materialId, coursePhase: 'delayed-transfer', contextId, contextPrompt: '换成向邻居问候并告别。' } })
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
+    }) } finally { database.close() }
+  })
+  await page.goto('#/ja?session=fixture-delayed-practice')
+  await expect(page.getByRole('textbox', { name: '不看参考，我会这样回答（日语）' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '打开原站真人音频 ↗' })).toHaveCount(0)
+  await expect(page.getByText('以下是本站练习例句，不是原站逐字字幕：')).toHaveCount(0)
+  await page.getByRole('textbox', { name: '不看参考，我会这样回答（日语）' }).fill('おはようございます。')
+  await page.getByRole('button', { name: '保存并继续', exact: true }).click()
+  await expect(page.getByText('以下是本站练习例句，不是原站逐字字幕：')).toBeVisible()
+  await expect(page.getByRole('link', { name: '打开原站真人音频 ↗' })).toBeVisible()
+  await page.getByRole('textbox', { name: '换成自己的情况，说或写一句' }).fill('こんにちは。')
+  await expect.poll(async () => (await records(page, 'sessions', 'jove-english-os-ja')).find(row => row.id === 'fixture-delayed-practice')?.draft).toMatchObject({ response: 'おはようございます。', example: 'こんにちは。' })
+  const first = (await records(page, 'events', 'jove-english-os-ja')).find(row => row.id === 'fixture-delayed-practice:independent-attempt')!
+  expect(first).toMatchObject({ source: 'self-report', data: { response: 'おはようございます。', audioId: 'fixture-delayed-first-audio', masteryAssessed: false } })
+  await page.reload()
+  await expect(page.getByRole('textbox', { name: '换成自己的情况，说或写一句' })).toHaveValue('こんにちは。')
+  // A metadata-only restore has no recording reference. It must allow a
+  // supported replacement, without rewriting the frozen independent event.
+  await page.evaluate(async () => {
+    const request = indexedDB.open('jove-english-os-ja')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) })
+    try { await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction('sessions', 'readwrite'), store = tx.objectStore('sessions'), read = store.get('fixture-delayed-practice')
+      read.onsuccess = () => store.put({ ...read.result, stage: 'speak', draft: { ...read.result.draft,
+        listened: true, expression: 'こんにちは', audioId: '', retryAudioId: '', audioUnavailable: true } })
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
+    }) } finally { database.close() }
+  })
+  await page.reload()
+  await expect(page.getByText('独立首答记录仍锁定。', { exact: false })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Record response', exact: true })).toBeEnabled()
+  expect((await records(page, 'events', 'jove-english-os-ja')).find(row => row.id === first.id)).toEqual(first)
+  expect(paid).toBe(0)
 })
 
 test('signed-in English opens Japanese on the first attempt without another login', async ({ page }) => {

@@ -7,6 +7,7 @@ import { createJapaneseCoach } from '../src/db/japanese-coach'
 import { demoMaterials } from '../src/content/materials'
 import type { LearningProvider } from '../src/ai/cloud-provider'
 import { localAICost } from '../src/ai/workspace-provider'
+import { japaneseCorrectionsDue } from '../src/domain/japanese'
 
 const databases: JoveDatabase[] = []
 afterEach(async () => { for (const database of databases.splice(0)) await database.delete() })
@@ -25,6 +26,46 @@ async function setup() {
 const signal = () => new AbortController().signal
 const checked = (revision: number, text: string) => ({ revision, text, confirmed: true })
 describe('saved Japanese AI assistance, not proficiency evidence', () => {
+  it('requires explicit checked correction approval then delays written retrieval and a different recorded context without mastery', async () => {
+    const { coach, ja, learning, evaluate } = await setup(), now = Date.now(), day = 86400000
+    await ja.sessions.update('practice', { materialId: 'ja-irodori-starter-3', draft: { audioId: 'first-original' } })
+    await ja.audio.put({ id: 'first-original', kind: 'recording', blob: new Blob(['first']), mimeType: 'audio/webm', duration: 1, createdAt: now, processed: false, label: 'Original' })
+    await coach.open(); await coach.save(0, '私日本人です。', true)
+    const feedback = await coach.feedback('介绍自己', '自己介绍', signal(), checked(1, '私日本人です。'))
+    expect(japaneseCorrectionsDue(await ja.events.toArray(), now + day)).toHaveLength(0)
+    const confirmation = await coach.confirmCorrection(feedback.feedback[0]!.id, now)
+    expect(await coach.confirmCorrection(feedback.feedback[0]!.id, now + 1)).toEqual(confirmation)
+    expect(evaluate).toHaveBeenCalledOnce()
+    expect(japaneseCorrectionsDue(await ja.events.toArray(), now + day - 1)).toHaveLength(0)
+    const task = (id: string) => ({ id, kind: 'review' as const, title: 'Correction', minutes: 1, reason: 'Fixture', done: false })
+    const written = await learning.review.start(task('written'), now + day)
+    const pendingBackup = await learning.repository.exportBackup()
+    await learning.repository.restoreBackup(pendingBackup)
+    expect((await learning.review.read(written.id)).draft.items[0]).toMatchObject({ cardId: '', correction: { id: confirmation.id, phase: 'retrieval' } })
+    const locked = await learning.review.save(written.id, 0, { response: '私は日本人です。', audioId: '', heard: false }, true, now + day + 1)
+    await expect(learning.review.save(written.id, Number(locked.draft.revision), { response: '改写首答', audioId: '', heard: false })).rejects.toThrow('首答已锁定')
+    await learning.review.rate(written.id, Number(locked.draft.revision), 3, now + day + 2)
+    expect(japaneseCorrectionsDue(await ja.events.toArray(), now + day + 3)).toHaveLength(0)
+    const transferAt = now + 2 * day + 3, transfer = await learning.review.start(task('new-context'), transferAt)
+    const pending = (await learning.review.read(transfer.id)).draft.items[0]!
+    expect(pending.correction?.phase).toBe('transfer')
+    expect(pending.contextId).not.toBe(confirmation.data?.contextId)
+    await expect(learning.review.save(transfer.id, 0, { response: '私は学生です。', audioId: 'first-original', heard: false })).rejects.toThrow('重新录音')
+    await ja.audio.put({ id: 'new-original', kind: 'recording', blob: new Blob(['new']), mimeType: 'audio/webm', duration: 1, createdAt: transferAt, processed: false, label: 'New context' })
+    const spoken = await learning.review.save(transfer.id, 0, { response: '私は学生です。', audioId: 'new-original', heard: false }, true, transferAt + 1)
+    await learning.review.rate(transfer.id, Number(spoken.draft.revision), 3, transferAt + 2)
+    expect((await coach.read())?.feedback).toEqual(feedback.feedback)
+    expect(await ja.audio.count()).toBe(2); expect(await ja.cards.count()).toBe(0)
+    expect((await ja.events.toArray()).every(event => event.score === undefined)).toBe(true)
+    expect((await ja.skills.toArray()).every(skill => skill.evidenceCount === 0)).toBe(true)
+    expect(japaneseCorrectionsDue(await ja.events.toArray(), transferAt + day)).toHaveLength(0)
+    expect(japaneseCorrectionsDue(await ja.events.toArray(), transferAt + 7 * day + 2)[0]?.phase).toBe('retrieval')
+    const completedBackup = await learning.repository.exportBackup()
+    await ja.audio.clear(); await learning.repository.restoreBackup(completedBackup)
+    expect((await learning.review.read(transfer.id)).draft).toMatchObject({ audioUnavailable: true, items: [{ cardId: '', response: '私は学生です。', revealed: true, rating: 3, correction: { id: confirmation.id } }] })
+    expect((await coach.read())?.feedback).toEqual(feedback.feedback)
+    expect(japaneseCorrectionsDue(await ja.events.toArray(), transferAt + 7 * day + 2)[0]?.phase).toBe('retrieval')
+  })
   it('saves a checked answer before dispatch and reuses its saved feedback without another paid request', async () => {
     const { ja, en, coach, evaluate, result } = await setup()
     await coach.open(); await coach.save(0, '私は日本人です。', true)

@@ -114,7 +114,8 @@ async function scheduleRepairRetests(event: StudyEvent): Promise<void> {
   }
 }
 
-/** Save an exact full-sentence text retry once, and atomically schedule its delayed retests. */
+/** Save a retry once. Only reference matches schedule delayed retests; other
+ * formulations remain unverified, never false failures or automatic AI calls. */
 async function recordRepairAttempt(errorId: string, input: RepairAttemptOptions): Promise<StudyEvent> {
   const options = repairAttemptOptionsSchema.parse(input)
   const timestamp = options.timestamp ?? Date.now()
@@ -130,9 +131,10 @@ async function recordRepairAttempt(errorId: string, input: RepairAttemptOptions)
     if (!error?.chunkId) throw new Error('Missing repair error or chunk')
     const sentence = (value: string) => normalize(value).replace(/[‘’]/g, "'").replace(/[,;:“”"]/g, '').replace(/[.!?。！？]+$/u, '').replace(/\s+/g, ' ').trim()
     const correct = !!sentence(options.response) && sentence(options.response) === sentence(error.corrected)
-    const event = eventSchema.parse({ id: options.eventId, type: 'repair-attempt', timestamp, source: 'text',
-      skill: 'grammarProduction', modality: 'cloze', prompted: true, score: correct ? 1 : 0, chunkId: error.chunkId,
-      contextId: options.contextId, data: { errorId, response: options.response, fullSentence: correct } })
+    const event = eventSchema.parse({ id: options.eventId, type: 'repair-attempt', timestamp, source: correct ? 'text' : 'self-report',
+      skill: 'grammarProduction', modality: 'cloze', prompted: true, ...(correct ? { score: 1 } : {}), chunkId: error.chunkId,
+      contextId: options.contextId, data: { errorId, response: options.response, fullSentence: correct,
+        verification: correct ? 'reference-match' : 'unverified-alternative' } })
     await insertEvent(event)
     await scheduleRepairRetests(event)
     await rebuildProjections()
@@ -238,9 +240,25 @@ async function reviewCard(cardId: string, rating: 1 | 2 | 3 | 4, input: ReviewOp
   })
 }
 
-async function saveError(error: Evaluation['errors'][number]): Promise<ErrorPattern> {
+async function saveError(error: Evaluation['errors'][number], identity?: { eventId: string; sessionId?: string }): Promise<ErrorPattern> {
   const validated = evaluationErrorSchema.parse(error)
+  const detected = eventSchema.parse({ id: identity?.eventId ?? uuid(), type: 'error-detected', timestamp: Date.now(), source: 'ai',
+    ...(identity?.sessionId !== undefined ? { sessionId: identity.sessionId } : {}) })
   return db.transaction('rw', eventTables, async () => {
+    if (identity) {
+      const previous = (await db.events.bulkGet(await resolveEventAliases(db, detected.id))).filter((event): event is StudyEvent => !!event)
+      if (previous.length) {
+        for (const event of previous) {
+          if (event.type !== 'error-detected' || event.source !== 'ai' || event.sessionId !== detected.sessionId
+            || event.data?.correctionJson !== JSON.stringify(validated) || typeof event.data?.errorId !== 'string') {
+            throw new Error('Correction event ID already used')
+          }
+        }
+        const linked = await db.errors.get(previous[0]!.data!.errorId as string)
+        if (!linked || previous.some(event => event.data!.errorId !== linked.id)) throw new Error('Missing or conflicting correction history')
+        return linked
+      }
+    }
     const pattern = `${normalize(validated.category)}: ${normalize(validated.original)}`
     let stored = await db.errors.filter(e => e.pattern === pattern).first()
     const chunk = await upsertChunk({ text: validated.corrected, meaningEn: validated.explanation, meaningZh: '', example: validated.corrected })
@@ -250,7 +268,8 @@ async function saveError(error: Evaluation['errors'][number]): Promise<ErrorPatt
     // Detach an obsolete corrected phrase if the same error receives a revised correction.
     await db.cards.where('errorId').equals(stored.id).filter(c => c.chunkId !== chunk.id).modify(c => { delete c.errorId })
     await db.cards.where('chunkId').equals(chunk.id).filter(c => ['cloze', 'speaking', 'transfer'].includes(c.modality)).modify(c => { c.errorId = stored!.id })
-    await insertEvent(eventSchema.parse({ id: uuid(), type: 'error-detected', timestamp: Date.now(), source: 'ai', chunkId: chunk.id, data: { errorId: stored.id } }))
+    await insertEvent(eventSchema.parse({ ...detected, chunkId: chunk.id, data: { errorId: stored.id,
+      ...(identity ? { correctionJson: JSON.stringify(validated) } : {}) } }))
     await rebuildProjections()
     return (await db.errors.get(stored.id))!
   })

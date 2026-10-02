@@ -29,6 +29,23 @@ export const externalMaterials: Material[] = [
     topic: 'Everyday life · social plans', mission: 'Play the conversation before opening the script. Explain the outing plan and the parent’s concerns, then describe your own plan reassuringly.' }),
 ]
 
+/** Original Can-do prompts, not copied publisher exercises or unseen transcripts.
+ * Early VOA topics were checked against the publisher's lessons1–5 review and
+ * lesson6 overview; unspecified pages keep a concrete personal-use task. */
+export function externalCanDo(materialId: string): string {
+  const goals: Record<string, string> = {
+    'external-voa-welcome': '认识新朋友：听懂自我介绍，再介绍自己并问对方的名字。',
+    'external-voa-level1-2': '介绍自己和来处，说明住在哪里，再礼貌告别；写成一条给新朋友的消息。',
+    'external-voa-im-here': '电话联系别人：说明自己在哪里、为何来电，再提出一个清楚的请求。',
+    'external-voa-level1-4': '说明自己带了什么、缺什么，再询问对方有没有一件日常物品。',
+    'external-voa-level1-5': '说明人在什么房间、那里能做什么，再问别人在哪里。',
+    'external-voa-level1-6': '询问一个设施在哪里，听清相对位置，再用自己的话确认方向。',
+    'external-voa-directions': '给别人指路：抓住地点和方向，再用自己的话讲清一条路线。',
+    'external-esl-first-date': '说明一个出行计划：听出安排与担忧，再说清自己的计划。',
+  }
+  return goals[materialId] ?? '听懂一件事，用今天的有用表达给朋友写 1–3 句自己的真实情况，再不照着稿子说出来。'
+}
+
 /** Self-report is useful reflection, but no third-party playback is observable. */
 export function externalPracticeReady(draft: { listened: boolean; answer: string; expression: string; example: string; audioId: string }) {
   return draft.listened && !!draft.answer.trim() && !!draft.expression.trim() && !!draft.example.trim() && !!draft.audioId
@@ -58,7 +75,51 @@ export function externalCatalogFresh(material: Material, now: number): boolean {
     && checkedAt <= now + 300_000 && now - checkedAt < EXTERNAL_CATALOG_MAX_AGE
 }
 
-/** Participation history selects new input; it never awards mastery or changes FSRS. */
+const practiceDay = 86_400_000
+export function validExternalReflection(event: StudyEvent, materialId: string, now: number) {
+  const data = event.data
+  return event.type === 'EXTERNAL_LISTEN_REFLECTION' && event.source === 'self-report' && !!event.sessionId
+    && Number.isFinite(event.timestamp) && event.timestamp >= 0 && event.timestamp <= now && data?.materialId === materialId
+    && data.listened === true && data.playbackObserved === false && data.comprehensionVerified === false
+    && ['response', 'expression', 'example', 'audioId'].every(key => typeof data[key] === 'string' && String(data[key]).trim())
+}
+function guidedReflection(event: StudyEvent) {
+  const data = event.data
+  return data?.guidedVersion === 1 && typeof data.retryAudioId === 'string' && !!data.retryAudioId.trim()
+    && data.retryAudioId !== data.audioId && typeof data.firstExample === 'string' && !!data.firstExample.trim()
+}
+/** A practice sequence, not coverage of an entire publisher lesson or a mastery verdict.
+ * Legacy participation retains its original scheduling contract; new work needs a
+ * separate, delayed application. Frozen context IDs survive device switching. */
+export function externalCoursePractice(materialId: string, events: StudyEvent[], now: number) {
+  const history = events.filter(event => validExternalReflection(event, materialId, now))
+    .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id))
+  const input = history.find(event => guidedReflection(event) && event.data?.coursePhase === 'input-application'
+    && event.data.contextId === `${materialId}:application:0`)
+  const delayed = input && history.find(event => guidedReflection(event) && event.sessionId !== input.sessionId
+    && event.timestamp >= input.timestamp + practiceDay && event.data?.coursePhase === 'delayed-application'
+    && event.data.contextId === `${materialId}:application:1`)
+  const availableAt = input ? input.timestamp + practiceDay : 0
+  const phase = input && now >= availableAt ? 'delayed-application' as const : 'input-application' as const
+  const contexts: Record<string, string> = {
+    'external-voa-welcome': '换成在工作或学校第一次遇到新同事：介绍自己，并问对方的名字或工作。',
+    'external-voa-level1-2': '换成写信给新同学：介绍你的来处和现在的住处，再欢迎对方与你联系。',
+    'external-voa-im-here': '换成在外出时需要朋友帮忙：说清楚你在哪里、需要什么帮助，再礼貌提出请求。',
+    'external-voa-directions': '换成给朋友发语音：从你熟悉的地点出发，说明怎样到另一处，并提醒一个地标。',
+    'external-voa-level1-4': '换成准备出门：给朋友留言说明你带了什么、还缺什么，并问能否借一件物品。',
+    'external-voa-level1-5': '换成在图书馆找朋友：用简短消息说明你在哪里，并问对方在哪里。',
+    'external-voa-level1-6': '换成在车站询问洗手间：问在哪里，再确认它与另一个地点的相对位置。',
+    'external-esl-first-date': '换成给朋友发消息：提出你自己的周末计划，说明时间地点，再询问对方是否方便。',
+  }
+  return { phase, contextId: `${materialId}:application:${phase === 'delayed-application' ? 1 : 0}`, availableAt,
+    complete: !!delayed || !history.some(event => event.data?.guidedVersion === 1) && history.some(event => event.data?.guidedVersion === undefined),
+    priorExpression: String(input?.data?.expression || ''), priorMeaning: String(input?.data?.meaning || ''),
+    contextPrompt: phase === 'delayed-application' ? contexts[materialId]
+      || '换一个收件人和目的：用上次的有用表达，给朋友写一条与你真实生活有关的简短消息，再录音说给他听。不要照抄上次的句子。'
+      : '根据今天的用途，用一个听到的表达，说和写自己的情况，而不是抄写视频对白。' }
+}
+
+/** Participation history selects input/application; it never awards mastery or changes FSRS. */
 export function externalLessonCandidates(materials: Material[], events: StudyEvent[], now: number): Material[] {
   const unavailable = unavailableExternalIds(events, now)
   const eligible = materials.filter(m => m.approved && m.externalStudy && !m.synthetic && !unavailable.has(m.id) && externalCatalogFresh(m, now))
@@ -66,13 +127,12 @@ export function externalLessonCandidates(materials: Material[], events: StudyEve
   const lastPractice = new Map<string, number>()
   for (const event of events) {
     const data = event.data
-    if (event.type !== 'EXTERNAL_LISTEN_REFLECTION' || event.source !== 'self-report' || !event.sessionId
-      || !Number.isFinite(event.timestamp) || event.timestamp < 0 || event.timestamp > now
-      || typeof data?.materialId !== 'string' || !ids.has(data.materialId)
-      || data.listened !== true || data.playbackObserved !== false || data.comprehensionVerified !== false
-      || !['response', 'expression', 'example', 'audioId'].every(key => typeof data[key] === 'string' && String(data[key]).trim())) continue
+    if (typeof data?.materialId !== 'string' || !ids.has(data.materialId) || !validExternalReflection(event, data.materialId, now)) continue
     lastPractice.set(data.materialId, Math.max(lastPractice.get(data.materialId) ?? 0, event.timestamp))
   }
+  const pending = eligible.filter(m => lastPractice.has(m.id) && !externalCoursePractice(m.id, events, now).complete)
+  const due = pending.filter(m => externalCoursePractice(m.id, events, now).availableAt <= now)
+  if (due.length) return due.sort((a, b) => lastPractice.get(a.id)! - lastPractice.get(b.id)! || a.id.localeCompare(b.id))
   const unseen = eligible.filter(m => !lastPractice.has(m.id))
   if (unseen.length) {
     const next = new Map<string, number>()
@@ -86,7 +146,8 @@ export function externalLessonCandidates(materials: Material[], events: StudyEve
   }
   // Once the eligible reserve is exhausted, revisit the least recently practised
   // lesson. No new-content, verified-comprehension or proficiency claim is made.
+  const completed = eligible.filter(m => !pending.includes(m))
   let oldest = Infinity
-  for (const material of eligible) oldest = Math.min(oldest, lastPractice.get(material.id)!)
-  return eligible.filter(m => lastPractice.get(m.id) === oldest)
+  for (const material of completed) oldest = Math.min(oldest, lastPractice.get(material.id)!)
+  return completed.filter(m => lastPractice.get(m.id) === oldest)
 }
