@@ -1,6 +1,18 @@
 # Current status
 
-## October3 learner-experience remediation — in progress
+## October3 learner-experience remediation — delivered
+
+The newly authorized English/Japanese learning-quality and usability remediation is implemented, independently reviewed, published and accepted as a software delivery. There are no remaining mandatory items in this remediation. This establishes tested learning behavior and recoverability, not guaranteed individual gains, months of human efficacy, calibrated proficiency levels or a universally best UI.
+
+- Current clean public runtime: `b3d9e3235f895070d3cddae409257f2e0e61048b`, build **`b3d9e32-ee296d61b05c`**, built2026-10-02T22:47:10.590Z. Workflow37073980770 verified and deployed successfully; verify19m59s, deploy14s. The actual public manifest matches this revision and `dirty:false`; a fresh desktop browser's Settings network check independently reports the identical current/published build. Later documentation-only commits do not change that runtime identity.
+- Exact-release gates:2096 unit passes/81 conditional or opt-in skips across62 files; real local Auth/Storage25/25, content314/329 (15 opt-in skips), Deno authorization/private-reference4/4, native Chromium/WebKit multi-profile sync2/2, dedicated SQL suites, types/build, lint and322-file source/build scan all pass. Linux full browser acceptance passes228 with27 declared skips; there are no failed or flaky cases. The full native-media/PWA requirements were retained rather than bypassed to accommodate Windows.
+- Actual-public learner paths:17 desktop/mobile-WebKit journeys pass, including Chinese daily guidance, saved English coaching and writing correction, original/complete-retry recording, reload recovery, delayed different-context English and Japanese application, correction of a guessed Japanese diagnosis and completed-work reopening. One Windows-WebKit microphone case is explicitly skipped. A separately enabled browser-only Japanese journey passes with two actual native Chromium recordings, preserved drafts, six Japanese cards and zero English audio/cards. Provider/device inputs in these isolated tests are synthetic; no owner history or paid provider dispatch is involved.
+- Delivery preserves the Vue pages/design system, repository/URL/PWA/database identities, original English/Japanese answers, private recordings and shared daily budgets. No backend/schema/model/budget change, unknown-hold reset or new paid AI dispatch occurred. Earlier legitimate-owner desktop/iPhone continuity and provider evidence remain applicable to their unchanged infrastructure; no new physical-iPhone or long-term-human proof is claimed.
+- Start from Today or 日本語: a concrete communication goal and next action lead into human input, personal written/spoken application, short Chinese teaching, optional confirmed AI correction, complete retry and later independent transfer. Existing drafts retain their original contracts; new guided practice does not rewrite historical answers or equate lesson participation with mastery. Save work before Settings → 检查更新; do not erase data or repeat login to identify a version.
+
+### Remediation implementation and candidate history
+
+The checkpoints below retain their historical candidate/pending wording. The delivered exact-release record above closes their pending publication/acceptance, without changing their original evidence.
 
 The owner requested a new comprehensive English/Japanese audit and then explicitly authorized implementation and final delivery of the remediation. The October1 software acceptance below remains historical; it does not close this new learning-quality and usability scope.
 
