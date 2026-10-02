@@ -221,6 +221,17 @@ describe.each(['Recorder', 'SavedRecording'])('%s playback identity during hydra
 })
 
 describe('Recorder component recovery lifecycle', () => {
+  it('keeps a supported retry playable while preventing transcription even with a connected provider', async () => {
+    const asset = makeAsset('supported-retry')
+    appState.keySet = true; appState.audio = [asset]; rows.set(asset.id, asset)
+    const view = mount(Recorder, { savedAudioId: asset.id }); await flush()
+    const transcribeButton = button(view.root, 'Transcribe recording')
+    view.props.transcriptionDisabled = true; await flush()
+    expect(find(view.root, node => node.type === 'audio')).toBeTruthy()
+    expect(find(view.root, node => node.type === 'button' && content(node) === 'Transcribe recording')).toBeUndefined()
+    await invoke(transcribeButton, 'onClick')
+    expect(appState.provider.transcribe).not.toHaveBeenCalled()
+  })
   it('preserves the disabled English transcription affordance without exposing an unavailable Japanese transcriber', async () => {
     const asset = makeAsset('no-provider')
     appState.keySet = false; appState.audio = [asset]; rows.set(asset.id, asset)

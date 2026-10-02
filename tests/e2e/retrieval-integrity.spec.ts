@@ -365,7 +365,7 @@ test("Review waits for capture and STT, keeps Stop enabled and locks recording d
     await reviewFixture(page);
     await selectReview(page, "transfer");
     const check = page.getByRole("button", { name: "Check my answer" });
-    const record = page.locator(".recorder .record-button");
+    const record = page.locator(".recorder").first().locator(".record-button");
     const filter = page.getByRole("combobox", { name: "Practice type" });
     const good = page.getByRole("button", { name: "Good Independent", exact: true });
     const attempt = await reviewItem(page, "integrity-transfer");
@@ -411,19 +411,33 @@ test("Review waits for capture and STT, keeps Stop enabled and locks recording d
     await expect(filter).toBeDisabled();
     mock.release();
     await expect(good).toBeEnabled();
-    await record.click();
-    await expect(record).toHaveText("Stop & save");
-    await expect(record).toBeEnabled();
+    await expect(record).toBeDisabled();
+    const retryRecord = page.locator(".recorder").nth(1).locator(".record-button");
+    await retryRecord.click();
+    await expect(retryRecord).toHaveText("Stop & save");
+    await expect(retryRecord).toBeEnabled();
     await expect(good).toBeDisabled();
+    const originalUrl = page.url();
+    await page.evaluate(() => { location.hash = '#/review?extra=17'; });
+    await expect(page).toHaveURL(originalUrl);
+    await expect(retryRecord).toHaveText('Stop & save');
     await expect(page.locator(".record-status")).toContainText(/[1-9]\d*s \/ 180s/);
-    await record.click();
+    await retryRecord.click();
     await expect(good).toBeEnabled();
-    // A replacement recording cannot inherit the previous recording's verified transcript.
-    await expect.poll(async () => (await draft(page, id))?.draft.sttText).toBe("");
-    expect((await draft(page, id))?.draft.recording).not.toBe(firstAudio);
+    await expect(page.locator('.recorder').nth(1).getByRole('button', { name: 'Transcribe recording', exact: true })).toHaveCount(0);
+    const retryAudio = (await draft(page, id))?.draft.retryAudioId;
+    expect(typeof retryAudio).toBe('string'); expect(retryAudio).not.toBe(firstAudio);
+    await page.getByRole('button', { name: '保存这次练习，不请求 AI', exact: true }).click();
+    await expect.poll(async () => (await draft(page, id))?.draft.retries).toMatchObject([{ audioId: retryAudio }]);
+    // Supported retry is distinct; it cannot overwrite the original or borrow STT.
+    expect((await draft(page, id))?.draft).toMatchObject({ recording: firstAudio, sttText: mock.transcript });
+    await page.reload();
+    await selectReview(page, 'transfer');
+    await expect(page.locator('.saved-recording audio')).toHaveCount(1);
+    expect((await draft(page, id))?.draft.retries).toMatchObject([{ audioId: retryAudio }]);
     await good.click();
     await expect.poll(async () => (await records<StudyEvent>(page, "events")).find(event => event.id === attempt.attemptId)).toMatchObject({
-      source: "self-report", data: { audioObserved: false, transcriptVerified: false },
+      source: "ai", data: { audioObserved: true, transcriptVerified: true, audioId: firstAudio },
     });
   } finally { mock.releaseSTT(); mock.release(); }
 });

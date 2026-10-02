@@ -11,7 +11,7 @@ import { registerRecorderShortcut } from "../audio/shortcuts";
 import { useRequest } from "../composables/useRequest";
 import { useRecordingUrl } from "../composables/useRecordingUrl";
 import Icon from "./Icon.vue";
-const props = defineProps<{ label?: string; savedAudioId?: string; disabled?: boolean; workspace?: {
+const props = defineProps<{ label?: string; savedAudioId?: string; disabled?: boolean; transcriptionDisabled?: boolean; workspace?: {
   database: JoveDatabase; audio: () => AudioAsset[]; refresh: () => Promise<void>;
   assertCurrent: () => Promise<void>; transcribe?: (blob: Blob, signal: AbortSignal) => Promise<string>;
   attach?: (data: { audioId: string; duration: number }) => Promise<void>;
@@ -26,7 +26,7 @@ const app = useApp();
 // pending microphone save into the newly selected workspace.
 const workspace = props.workspace, db = workspace?.database ?? englishDatabase;
 const refresh = () => workspace ? workspace.refresh() : app.refresh();
-const canTranscribe = computed(() => !!(workspace ? workspace.transcribe : app.keySet));
+const canTranscribe = computed(() => !props.transcriptionDisabled && !!(workspace ? workspace.transcribe : app.keySet));
 const root = ref<HTMLElement>(), recording = ref(false), starting = ref(false), saving = ref(false);
 const audioId = ref(""), seconds = ref(0), statusError = ref(""), transcript = ref("");
 const savedAsset = shallowRef<AudioAsset>();
@@ -156,7 +156,7 @@ async function transcribe(): Promise<void> {
       // Read back the successfully committed original; an in-memory draft never goes to STT.
       const stored = await db.audio.get(id);
       if (!stored) throw new Error("Save this recording successfully before transcribing it.");
-      if (signal.aborted || props.disabled) return undefined;
+      if (signal.aborted || props.disabled || !canTranscribe.value) return undefined;
       await workspace?.assertCurrent();
       return workspace ? workspace.transcribe?.(stored.blob, signal) : app.provider.transcribe(stored.blob, signal);
     });
@@ -215,10 +215,10 @@ defineExpose({ toggle });
     <div v-if="existing && !pending" class="row wrap">
       <span v-if="saving" class="muted" role="status">Recording saved; finishing local updates…</span>
       <span v-else class="pill"><Icon name="check" :size="14" />Saved on this device</span>
-      <button v-if="!workspace || canTranscribe" class="text-button" :disabled="!canTranscribe || locked || recording || !app.online" @click="transcribe">{{ transcribing ? "Transcribing…" : "Transcribe recording" }}</button>
+      <button v-if="!transcriptionDisabled && (!workspace || canTranscribe)" class="text-button" :disabled="!canTranscribe || locked || recording || !app.online" @click="transcribe">{{ transcribing ? "Transcribing…" : "Transcribe recording" }}</button>
       <button v-if="busy" class="text-button" @click="cancel">Cancel</button>
     </div>
-    <p v-if="existing && !workspace && !app.keySet" class="help-text">Your recording is saved. <RouterLink to="/settings">Connect AI in Settings</RouterLink> for transcription and feedback, or type your response.</p>
+    <p v-if="existing && !transcriptionDisabled && !workspace && !app.keySet" class="help-text">Your recording is saved. <RouterLink to="/settings">Connect AI in Settings</RouterLink> for transcription and feedback, or type your response.</p>
     <p v-if="transcript" class="help-text" aria-live="polite">Transcript: {{ transcript }}</p>
     <p v-if="statusError || error" class="error" role="alert">{{ statusError || error }}</p>
     <button v-if="error && !busy && !pending && canTranscribe" class="text-button" :disabled="locked || recording || !app.online" @click="transcribe">Retry transcription</button>

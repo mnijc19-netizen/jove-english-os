@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
 import { useApp } from "../stores/app";
 import { reviewCard } from "../db/repository";
 import { useRequest } from "../composables/useRequest";
@@ -9,6 +9,7 @@ import { evaluatedResultSchema } from "../ai/schemas";
 import CoachingFeedback from "../components/CoachingFeedback.vue";
 import AudioPlayer from "../components/AudioPlayer.vue";
 import Recorder from "../components/Recorder.vue";
+import SavedRecording from "../components/SavedRecording.vue";
 import Icon from "../components/Icon.vue";
 import { db } from "../db/db";
 import { missions } from "../content/materials";
@@ -33,10 +34,17 @@ const app = useApp(),
 const ai = useRequest();
 const feedback = ref<{ answer: string; context: string; result: Evaluation } | null>(null);
 const retryResponse = ref('');
-const retries = ref<{ response: string; timestamp: number }[]>([]);
+const retryAudioId = ref(''), retryRecorderActive = ref(false);
+const captureActive = computed(() => recorderActive.value || retryRecorderActive.value);
+const retries = ref<{ response: string; timestamp: number; audioId?: string }[]>([]);
 const currentFeedback = computed(() => feedback.value?.answer === response.value && feedback.value.context === context.value ? feedback.value : null);
 const route = useRoute();
 const router = useRouter();
+onBeforeRouteUpdate(() => {
+  if (!captureActive.value && !saving.value && !ai.busy.value) return true;
+  error.value = '请先停止并保存录音，或等待当前反馈保存，再切换练习。';
+  return false;
+});
 const extra = computed(() => typeof route.query.extra === 'string' && /^\d{1,6}$/.test(route.query.extra) ? route.query.extra : null);
 const loaded = ref(false);
 const block = ref<{ id: string; taskId?: string; startedAt: number; items: ReviewAttempt[] }>();
@@ -165,6 +173,7 @@ async function persist() {
         evaluated: evaluated.value,
         ...(feedback.value ? { feedback: JSON.parse(JSON.stringify(feedback.value)) } : {}),
         retryResponse: retryResponse.value,
+        retryAudioId: retryAudioId.value,
         retries: JSON.parse(JSON.stringify(retries.value)),
         ...(usesContext(card.value?.modality) ? { context: context.value } : {}),
       },
@@ -201,8 +210,10 @@ watch(
       feedback.value = { answer: savedFeedback.answer, context: savedFeedback.context, result: parsed.data };
     }
     retryResponse.value = typeof d?.retryResponse === 'string' ? d.retryResponse : '';
-    retries.value = Array.isArray(d?.retries) ? d.retries.filter((item): item is { response: string; timestamp: number } => !!item
-      && typeof item === 'object' && typeof item.response === 'string' && typeof item.timestamp === 'number' && Number.isFinite(item.timestamp)) : [];
+    retryAudioId.value = typeof d?.retryAudioId === 'string' ? d.retryAudioId : '';
+    retries.value = Array.isArray(d?.retries) ? d.retries.flatMap(item => item && typeof item === 'object'
+      && typeof item.response === 'string' && typeof item.timestamp === 'number' && Number.isFinite(item.timestamp)
+      ? [{ response: item.response, timestamp: item.timestamp, ...(typeof item.audioId === 'string' && item.audioId ? { audioId: item.audioId } : {}) }] : []) : [];
     const selected = await contextFor(active, d);
     if (id !== attemptKey.value) return;
     context.value = selected.text;
@@ -214,7 +225,7 @@ watch(
   { immediate: true, flush: "sync" },
 );
 watch(
-  [response, revealed, hint, recording, heard, sttText, evaluated, feedback, retryResponse],
+  [response, revealed, hint, recording, heard, sttText, evaluated, feedback, retryResponse, retryAudioId],
   persist,
   { flush: "sync" },
 );
@@ -241,24 +252,33 @@ function reset() {
   feedback.value = null;
   retryResponse.value = '';
   retries.value = [];
+  retryAudioId.value = ''; retryRecorderActive.value = false;
 }
 function scoreFeedback(result: Evaluation, target: string): number | null {
   if (result.accuracy === null) return null;
   return result.successfulChunks.some(s => s.toLowerCase() === target.toLowerCase()) ? result.accuracy : 0;
 }
 async function saveRetry() {
-  if (!loaded.value || !revealed.value || saving.value || !retryResponse.value.trim()) return;
+  if (!loaded.value || !revealed.value || saving.value || ai.busy.value || captureActive.value || (!retryResponse.value.trim() && !retryAudioId.value)) return;
   saving.value = true;
-  const response = retryResponse.value.trim(), key = attemptKey.value;
+  const response = retryResponse.value.trim(), audioId = retryAudioId.value, key = attemptKey.value;
   try {
+    if (audioId) {
+      const asset = await db.audio.get(audioId);
+      if (key !== attemptKey.value) return;
+      if (!asset?.blob.size || asset.kind !== 'recording' || audioId === recording.value) {
+        error.value = '重说录音尚不可用；首次录音仍保留，请重试保存。'; return;
+      }
+    }
     // Separate supported practice; never overwrite or re-score the first answer.
-    retries.value.push({ response, timestamp: Date.now() });
+    retries.value.push({ response, timestamp: Date.now(), ...(audioId ? { audioId } : {}) });
     retryResponse.value = '';
-    if (!await persist() && key === attemptKey.value) { retries.value.pop(); retryResponse.value = response; }
+    retryAudioId.value = '';
+    if (!await persist() && key === attemptKey.value) { retries.value.pop(); retryResponse.value = response; retryAudioId.value = audioId; }
   } finally { saving.value = false; }
 }
 async function check() {
-  if (!loaded.value || revealed.value || saving.value || ai.busy.value || recorderActive.value || !card.value || !chunk.value) return;
+  if (!loaded.value || revealed.value || saving.value || ai.busy.value || captureActive.value || !card.value || !chunk.value) return;
   const submitted = { key: attemptKey.value, response: response.value, context: context.value, chunkText: chunk.value.text, modality: card.value.modality };
   // Lock recording before the draft-save await, not only once evaluation starts.
   saving.value = true;
@@ -290,7 +310,7 @@ async function check() {
   } finally { saving.value = false; }
 }
 async function rate(rating: 1 | 2 | 3 | 4) {
-  if (!loaded.value || !revealed.value || !card.value || saving.value || ai.busy.value || recorderActive.value || !chunk.value) return;
+  if (!loaded.value || !revealed.value || !card.value || saving.value || ai.busy.value || captureActive.value || !chunk.value) return;
   const submitted = {
     active: card.value, chunk: chunk.value, sessionId: attemptKey.value, attempt: attempt.value!,
     response: response.value, hint: hint.value, heard: heard.value,
@@ -393,7 +413,7 @@ async function rate(rating: 1 | 2 | 3 | 4) {
     <p class="help-text">A small, saved selection for this practice. Other due cards remain in your library with their original schedules.</p>
     <div class="review-toolbar">
       <label
-        >Practice type<select v-model="filter" :disabled="saving || ai.busy.value || recorderActive">
+        >Practice type<select v-model="filter" :disabled="saving || ai.busy.value || captureActive">
           <option value="all">Recommended mix</option>
           <option
             v-for="m in [
@@ -477,12 +497,12 @@ async function rate(rating: 1 | 2 | 3 | 4) {
         :disabled="!loaded"
       />
       <div v-if="!revealed" class="row between">
-        <button class="text-button" :disabled="saving || ai.busy.value || recorderActive" @click="hint = true">Need a hint?</button
+        <button class="text-button" :disabled="saving || ai.busy.value || captureActive" @click="hint = true">Need a hint?</button
         ><button
           class="button primary"
           :disabled="
             ai.busy.value ||
-            saving || recorderActive || !loaded ||
+            saving || captureActive || !loaded ||
             (!response.trim() && !recording) ||
             (card.modality === 'listening' && !heard)
           "
@@ -498,12 +518,16 @@ async function rate(rating: 1 | 2 | 3 | 4) {
         <template v-if="currentFeedback">
           <CoachingFeedback :key="attemptKey" :evaluation="currentFeedback.result" :answer="currentFeedback.answer" language="en" />
           <p v-if="currentFeedback.result.accuracy === null" class="help-text">准确度尚未评定；表达被识别不等于准确度得分。下方自评只安排复习，不建立能力分数。</p>
-          <label for="review-retry">完整重说后记下新表达，或写一次修改（保留首次回答）</label>
-          <textarea id="review-retry" v-model="retryResponse" rows="3" :readonly="saving" maxlength="10000" />
-          <button class="button secondary" :disabled="saving || !retryResponse.trim()" @click="saveRetry">保存这次练习，不请求 AI</button>
-          <p class="help-text">提示后的重试仅供自我比较，不增加能力证据，也不重复调整复习间隔。</p>
-          <div v-for="(retry, index) in retries" :key="index"><p>已保存重试 {{ index + 1 }}</p><blockquote>{{ retry.response }}</blockquote></div>
         </template>
+        <Recorder
+          v-if="['speaking', 'transfer'].includes(card.modality)" :key="`${attemptKey}:retry`" label="修改后的完整重说"
+          :saved-audio-id="retryAudioId" :transcription-disabled="true" :disabled="saving || ai.busy.value || recorderActive"
+          @active="retryRecorderActive = $event" @recorded="retryAudioId = $event.audioId" />
+        <label for="review-retry">完整重说后记下新表达，或写一次修改（保留首次回答）</label>
+        <textarea id="review-retry" v-model="retryResponse" rows="3" :readonly="saving || captureActive" maxlength="10000" />
+        <button class="button secondary" :disabled="saving || ai.busy.value || captureActive || (!retryResponse.trim() && !retryAudioId)" @click="saveRetry">保存这次练习，不请求 AI</button>
+        <p class="help-text">提示后的重试仅供自我比较，不增加能力证据，也不重复调整复习间隔；首次回答、录音和转写不覆盖。</p>
+        <div v-for="(retry, index) in retries" :key="index"><p>已保存重试 {{ index + 1 }}</p><blockquote v-if="retry.response">{{ retry.response }}</blockquote><SavedRecording v-if="retry.audioId" :audio-id="retry.audioId" :label="`重试 ${index + 1}`" /></div>
         <p class="eyebrow">COMPARE WITH YOUR RESPONSE</p>
         <h2>{{ chunk.text }}</h2>
         <p>{{ chunk.meaningEn }}</p>
@@ -517,13 +541,13 @@ async function rate(rating: 1 | 2 | 3 | 4) {
           }}
         </p>
         <div class="rating-grid">
-          <button :disabled="saving || ai.busy.value || recorderActive" @click="rate(1)">
+          <button :disabled="saving || ai.busy.value || captureActive" @click="rate(1)">
             <strong>Again</strong><small>Couldn’t recall</small></button
-          ><button :disabled="saving || ai.busy.value || recorderActive" @click="rate(2)">
+          ><button :disabled="saving || ai.busy.value || captureActive" @click="rate(2)">
             <strong>Hard</strong><small>With effort</small></button
-          ><button :disabled="saving || ai.busy.value || recorderActive" @click="rate(3)">
+          ><button :disabled="saving || ai.busy.value || captureActive" @click="rate(3)">
             <strong>Good</strong><small>Independent</small></button
-          ><button :disabled="saving || ai.busy.value || recorderActive" @click="rate(4)">
+          ><button :disabled="saving || ai.busy.value || captureActive" @click="rate(4)">
             <strong>Easy</strong><small>Immediate</small>
           </button>
         </div>

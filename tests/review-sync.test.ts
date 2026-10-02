@@ -81,12 +81,12 @@ beforeAll(() => {
   const script = compileScript(descriptor, { id: 'review-sync-test', inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } })
   const code = transpileModule(script.content, { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText
   const dependencies: Record<string, unknown> = {
-    vue: Vue, dexie: DexieModule, 'vue-router': { useRoute: () => ({ query: { task: 'review-task' } }), useRouter: () => ({ push: vi.fn() }) },
+    vue: Vue, dexie: DexieModule, 'vue-router': { useRoute: () => ({ query: { task: 'review-task' } }), useRouter: () => ({ push: vi.fn() }), onBeforeRouteUpdate: vi.fn() },
     '../stores/app': { useApp: () => state }, '../db/db': { db }, '../db/repository': repository,
     '../sync/journal': journal, '../sync/review': attempts, '../domain/longitudinal': longitudinal,
     '../content/materials': { missions }, '../composables/useRequest': { useRequest },
     '../ai/schemas': schemas, '../components/CoachingFeedback.vue': feedbackExports,
-    ...Object.fromEntries(['AudioPlayer', 'Recorder', 'Icon'].map(name => [`../components/${name}.vue`, { default: { setup: () => () => Vue.h('i') } }])),
+    ...Object.fromEntries(['AudioPlayer', 'Recorder', 'SavedRecording', 'Icon'].map(name => [`../components/${name}.vue`, { default: { setup: () => () => Vue.h('i') } }])),
   }
   const exports: { default?: Vue.Component } = {}
   new Function('require', 'exports', code)((id: string) => { if (!(id in dependencies)) throw new Error('Unmapped Review import: ' + id); return dependencies[id] }, exports)
