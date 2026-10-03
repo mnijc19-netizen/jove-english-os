@@ -25,8 +25,18 @@ async function put(page: Page, table: string, values: unknown[]) {
   }), { table, values })
 }
 
+async function expandLegacyPractice(page: Page) {
+  const legacy = page.locator('details.legacy-practice')
+  await expect(legacy).toBeVisible()
+  if (await legacy.getAttribute('open') === null) {
+    await legacy.getByText('已有基础或旧练习？展开原来的学习安排', { exact: true }).click()
+  }
+  await expect(legacy).toHaveAttribute('open', '')
+}
+
 test('Chinese next-task guidance keeps a short day automatic and survives reload', async ({ page }) => {
   await page.goto('#/today')
+  await expandLegacyPractice(page)
   await page.getByRole('button', { name: '15 min', exact: true }).click()
   await expect.poll(async () => (await rows<Profile>(page, 'profiles'))[0]?.dailyMinutes).toBe(15)
   const guide = page.getByRole('region', { name: '下一项学习指引' })
@@ -35,6 +45,7 @@ test('Chinese next-task guidance keeps a short day automatic and survives reload
   await expect(guide).toContainText('不用反复硬听到疲惫')
   expect((await rows<StudyEvent>(page, 'events')).every(event => event.score === undefined)).toBe(true)
   await page.reload()
+  await expandLegacyPractice(page)
   await expect(page.getByRole('button', { name: '15 min', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(guide).toBeVisible()
   await page.screenshot({ path: test.info().outputPath('chinese-next-task.png'), fullPage: true })
@@ -131,6 +142,7 @@ test('completed required 45 minutes leaves the original nine-minute draft option
   })
   // Today computes recommendations; the normal start action commits the actual
   // assignment. Page readiness alone does not create a persisted plan.
+  await expandLegacyPractice(page)
   await page.getByRole('button', { name: 'Start today’s practice', exact: true }).click()
   await expect.poll(async () => (await rows<DailyPlan>(page, 'plans')).find(row => row.date === date)?.minutes).toBe(45)
   const plan = (await rows<DailyPlan>(page, 'plans')).find(row => row.date === date)!
@@ -149,6 +161,7 @@ test('completed required 45 minutes leaves the original nine-minute draft option
   const source: StudySession = { id: sessionId, kind: 'reading', materialId: material.id, startedAt: now, stage: 'respond',
     draft: { passage: material.transcript, response: 'My original unfinished response about understanding friends.', retell: '', activeMs: 4000 } }
   await put(page, 'plans', [completed]); await put(page, 'sessions', [source]); await page.goto('#/'); await page.reload()
+  await expandLegacyPractice(page)
   await expect(page.getByText('今天的练习已保存。', { exact: false })).toBeVisible()
   await expect(page.getByRole('button', { name: /^(Start today’s practice|Continue my practice)$/ })).toHaveCount(0)
   const resume = page.getByRole('button', { name: 'Continue optional practice', exact: true })
@@ -171,8 +184,10 @@ test('completed required 45 minutes leaves the original nine-minute draft option
   expect(events.find(event => event.id === `completed:${taskId}`)?.data?.minutes).toBe(9)
   expect(events.find(event => event.id === `${sessionId}:response`)?.data?.response).toBe(source.draft.response)
   await page.getByRole('button', { name: 'Continue to next task', exact: true }).click()
+  await expandLegacyPractice(page)
   await expect(page.getByText('今天的练习已保存。', { exact: false })).toBeVisible()
-  await page.reload(); await expect(page.getByRole('button', { name: 'View optional practice', exact: true })).toHaveCount(1)
+  await page.reload(); await expandLegacyPractice(page)
+  await expect(page.getByRole('button', { name: 'View optional practice', exact: true })).toHaveCount(1)
 })
 
 test('Today automatically connects assigned listening, separate reading, durable chunk writing and speaking', async ({ page }) => {
@@ -186,7 +201,11 @@ test('Today automatically connects assigned listening, separate reading, durable
   await put(page, 'profiles', [{ ...profile, onboarded: true, fatigue: 0, dailyMinutes: 45, interests: [listening.topic], createdAt: now }])
   await page.reload()
   expect(await rows(page, 'cards')).toHaveLength(0)
+  await expandLegacyPractice(page)
   await page.getByRole('button', { name: 'Start today’s practice' }).click()
+  // The click dispatches an async save. Wait for its durable plan rather than
+  // assuming the DOM event itself acknowledged the IndexedDB transaction.
+  await expect.poll(async () => (await rows<DailyPlan>(page, 'plans')).length).toBe(1)
   const plan = (await rows<DailyPlan>(page, 'plans'))[0]!
   const listenTask = plan.tasks.find(t => t.kind === 'listen')!, readTask = plan.tasks.find(t => t.id.endsWith(':reading'))!
   const chunkTask = plan.tasks.find(t => t.id.endsWith(':chunks'))!, speakTask = plan.tasks.find(t => t.kind === 'speak')!
@@ -255,7 +274,8 @@ test('same-page reading retry survives two real aborted commits and continues it
       { id: chunkId, kind: 'learn', title: 'Make a chunk your own', materialId: chunkMaterial.id, minutes: 15, reason: 'Saved language assignment', done: false },
       { id: `${date}:speak:practice`, kind: 'speak', title: 'Speak', minutes: 15, reason: 'Saved speaking assignment', done: false },
     ] }])
-  await page.reload(); await page.getByRole('button', { name: 'Start today’s practice' }).click()
+  await page.reload(); await expandLegacyPractice(page)
+  await page.getByRole('button', { name: 'Start today’s practice' }).click()
   await page.getByRole('button', { name: 'Start reading', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Pause reading', exact: true })).toBeVisible()
   await page.clock.runFor(4000)
@@ -350,6 +370,7 @@ test('completed daily budget offers optional review without adding plan minutes 
     examples: [], register: 'neutral', sourceIds: [], readingStrength: 0, listeningStrength: 0, recallStrength: 0, productionStrength: 0, spontaneousUses: 0, createdAt: now }])
   await put(page, 'cards', [{ id: 'extra-card', chunkId: 'extra-chunk', modality: 'recognition', card: createEmptyCard(now - 1), contextIds: [] }])
   await page.reload()
+  await expandLegacyPractice(page)
   await expect(page.getByRole('link', { name: 'Optional extra review' })).toBeVisible()
   expect((await rows<DailyPlan>(page, 'plans')).find(p => p.id === date)?.minutes).toBe(45)
   await page.getByRole('link', { name: 'Optional extra review' }).click()
@@ -370,6 +391,7 @@ test('changing goals and interests preserves a begun reading task and its respon
   await put(page, 'plans', [{ id: date, date, minutes: 45, focus: 'reading', evidenceFingerprint: 'begin-fixture', createdAt: now,
     tasks: [{ id: taskId, kind: 'learn', title: 'Read something worth sharing', minutes: 45, reason: 'Original reading assignment', done: false, materialId: material.id }] }])
   await page.reload()
+  await expandLegacyPractice(page)
   await page.getByRole('button', { name: 'Start today’s practice' }).click()
   await page.getByRole('button', { name: 'Start reading', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Pause reading', exact: true })).toBeVisible()

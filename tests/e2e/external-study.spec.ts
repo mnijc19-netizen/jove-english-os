@@ -1,7 +1,17 @@
 import { test, expect, records } from './browser-fixtures'
+import type { Page } from '@playwright/test'
 import type { DailyPlan, StudyEvent, StudySession } from '../../src/domain/types'
 import { externalMaterials } from '../../src/content/external'
 import { nextAssignedTask, taskPath } from '../../src/domain/engine'
+
+async function expandLegacyPractice(page: Page) {
+  const legacy = page.locator('details.legacy-practice')
+  await expect(legacy).toBeVisible()
+  if (await legacy.getAttribute('open') === null) {
+    await legacy.getByText('已有基础或旧练习？展开原来的学习安排', { exact: true }).click()
+  }
+  await expect(legacy).toHaveAttribute('open', '')
+}
 
 async function enableWritingFixture(page: import('@playwright/test').Page) {
   let requests = 0
@@ -199,6 +209,7 @@ test('external lesson saves a guided draft without media downloads or invented a
 
 test('English returns to a delayed different-context application before showing old help', async ({ page }) => {
   await page.goto('#/today')
+  await expandLegacyPractice(page)
   await expect(page.getByRole('button', { name: 'Start today’s practice', exact: true })).toBeVisible()
   await page.evaluate(async () => {
     const request = indexedDB.open('jove-english-os')
@@ -271,6 +282,7 @@ test('an unavailable external lesson gets an automatic alternative without compl
   await page.goto('#/')
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
   // Open an assigned external task through its actual Today route.
+  await expandLegacyPractice(page)
   await page.getByRole('button', { name: 'Start today’s practice', exact: true }).click()
   // The first task can be Review on other fixtures; this fresh workspace starts listening.
   await expect(page).toHaveURL(/#\/listen\?/u)
@@ -296,6 +308,7 @@ test('an unavailable external lesson gets an automatic alternative without compl
 
 test('English Today shares the daily allowance with an independently saved Japanese workspace', async ({ page }) => {
   await page.goto('#/')
+  await expandLegacyPractice(page)
   await expect(page.getByRole('button', { name: 'Start today’s practice', exact: true })).toBeVisible()
   await page.evaluate(async () => {
     const open = (name: string, version?: number) => new Promise<IDBDatabase>((resolve, reject) => {
@@ -330,6 +343,7 @@ test('English Today shares the daily allowance with an independently saved Japan
     english.close(); japanese.close()
   })
   await page.reload()
+  await expandLegacyPractice(page)
   await expect(page.getByText(/两种语言共用今天的 45 分钟/u)).toBeVisible()
   await expect(page.getByText(/英语还可安排 5 分钟，日语 0 分钟/u)).toBeVisible()
   await expect(page.getByText('今天最多安排 5 分钟', { exact: true })).toBeVisible()

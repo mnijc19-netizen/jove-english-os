@@ -18,6 +18,16 @@ const databases: JoveDatabase[] = []
 afterEach(async () => { for (const db of databases.splice(0)) await db.delete() })
 
 describe('one daily budget across two independent learning spaces', () => {
+  it('reserves a standalone classroom without offering the same minutes to the legacy planner', () => {
+    const start: StudyEvent = { id: 'starter-start', type: 'TASK_STARTED', source: 'objective', timestamp: now,
+      data: { taskId: 'starter-session', kind: 'starter-classroom', minutes: 5 } }
+    const result = allocateLanguageDay(45, { en: { ...empty(), events: [start] }, ja: { ...empty(), enabled: false } }, now)
+    expect(result.allowances.en.reserved).toBe(5)
+    expect(result.allowances.en.planCap).toBe(40)
+    const completed = allocateLanguageDay(45, { en: { ...empty(), events: [start, finished('starter-session', 5)] }, ja: { ...empty(), enabled: false } }, now)
+    expect(completed.allowances.en.reserved).toBe(0)
+    expect(completed.allowances.en.planCap).toBe(40)
+  })
   it('allocates one budget, not a full budget per language', () => {
     const result = allocateLanguageDay(45, { en: empty(), ja: empty() }, now)
     expect(result.allowances.en.remaining + result.allowances.ja.remaining).toBe(45)

@@ -1,9 +1,12 @@
 import { z } from 'zod'
-import { OpenRouterProvider, type ProviderOptions } from '../ai/provider'
-import { defaultSettings, type Usage } from '../domain/types'
+import { checkedStarterAttempt, checkedStarterFeedback, OpenRouterProvider, type ProviderOptions } from '../ai/provider'
+import { defaultSettings, type StudyEvent, type Usage } from '../domain/types'
 import { authenticatedOwner, boundedBody, corsHeaders, digestRequest, GatewayError, jsonResponse, reserve, safeFailure, settle, type OwnerContext, type ServerEnvironment } from './gateway'
 import { currentTextPrice, quoteAudioDispatch, quoteSpeechDispatch, quoteTextDispatch } from './pricing'
 import { withDeadline } from '../ai/transport'
+import { eventSchema } from '../db/schema'
+import { starterAttemptFromEvent, type StarterAttempt } from '../domain/starter'
+import type { LearningLanguage } from '../domain/language'
 
 const text = z.string().trim().min(1).max(16000), targets = z.array(z.string().max(200)).max(20)
 // Keep absent language absent in legacy English request hashes/receipts.
@@ -19,13 +22,98 @@ export const aiRequestSchema = z.discriminatedUnion('action', [
   z.strictObject({ ...identity, action: z.literal('discover'), topic: z.string().min(1).max(500) }),
   z.strictObject({ ...identity, action: z.literal('transcribe'), audioBase64: z.string().min(1).max(14000000), mimeType: z.enum(['audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/flac', 'audio/mp4', 'audio/ogg', 'audio/webm', 'audio/aac']) }),
   z.strictObject({ ...identity, action: z.literal('synthesize'), text: z.string().trim().min(1).max(800) }),
+  z.strictObject({ ...identity, action: z.literal('starterFeedback'), attemptId: z.string().trim().min(1).max(1000), review: z.boolean().optional() }),
 ])
 export type AIRequest = z.infer<typeof aiRequestSchema>
 type Provider = Pick<OpenRouterProvider, 'evaluate' | 'chat' | 'lookup' | 'analyzeMaterial' | 'generateMaterial' | 'discover' | 'transcribe' | 'synthesize' | 'takeNotices' | 'testConnection'>
+  & Partial<Pick<OpenRouterProvider, 'starterFeedback'>>
 export interface AIHandlerOptions {
   env: ServerEnvironment;
   authenticate?: typeof authenticatedOwner;
   provider?: (options: ProviderOptions) => Provider;
+}
+
+type StarterFeedbackRound = 1 | 2
+const starterLogicalId = async (ownerId: string, language: LearningLanguage, id: string, round: StarterFeedbackRound) =>
+  `starter:${await digestRequest(JSON.stringify([ownerId, language, id, round]))}`
+const starterFingerprint = (attempt: StarterAttempt, language: LearningLanguage, round: StarterFeedbackRound) =>
+  digestRequest(JSON.stringify({ action: 'starterFeedback', learningLanguage: language, attempt, feedbackRevision: round }))
+
+/** Use the owner-scoped RLS client for both original answers and dispute evidence. */
+async function starterEvents(context: OwnerContext, id: string, language: LearningLanguage, signal: AbortSignal): Promise<StudyEvent[]> {
+  const table = language === 'en' ? 'sync_operations' : 'language_sync_operations'
+  const columns = language === 'ja' ? 'user_id,entity_id,kind,payload,learning_language' : 'user_id,entity_id,kind,payload'
+  let query = context.user.from(table).select(columns)
+    .eq('user_id', context.ownerId).eq('entity_type', 'events').eq('entity_id', id).eq('kind', 'put')
+  if (language === 'ja') query = query.eq('learning_language', 'ja')
+  const { data, error } = await query.limit(101).abortSignal(signal)
+  if (error) throw new GatewayError(503, 'ATTEMPT_LOOKUP', 'Could not verify your saved answer. Local teaching remains available.')
+  if (!data?.length) return []
+  if (data.length > 100) throw new GatewayError(409, 'ATTEMPT_CONFLICT', 'This saved answer needs reconciliation. Originals are retained.')
+  return data.map(raw => {
+    const parsed = z.object({ user_id: z.uuid(), entity_id: z.string(), kind: z.literal('put'),
+      payload: z.object({ record: z.unknown() }), learning_language: z.enum(['en', 'ja']).optional() }).safeParse(raw)
+    if (!parsed.success) throw new GatewayError(400, 'INPUT', 'This saved answer is not a valid classroom attempt.')
+    const row = parsed.data, event = eventSchema.safeParse(row.payload.record)
+    if (row.user_id !== context.ownerId || row.entity_id !== id || row.kind !== 'put' || language === 'ja' && row.learning_language !== 'ja'
+      || !event.success || event.data.id !== id) throw new GatewayError(400, 'INPUT', 'This saved answer is not a valid classroom attempt.')
+    return event.data
+  })
+}
+
+/** Resolve only the signed-in owner's immutable attempt, never client teaching criteria. */
+async function resolveStarterAttempt(context: OwnerContext, id: string, language: LearningLanguage, signal: AbortSignal): Promise<StarterAttempt> {
+  const events = await starterEvents(context, id, language, signal)
+  if (!events.length) throw new GatewayError(409, 'ATTEMPT_NOT_SYNCED', 'Sync this saved answer before requesting feedback. Local teaching remains available.')
+  let original: StarterAttempt | undefined, fingerprint: string | undefined
+  for (const event of events) {
+    if (!['text', 'objective'].includes(event.source)) throw new GatewayError(400, 'INPUT', 'This saved answer is not a valid classroom attempt.')
+    const candidate = starterAttemptFromEvent(event)
+    let checked: StarterAttempt
+    try {
+      if (!candidate) throw new Error('Not a starter attempt')
+      checked = checkedStarterAttempt(candidate, language).attempt
+    } catch { throw new GatewayError(400, 'INPUT', 'The saved answer does not match this course, stage or version.') }
+    const next = await digestRequest(JSON.stringify(checked))
+    if (fingerprint !== undefined && fingerprint !== next) throw new GatewayError(409, 'ATTEMPT_CONFLICT', 'Different originals were found for this answer. Reconcile them before feedback.')
+    original = checked; fingerprint = next
+  }
+  return original!
+}
+
+async function resolveStarterReview(context: OwnerContext, attempt: StarterAttempt, language: LearningLanguage, signal: AbortSignal) {
+  const disputes = await starterEvents(context, `${attempt.id}:disputed`, language, signal)
+  if (!disputes.length) throw new GatewayError(409, 'REVIEW_NOT_DISPUTED', 'Sync the dispute for this saved answer before requesting its one independent review.')
+  let fingerprint: string | undefined
+  for (const event of disputes) {
+    if (event.type !== 'STARTER_FEEDBACK_DISPUTED' || event.source !== 'self-report' || event.sessionId !== attempt.sessionId
+      || event.data?.attemptId !== attempt.id || event.data.lessonId !== attempt.lessonId || event.data.reason !== 'learner-disagrees'
+      || event.timestamp < attempt.timestamp || event.timestamp > Date.now())
+      throw new GatewayError(400, 'INPUT', 'The saved dispute does not match this original answer.')
+    const next = await digestRequest(JSON.stringify(event))
+    if (fingerprint !== undefined && fingerprint !== next) throw new GatewayError(409, 'ATTEMPT_CONFLICT', 'Different dispute originals need reconciliation before review.')
+    fingerprint = next
+  }
+  const firstId = await starterLogicalId(context.ownerId, language, attempt.id, 1)
+  const prior = await cached(context, firstId)
+  if (typeof prior !== 'object' || prior === null || !('value' in prior))
+    throw new GatewayError(409, 'REVIEW_NOT_READY', 'The first account feedback must be confirmed before independent review. Your original answer is retained.')
+  const { data, error } = await context.admin.from('service_usage').select('fingerprint')
+    .eq('user_id', context.ownerId).eq('request_id', firstId).abortSignal(signal).maybeSingle()
+  const recorded = z.object({ fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).safeParse(data)
+  if (error || !recorded.success) throw new GatewayError(503, 'REVIEW_NOT_READY', 'The first feedback identity could not be verified safely.')
+  if (recorded.data.fingerprint !== await starterFingerprint(attempt, language, 1))
+    throw new GatewayError(409, 'ATTEMPT_CONFLICT', 'The original answer differs from its first feedback. Reconcile it before review.')
+  let first
+  try { first = checkedStarterFeedback(prior.value, attempt, language) }
+  catch { throw new GatewayError(409, 'REVIEW_NOT_READY', 'The first feedback cannot be verified against this saved answer.') }
+  if (!first.model) throw new GatewayError(409, 'REVIEW_MODEL_UNVERIFIED', 'The first model provenance is unavailable; an independent model cannot be verified safely.')
+  return first
+}
+
+function reboundResult(value: unknown, requestId: string): unknown {
+  if (typeof value !== 'object' || value === null || !('delivery' in value)) return value
+  return { ...value, delivery: { requestId, cache: 'unconfirmed' } }
 }
 function binaryBlob(encoded: string, mime: string): Blob {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4) throw new GatewayError(400, 'INPUT', 'Invalid audio encoding.')
@@ -85,6 +173,14 @@ export function createAIHandler(options: AIHandlerOptions): (request: Request) =
       if (!parsed.success) throw new GatewayError(400, 'INPUT', 'Check the practice request and try again.')
       const input = parsed.data
       const learningLanguage = input.learningLanguage ?? 'en'
+      const starterAttempt = input.action === 'starterFeedback'
+        ? await resolveStarterAttempt(context, input.attemptId, learningLanguage, request.signal) : undefined
+      const review = input.action === 'starterFeedback' && input.review === true
+      const round: StarterFeedbackRound = review ? 2 : 1
+      const firstFeedback = review ? await resolveStarterReview(context, starterAttempt!, learningLanguage, request.signal) : undefined
+      const logicalId = starterAttempt
+        ? await starterLogicalId(context.ownerId, learningLanguage, starterAttempt.id, round) : input.requestId
+      const fingerprint = starterAttempt ? await starterFingerprint(starterAttempt, learningLanguage, round) : await digestRequest(JSON.stringify(input))
       // Supplemental synthetic practice only; this default does not certify a
       // General American reference or bypass the separately reviewed speech flow.
       const settings = { ...defaultSettings, fastModel: env('JOVE_FAST_MODEL') ?? 'google/gemini-3.8-flash', strongModel: env('JOVE_STRONG_MODEL') ?? 'anthropic/claude-opus-5',
@@ -95,6 +191,8 @@ export function createAIHandler(options: AIHandlerOptions): (request: Request) =
         settings.ttsModel = env('JOVE_JA_TTS_MODEL') ?? ''
         settings.voice = env('JOVE_JA_TTS_VOICE') ?? ''
       }
+      if (review && (!settings.fastModel || settings.fastModel === settings.strongModel || settings.fastModel === firstFeedback?.model))
+        throw new GatewayError(503, 'REVIEW_MODEL_CONFIG', 'Independent review needs a different configured fast model. No new model call was made.')
       if (input.action === 'status') {
         if (!env('OPENROUTER_API_KEY')) throw new GatewayError(503, 'CONFIGURATION', 'The account AI service needs server configuration.')
         const verifier = (options.provider ?? (value => new OpenRouterProvider(value)))({ learningLanguage, getKey: async () => env('OPENROUTER_API_KEY') ?? '', getSettings: () => settings })
@@ -102,19 +200,8 @@ export function createAIHandler(options: AIHandlerOptions): (request: Request) =
         return jsonResponse({ value: { label: 'Account AI connection verified' }, notices: [], usage: [] }, headers)
       }
       const model = input.action === 'transcribe' ? settings.sttModel : input.action === 'synthesize' ? settings.ttsModel
-        : ['chat', 'discover'].includes(input.action) ? settings.fastModel : settings.strongModel
+        : review || ['chat', 'discover'].includes(input.action) ? settings.fastModel : settings.strongModel
       if (!model || !env('OPENROUTER_API_KEY')) throw new GatewayError(503, 'CONFIGURATION', 'The account AI service needs server configuration. Your saved practice remains available.')
-      // This zero-price logical row only excludes duplicate dispatchers. Every
-      // actual upstream attempt reserves its own independently quoted budget.
-      const reservation = await reserve(context, input.requestId, await digestRequest(JSON.stringify(input)),
-        input.action === 'transcribe' ? 'stt' : input.action === 'synthesize' ? 'tts' : 'llm', 0)
-      if (!reservation.acquired) {
-        const prior = await cached(context, input.requestId)
-        if (prior !== undefined) return jsonResponse(prior, headers)
-        if (['failed', 'uncertain'].includes(reservation.status) || Date.now() - Date.parse(reservation.created_at) > 120000)
-          throw new GatewayError(409, 'REQUEST_UNCERTAIN', 'The earlier request has no confirmed result. A new attempt may incur another charge.')
-        throw new GatewayError(409, 'REQUEST_PENDING', 'This request is already recorded. Its result is not ready; your saved input can be retried as a new attempt.')
-      }
       const usage: Usage[] = []
       let activeDispatch: Awaited<ReturnType<typeof reserve>> | undefined
       let dispatchIndex = 0
@@ -124,11 +211,13 @@ export function createAIHandler(options: AIHandlerOptions): (request: Request) =
         getKey: async () => env('OPENROUTER_API_KEY') ?? '', getSettings: () => settings,
         beforeDispatch: async (dispatch, signal) => {
           try {
+          if (review && dispatch.model !== settings.fastModel)
+            throw new GatewayError(503, 'REVIEW_MODEL_CONFIG', 'Independent review cannot fall back to the first model.')
           const quote = dispatch.path === '/chat/completions'
             ? quoteTextDispatch(dispatch.body, await currentTextPrice(dispatch.model, signal))
             : dispatch.path === '/audio/speech' ? await quoteSpeechDispatch(dispatch.body, env, signal)
             : quoteAudioDispatch(dispatch.path, dispatch.body, env)
-          activeDispatch = await reserve(context, `${input.requestId}:${++dispatchIndex}`, await digestRequest(JSON.stringify(quote.body)),
+          activeDispatch = await reserve(context, `${logicalId}:${++dispatchIndex}`, await digestRequest(JSON.stringify(quote.body)),
             dispatch.path === '/audio/transcriptions' ? 'stt' : dispatch.path === '/audio/speech' ? 'tts' : 'llm', quote.estimateUsd)
           if (!activeDispatch.acquired) throw new GatewayError(409, 'REQUEST_PENDING', 'This service attempt is already recorded.')
           return quote.body
@@ -147,9 +236,22 @@ export function createAIHandler(options: AIHandlerOptions): (request: Request) =
           activeDispatch = undefined
         },
       })
+      if (input.action === 'starterFeedback' && !provider.starterFeedback)
+        throw new GatewayError(503, 'CONFIGURATION', 'The classroom feedback adapter is not configured. Local teaching remains available.')
+      // This zero-price logical row only excludes duplicate dispatchers. Every
+      // actual upstream attempt reserves its own independently quoted budget.
+      const reservation = await reserve(context, logicalId, fingerprint,
+        input.action === 'transcribe' ? 'stt' : input.action === 'synthesize' ? 'tts' : 'llm', 0)
+      if (!reservation.acquired) {
+        const prior = await cached(context, logicalId)
+        if (prior !== undefined) return jsonResponse(input.action === 'starterFeedback' ? reboundResult(prior, input.requestId) : prior, headers)
+        if (['failed', 'uncertain'].includes(reservation.status) || Date.now() - Date.parse(reservation.created_at) > 120000)
+          throw new GatewayError(409, 'REQUEST_UNCERTAIN', 'The earlier request has no confirmed result. A new attempt may incur another charge.')
+        throw new GatewayError(409, 'REQUEST_PENDING', 'This request is already recorded. Its result is not ready; your saved input can be retried as a new attempt.')
+      }
       const finish = async (value: unknown) => {
         const result = { value, notices: provider.takeNotices(), usage }
-        const stored = await persistResult(context, input.requestId, result)
+        const stored = await persistResult(context, logicalId, result)
         try {
           await withDeadline(undefined, 2000, () => settle(context, reservation.id,
             { status: stored ? 'completed' : 'uncertain', actualUsd: 0, units: 0, unitName: 'logical-request' }))
@@ -193,6 +295,14 @@ export function createAIHandler(options: AIHandlerOptions): (request: Request) =
           case 'discover': value = await provider.discover(input.topic, request.signal); break
           case 'transcribe': value = await provider.transcribe(binaryBlob(input.audioBase64, input.mimeType), request.signal); break
           case 'synthesize': value = await binaryResult(await provider.synthesize(input.text, request.signal)); break
+          case 'starterFeedback': {
+            if (!provider.starterFeedback) throw new GatewayError(503, 'CONFIGURATION', 'The classroom feedback adapter is not configured. Local teaching remains available.')
+            const feedback = checkedStarterFeedback(await provider.starterFeedback(starterAttempt!, request.signal, { review }), starterAttempt!, learningLanguage)
+            if (review && (!feedback.model || feedback.model === firstFeedback?.model || feedback.model === settings.strongModel))
+              throw new GatewayError(503, 'REVIEW_MODEL_UNVERIFIED', 'The returned model cannot establish an independent review. Both the original answer and incurred usage are retained.')
+            value = feedback
+            break
+          }
         }
         return jsonResponse(await finish(value), headers)
       } catch (error) { await failed(); throw dispatchFailure ?? error }

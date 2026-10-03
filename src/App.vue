@@ -80,8 +80,8 @@ const japaneseNav = [
   { path: '/ja/progress', label: '学习进度', icon: 'progress', description: '查看日语真实练习记录，不把完成数当能力' },
 ];
 const page = computed(() => route.path.slice(1) || "today");
-const inJapanese = computed(() => route.path === '/ja' || route.path.startsWith('/ja/'));
-const japaneseSection = computed(() => ({ '/ja/talk': '/ja/practice', '/ja/read': '/ja/literacy', '/ja/books': '/ja/literacy', '/ja/review': '/ja/reviews' } as Record<string, string>)[route.path] ?? route.path);
+const inJapanese = computed(() => route.path === '/ja' || route.path.startsWith('/ja/') || route.path === '/course/ja');
+const japaneseSection = computed(() => ({ '/course/ja': '/ja', '/ja/talk': '/ja/practice', '/ja/read': '/ja/literacy', '/ja/books': '/ja/literacy', '/ja/review': '/ja/reviews' } as Record<string, string>)[route.path] ?? route.path);
 const pageLabel = computed(() => inJapanese.value ? japaneseNav.find(item => item.path === route.path)?.label
   ?? ({ '/ja/talk': '日语对话', '/ja/read': '假名与阅读', '/ja/books': '原版多读', '/ja/review': '间隔复习' } as Record<string, string>)[route.path] ?? '日语学习'
   : nav.find(item => item.label.toLowerCase() === page.value)?.zh
@@ -284,7 +284,7 @@ function focusPractice() {
           <Icon name="close" />
         </button>
       </div>
-      <main id="main" tabindex="-1" :lang="inJapanese ? 'zh-CN' : 'en'"><RouterView /></main>
+      <main id="main" tabindex="-1" :lang="inJapanese || route.path.startsWith('/course/') ? 'zh-CN' : 'en'"><RouterView v-slot="{ Component }"><component :is="Component" :key="route.path.startsWith('/course/') ? route.path : undefined" /></RouterView></main>
       <footer class="app-footer" lang="zh-CN">
         <span>小步练习，用在真实生活。</span
         ><span>{{

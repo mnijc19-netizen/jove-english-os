@@ -15,6 +15,7 @@ import Recorder from "../components/Recorder.vue";
 import AudioPlayer from "../components/AudioPlayer.vue";
 import Icon from "../components/Icon.vue";
 import SavedRecording from "../components/SavedRecording.vue";
+import StarterCourseEntry from '../components/StarterCourseEntry.vue';
 import ReadingPractice from "../components/ReadingPractice.vue";
 import { materialSchema } from "../db/schema";
 import { assessmentEvaluator, comparableObservation, planLongitudinal, readingRubric, selectReadingAssessment, type ReadingSavedEvidence } from "../domain/longitudinal";
@@ -602,6 +603,7 @@ onMounted(() => {
 </script>
 <template>
   <div class="page">
+    <StarterCourseEntry language="en" view="progress" />
     <div class="page-heading">
       <div>
         <p class="eyebrow">NOTICE WHAT’S BECOMING NATURAL</p>

@@ -105,6 +105,8 @@ beforeAll(() => {
     '../components/Icon.vue': { default: { setup: () => () => Vue.h('i') } },
     '../components/CloudAccount.vue': { default: { setup: () => () => Vue.h('section', 'Learning account') } },
     '../components/AccountUsage.vue': { default: { setup: () => () => Vue.h('section', 'Account service preferences') } },
+    // The language-time child is covered separately; keep this harness on Settings restore/reset IO.
+    '../components/LanguageTimePreference.vue': { default: { setup: () => () => Vue.h('section', '两门语言怎么分配时间') } },
     '../components/ReleaseStatus.vue': { default: { setup: () => () => Vue.h('section', 'Website release status') } },
   }
   const exports: { default?: Vue.Component } = {}

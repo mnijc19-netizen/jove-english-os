@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import StarterCourseEntry from '../components/StarterCourseEntry.vue'
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from 'vue-router'
 import { db as english, createLanguageDatabase } from '../db/db'
@@ -27,7 +28,7 @@ const startingPoint = shallowRef<Awaited<ReturnType<typeof learning.startingPoin
 const completedIds = shallowRef(new Set<string>())
 let disposed = false, generation = 0, allowedNavigation = ''
 let pending: Promise<void> = Promise.resolve()
-const practiceKinds = new Set(['japanese-practice', 'japanese-dialogue', 'japanese-reading', 'japanese-extensive', 'japanese-review'])
+const practiceKinds = new Set(['starter-classroom', 'japanese-practice', 'japanese-dialogue', 'japanese-reading', 'japanese-extensive', 'japanese-review'])
 const firstTask = computed(() => plan.value?.tasks.find(task => !task.done && !task.optional))
 const assigned = computed(() => (plan.value?.tasks ?? []).filter(task => !task.done && !task.optional && matchesTask(task)))
 const unfinished = computed(() => sessions.value.filter(session => !session.completedAt && session.stage !== 'unavailable' && matchesSession(session)))
@@ -39,7 +40,7 @@ const categories = [
   { id: 'short', label: '原创短篇' }, { id: 'books', label: '原版多读' },
 ]
 const catalog = computed(() => materials.value.filter(material => materialCategory.value === 'foundation' ? material.id.startsWith('ja-kana-')
-  : materialCategory.value === 'course' ? material.id.startsWith('ja-irodori-')
+  : materialCategory.value === 'course' ? material.id.startsWith('ja-irodori-') || material.id.startsWith('ja-starter-')
     : materialCategory.value === 'short' ? material.id.startsWith('ja-reading-') : material.id.startsWith('ja-tadoku-')))
 const records = computed(() => sessions.value.slice(0, 30))
 function matchesTask(task: PlanTask) {
@@ -47,12 +48,12 @@ function matchesTask(task: PlanTask) {
     : props.mode === 'literacy' ? task.kind === 'learn' : props.mode === 'reviews' ? task.kind === 'review' : true
 }
 function matchesSession(session: StudySession) {
-  return props.mode === 'practice' ? ['japanese-practice', 'japanese-dialogue'].includes(session.kind)
+  return props.mode === 'practice' ? ['starter-classroom', 'japanese-practice', 'japanese-dialogue'].includes(session.kind)
     : props.mode === 'literacy' ? ['japanese-reading', 'japanese-extensive'].includes(session.kind)
-      : props.mode === 'reviews' ? session.kind === 'japanese-review' : true
+      : props.mode === 'reviews' ? session.kind === 'japanese-review' || session.kind === 'starter-classroom' && session.draft.purpose === 'review' : true
 }
 function sessionPath(session: StudySession) {
-  return session.kind === 'japanese-dialogue' ? '/ja/talk' : session.kind === 'japanese-reading' ? '/ja/read'
+  return session.kind === 'starter-classroom' ? '/course/ja' : session.kind === 'japanese-dialogue' ? '/ja/talk' : session.kind === 'japanese-reading' ? '/ja/read'
     : session.kind === 'japanese-extensive' ? '/ja/books' : session.kind === 'japanese-review' ? '/ja/review' : '/ja'
 }
 function sessionDestination(session: StudySession) { return { path: sessionPath(session), query: { session: session.id } } }
@@ -62,7 +63,7 @@ function sessionLabel(session: StudySession) {
 }
 function activityLabel(session: StudySession) {
   return session.materialId?.startsWith('ja-kana-') ? '假名基础'
-    : ({ 'japanese-practice': '真人听力与表达', 'japanese-dialogue': '情境对话', 'japanese-reading': '短篇理解与读法',
+    : ({ 'starter-classroom': '示范、帮助与表达小课', 'japanese-practice': '真人听力与表达', 'japanese-dialogue': '情境对话', 'japanese-reading': '短篇理解与读法',
       'japanese-extensive': '原版多读（自报）', 'japanese-review': '间隔复习' } as Record<string, string>)[session.kind] ?? '日语练习'
 }
 function sourceLink(material: Material) {
@@ -78,6 +79,7 @@ function sourceLink(material: Material) {
 function materialDetail(material: Material) {
   const lesson = japaneseLessons.find(lesson => lesson.id === material.id)
   return lesson ? `${japaneseCourseNames[lesson.course]} · ${lesson.canDo}`
+    : material.id.startsWith('ja-starter-') ? '先听补充示范与中文讲解，再有帮助地表达；尚未测到的能力保持未知。'
     : material.externalReading ? `原站分级 ${material.externalReading.level} · 先选轻松读懂的内容，不强制写读后答案。`
       : material.id.startsWith('ja-kana-') ? '本站原创分组；真人读音在原站。先学字形与声音，不把看懂罗马字当作听懂日语。'
         : '本站原创日语短篇；认识基础假名后逐步安排，不是原版读物的改编测试。'
@@ -94,7 +96,7 @@ async function refresh() {
   if (disposed || epoch !== generation) return
   plan.value = nextPlan; startingPoint.value = point
   materials.value = savedMaterials.filter(material => material.language === 'ja' && material.approved)
-  sessions.value = savedSessions.filter(session => practiceKinds.has(session.kind)).sort((a, b) => (b.completedAt ?? b.startedAt) - (a.completedAt ?? a.startedAt))
+  sessions.value = savedSessions.filter(session => practiceKinds.has(session.kind) && !session.id.startsWith('reading-conflict:')).sort((a, b) => (b.completedAt ?? b.startedAt) - (a.completedAt ?? a.startedAt))
   completedIds.value = new Set(events.filter(event => event.type === 'TASK_COMPLETED' && event.sessionId).map(event => event.sessionId!))
   ready.value = true
 }
@@ -171,12 +173,13 @@ onBeforeUnmount(() => { disposed = true; generation++; void pending.finally(() =
           <label for="japanese-material-category">查看哪类材料</label><select id="japanese-material-category" v-model="materialCategory"><option v-for="category in categories" :key="category.id" :value="category.id">{{ category.label }}</option></select>
           <p role="status">{{ catalog.length }} 项已收录材料 · 不代表已经学过</p>
           <p v-if="!catalog.length">这类材料暂未收录，已有练习和今天的安排仍保留。</p>
-          <ul v-else class="workspace-list"><li v-for="material in catalog" :key="material.id"><div><strong :lang="material.externalReading ? 'ja' : 'zh-CN'">{{ material.title }}</strong><p>{{ materialDetail(material) }}</p><small>{{ material.sourceLabel }} · {{ material.id.startsWith('ja-kana-') || material.id.startsWith('ja-reading-') ? '本站原创练习' : '原站资源，未复制音视频' }}</small></div><a v-if="sourceLink(material)" :href="sourceLink(material)" target="_blank" rel="noopener noreferrer" class="button secondary">查看原站资源 ↗</a></li></ul>
+          <ul v-else class="workspace-list"><li v-for="material in catalog" :key="material.id"><div><strong :lang="material.externalReading ? 'ja' : 'zh-CN'">{{ material.title }}</strong><p>{{ materialDetail(material) }}</p><small>{{ material.sourceLabel }} · {{ material.id.startsWith('ja-kana-') || material.id.startsWith('ja-reading-') || material.id.startsWith('ja-starter-') ? '本站原创练习' : '原站资源，未复制音视频' }}</small></div><RouterLink v-if="material.id.startsWith('ja-starter-')" :to="{ path: '/course/ja', query: { lesson: material.id } }" class="button secondary">查看课堂</RouterLink><a v-else-if="sourceLink(material)" :href="sourceLink(material)" target="_blank" rel="noopener noreferrer" class="button secondary">查看原站资源 ↗</a></li></ul>
         </section>
         <section class="panel workspace-section"><h2>原声与阅读来源</h2><p>假名真人读音：MARUGOTO Plus；生活对话：いろどり；原版多读：Tadoku。音视频留在原站，不大量占用网站存储，也不复制或改编原站读物做题。</p><div class="source-links"><a :href="kanaSource.hiragana" target="_blank" rel="noopener noreferrer">假名原声 ↗</a><a :href="japaneseSource.credits" target="_blank" rel="noopener noreferrer">生活课程与来源说明 ↗</a><a :href="TADOKU_GUIDE" target="_blank" rel="noopener noreferrer">原版多读指南 ↗</a></div></section>
       </template>
 
       <template v-else-if="mode === 'progress'">
+        <StarterCourseEntry language="ja" view="progress" />
         <section class="panel workspace-section"><h2>日语已保存的学习活动</h2><dl class="workspace-counts"><div><dt>已保存练习</dt><dd>{{ sessions.length }}</dd></div><div><dt>已完成任务记录</dt><dd>{{ finished.length }}</dd></div><div><dt>可继续的练习</dt><dd>{{ allUnfinished.length }}</dd></div></dl><p>这些是实际保存的活动与完成事件，不是能力分数。假名字形、理解、表达和发音不能混为一谈；尚未测到的能力仍未知。</p></section>
         <section class="panel workspace-section"><h2>最近的日语练习</h2><p v-if="!records.length">还没有保存的日语练习。先从今日安排开始，学完或中途保存后，这里会显示真实记录。</p><ul v-else class="workspace-list"><li v-for="session in records" :key="session.id"><div><strong>{{ sessionLabel(session) }}</strong><small>{{ activityLabel(session) }} · {{ dateLabel(session.completedAt ?? session.startedAt) }} · {{ completedIds.has(session.id) ? '已完成任务，非掌握认证' : session.completedAt || session.stage === 'unavailable' ? '已结束或暂停，非完成证明' : '进行中，草稿保留' }}</small></div><RouterLink v-if="!session.completedAt && session.stage !== 'unavailable'" :to="sessionDestination(session)" class="button secondary">继续练习</RouterLink><RouterLink v-else-if="completedIds.has(session.id)" :to="sessionDestination(session)" class="text-button">查看已保存练习</RouterLink></li></ul><p v-if="sessions.length > records.length">这里只显示最近 {{ records.length }} 次；历史记录没有被删除。</p></section>
       </template>

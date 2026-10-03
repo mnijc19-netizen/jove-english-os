@@ -10,6 +10,7 @@ import { useRequest } from "../composables/useRequest";
 import Icon from "../components/Icon.vue";
 import CloudAccount from "../components/CloudAccount.vue";
 import AccountUsage from "../components/AccountUsage.vue";
+import LanguageTimePreference from '../components/LanguageTimePreference.vue';
 import ReleaseStatus from "../components/ReleaseStatus.vue";
 import { useCloud } from "../stores/cloud";
 import { useJapaneseSpace } from "../stores/japanese-space";
@@ -232,6 +233,7 @@ onMounted(storageStatus);
       <Icon name="check" :size="17" />{{ message }}
     </p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <LanguageTimePreference v-if="japaneseEnabled" />
     <button v-if="busy" class="text-button" @click="cancel">
       Cancel current request
     </button>

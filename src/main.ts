@@ -10,6 +10,7 @@ const router = createRouter({
   routes: [
     // Production stays held until explicitly enabled after its acceptance gates.
     ...(japaneseEnabled ? [
+      { path: '/course/ja', component: () => import('./pages/StarterClassroom.vue'), props: { language: 'ja' } },
       { path: '/ja', component: () => import('./pages/Japanese.vue') },
       { path: '/ja/review', component: () => import('./pages/JapaneseReview.vue') },
       { path: '/ja/talk', component: () => import('./pages/JapaneseDialogue.vue') },
@@ -20,6 +21,7 @@ const router = createRouter({
       })),
     ] : []),
     { path: "/", redirect: "/today" },
+    { path: '/course/en', component: () => import('./pages/StarterClassroom.vue'), props: { language: 'en' } },
     { path: "/today", component: () => import("./pages/Today.vue") },
     { path: "/onboarding", component: () => import("./pages/Onboarding.vue") },
     { path: "/listen", component: () => import("./pages/Listen.vue") },

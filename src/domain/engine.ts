@@ -184,7 +184,9 @@ export function makePlan(profile: Profile, skills: Skill[], cards: ReviewCard[],
     const exposure = m.externalStudy ? 0 : recent.filter(e => e.data?.materialId === m.id).length
     return interest - Math.abs(m.difficulty - targetDifficulty) * 4 - exposure * 0.5
   }
-  const approved = materials.filter(m => m.approved)
+  // Versioned classroom packages have their own staged answer contract. Do not
+  // silently schedule their recognition IDs as generic comprehension answers.
+  const approved = materials.filter(m => m.approved && !/^(en|ja)-starter-\d+$/u.test(m.id))
   const unavailable = unavailableExternalIds(ordered, now)
   const availableMaterials = approved.filter(m => !m.externalReading && externalCatalogFresh(m, now) && !(m.externalStudy && unavailable.has(m.id)))
   const approachable = availableMaterials.filter(m => m.difficulty <= Math.min(1, targetDifficulty + 0.25))

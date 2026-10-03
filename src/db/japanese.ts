@@ -87,9 +87,9 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
   }
   async function startingPoint(now = Date.now()) {
     await checkOwner()
-    const [diagnostic, beginner] = await Promise.all([database.assessments.get(diagnosticId), database.assessments.get(japaneseBeginnerStartId)])
+    const [diagnostic, beginner, sessions] = await Promise.all([database.assessments.get(diagnosticId), database.assessments.get(japaneseBeginnerStartId), database.sessions.toArray()])
     await checkOwner()
-    return japaneseStartingPoint(diagnostic, beginner, now)
+    return japaneseStartingPoint(diagnostic, beginner, now, sessions)
   }
   async function practiceGuide(sessionId: string) {
     await checkOwner()
@@ -141,9 +141,10 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
   }
   async function assignCourse(session: StudySession, now: number) {
     const assignment = japaneseCoursePractice(session.materialId!, await database.events.toArray(), now)
-    const placement = japaneseStartingPoint(await database.assessments.get(diagnosticId), await database.assessments.get(japaneseBeginnerStartId), now)
-    const basics = japaneseReadingHistory(await database.sessions.toArray(), now, japaneseKana)
-    const beginnerScaffold = placement?.basis === 'self-report' && new Set(basics.filter(h => h.reading.kana?.script === 'hiragana'
+    const sessions = await database.sessions.toArray()
+    const placement = japaneseStartingPoint(await database.assessments.get(diagnosticId), await database.assessments.get(japaneseBeginnerStartId), now, sessions)
+    const basics = japaneseReadingHistory(sessions, now, japaneseKana)
+    const beginnerScaffold = placement && placement.basis !== 'diagnostic' && new Set(basics.filter(h => h.reading.kana?.script === 'hiragana'
       && /^ja-kana-hiragana-([1-9]|10)$/u.test(h.reading.id)).map(h => h.reading.id)).size < 10
     await repository.recordEvent({ id: `${session.id}:course-assignment`, type: 'JAPANESE_COURSE_ASSIGNED', source: 'objective',
       timestamp: now, sessionId: session.id, contextId: assignment.contextId,
@@ -172,14 +173,14 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     return database.transaction('rw', [database.plans, database.events, database.materials, database.assessments, database.cards, database.chunks, database.sessions, database.syncMeta], async () => {
       await fence()
       const diagnostic = await database.assessments.get(diagnosticId)
-      const placement = japaneseStartingPoint(diagnostic, await database.assessments.get(japaneseBeginnerStartId), now)
+      const sessions = await database.sessions.toArray()
+      const placement = japaneseStartingPoint(diagnostic, await database.assessments.get(japaneseBeginnerStartId), now, sessions)
       if (!placement) return null
       const date = new Date(now).toLocaleDateString('en-CA'), savedPlan = await database.plans.get(date)
-      const events = await database.events.toArray(), materials = await database.materials.toArray()
-      const sessions = await database.sessions.toArray()
+      const events = await database.events.toArray(), materials = (await database.materials.toArray()).filter(material => !/^ja-starter-\d+$/u.test(material.id))
       // A declared beginner gets actual instruction before a course requiring
       // Japanese script. Repack only untouched assignments, never saved work.
-      const beginner = placement.basis === 'self-report'
+      const beginner = placement.basis !== 'diagnostic'
       const foundationHistory = japaneseReadingHistory(sessions, now, japaneseKana)
       const needsIntroduction = beginner && !foundationHistory.some(h => h.reading.id === 'ja-kana-hiragana-1')
       const started = (task: DailyPlan['tasks'][number]) => events.some(event => event.type === 'TASK_STARTED' && event.data?.taskId === task.id)
@@ -204,7 +205,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       }
       // Only replace an untouched initial plan. Started/completed/optional work,
       // drafts and recordings remain bound to their original tasks.
-      const replaceInitialPlan = placement.basis === 'self-report' && savedPlan && savedPlan.createdAt < placement.confirmedAt
+      const replaceInitialPlan = beginner && savedPlan && savedPlan.createdAt < placement.confirmedAt
         && savedPlan.tasks.every(task => !task.done && !task.optional
           && !events.some(event => event.type === 'TASK_STARTED' && event.data?.taskId === task.id)
           && !sessions.some(session => session.draft.taskId === task.id))

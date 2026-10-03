@@ -234,7 +234,7 @@ function mergePlanAssignments(plan: DailyPlan, history: StoredOperation[], evide
   return { ...plan, tasks: result, minutes: result.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0) }
 }
 
-const readingKind = (kind: unknown) => kind === 'reading' || kind === 'reading-recovery' || kind === 'japanese-reading' || kind === 'japanese-extensive' || kind === 'english-reading'
+const readingKind = (kind: unknown) => kind === 'reading' || kind === 'reading-recovery' || kind === 'japanese-reading' || kind === 'japanese-extensive' || kind === 'english-reading' || kind === 'starter-classroom'
 const committedReading = (row: RecordValue) => row.kind === 'japanese-reading'
   ? typeof (row.draft as Record<string, unknown>).lockedAt === 'number' : row.kind === 'japanese-extensive'
     ? ['completed', 'unavailable'].includes(String(row.stage)) && typeof (row.draft as Record<string, unknown>).savedAt === 'number'
@@ -311,11 +311,106 @@ function includesReadingWork(earlier: RecordValue, later: RecordValue): boolean 
   return before.every((value, i) => Number(value) <= Number(after[i] ?? 0))
 }
 
+/** Compare actual classroom work, not autosave counters, device availability or
+ * generated recovery indexes. The selected/staged records remain full clones. */
+function starterWorkSnapshot(row: RecordValue): RecordValue {
+  const copy = readingSnapshot(row), draft = copy.draft as Record<string, unknown>
+  copy.id = ''
+  for (const key of ['revision', 'activeMs', 'syncRecovery', 'audioUnavailable', 'missingAudioIds']) delete draft[key]
+  return copy
+}
+
+/** Classroom stages form one coherent snapshot. Recovery copies reuse the
+ * existing readingCopies channel but keep their original classroom kind.
+ * Version-bound IDs cannot overwrite a previously propagated frontier. */
+async function mergeStarterSession(puts: StoredOperation[], all: StoredOperation[]) {
+  const completed = puts.filter(op => op.payload.record!.stage === 'done' && typeof op.payload.record!.completedAt === 'number')
+  const attested = completed.find(op => all.some(candidate => {
+    const row = op.payload.record!, draft = row.draft as Record<string, unknown>
+    const event = candidate.payload.record, data = event?.data as Record<string, unknown> | undefined
+    return candidate.entityType === 'events' && candidate.kind === 'put' && event?.type === 'TASK_COMPLETED'
+      && event.source === 'objective' && event.sessionId === row.id && event.timestamp === row.completedAt
+      && data?.taskId === (draft.workloadTaskId ?? row.id)
+      && data.kind === 'starter-classroom' && data.lessonId === row.materialId && data.lessonVersion === draft.lessonVersion
+  }))
+  const selected = attested ?? completed[0] ?? puts.at(-1)!
+  const primary = readingSnapshot(selected.payload.record!)
+  const copies: RecordValue[] = [], ids = new Set<string>(), conflicted = new Set<string>()
+  // Generated copies are read-only frontiers. Explicit recovery starts a NEW
+  // ordinary session ID; synchronizing a copy must never fork a copy of it.
+  if (primary.id.startsWith('reading-conflict:')) return { primary, copies, conflicted: [], inactive: [] }
+  const work = (row: RecordValue) => canonical(starterWorkSnapshot(row))
+  const primaryWork = work(primary), origins = new Map<string, string>(), frontiers = new Map<string, StoredOperation>()
+  const candidates = new Map<string, StoredOperation>()
+  const hasWork = (row: RecordValue) => {
+    const draft = row.draft as Record<string, unknown>
+    return row.stage !== 'teach' && (draft.purpose !== 'review' || !!draft.helped || !!draft.romaji)
+      || !!row.completedAt || !!draft.response || !!draft.audioId || !!draft.lastAttemptId
+      || !!Number(draft.helpCount) || Array.isArray(draft.audioIds) && draft.audioIds.length > 0
+  }
+  const identities = new Map<string, Promise<{ id: string; sourceVersion: string }>>()
+  const identity = (row: RecordValue, device: string) => {
+    const cacheKey = canonical([device, work(row)]), previous = identities.get(cacheKey)
+    if (previous) return previous
+    const value = (async () => {
+      const sourceVersion = await eventOccurrenceKey(starterWorkSnapshot(row))
+      const key = await eventOccurrenceKey({ id: primary.id, device, sourceVersion, purpose: 'starter-conflict-v1' })
+      return { id: `reading-conflict:${key}`, sourceVersion }
+    })()
+    identities.set(cacheKey, value); return value
+  }
+  for (const op of puts) {
+    const key = work(op.payload.record!), origin = origins.get(key)
+    if (hasWork(op.payload.record!)) candidates.set(canonical([op.deviceId, key]), op)
+    // A device saving the already-projected winner does not erase its own
+    // preceding unsent branch or create a new author of the inherited answer.
+    if (origin !== undefined && origin !== op.deviceId) continue
+    origins.set(key, op.deviceId)
+    frontiers.set(op.deviceId, op)
+  }
+  const explicit = new Map<string, StoredOperation>()
+  for (const op of all) if (op.entityType === 'sessions') {
+    const prior = explicit.get(op.entityId)
+    if (!prior || compare(prior, op) < 0) explicit.set(op.entityId, op)
+  }
+  for (const [device, op] of frontiers) {
+    const row = readingSnapshot(op.payload.record!), draft = row.draft as Record<string, unknown>
+    if (work(row) === primaryWork) continue
+    if (!hasWork(row)) continue
+    const { id, sourceVersion } = await identity(row, device), existing = explicit.get(id)
+    if (existing?.kind === 'delete') continue // deliberate copy deletion is not undone by old source operations
+    const root = (primary.draft as Record<string, unknown>).syncRecovery as Record<string, unknown> | undefined
+    if (!existing) copies.push({ ...row, id, draft: { ...draft, syncRecovery: {
+      sourceSessionId: primary.id, rootSessionId: root?.rootSessionId ?? primary.id, sourceDeviceId: device, sourceVersion,
+    } } })
+    ids.add(id); conflicted.add(op.id)
+  }
+  // Preserve explicitly propagated older frontiers as well as the current
+  // per-device frontier. Never impose a silent recovery/recording cap here.
+  for (const op of explicit.values()) {
+    if (op.kind !== 'put' || !op.entityId.startsWith('reading-conflict:') || op.payload.record?.kind !== 'starter-classroom') continue
+    const recovery = (op.payload.record.draft as Record<string, unknown>).syncRecovery as Record<string, unknown> | undefined
+    if (recovery?.sourceSessionId === primary.id) { ids.add(op.entityId); conflicted.add(op.id) }
+  }
+  if (ids.size) (primary.draft as Record<string, unknown>).syncReadingConflicts = [...ids].sort()
+  // Remove only superseded generated seeds, never an explicitly persisted copy.
+  const advertised = new Set(puts.flatMap(op => {
+    const index = (op.payload.record!.draft as Record<string, unknown>).syncReadingConflicts
+    return Array.isArray(index) ? index.filter((id): id is string => typeof id === 'string' && id.startsWith('reading-conflict:')) : []
+  }))
+  // An intermediate download page can generate a frontier that was never
+  // advertised by a subsequent client put. Derive those possible seeds too so
+  // paged replicas converge to the same records as a single complete fold.
+  for (const op of candidates.values()) advertised.add((await identity(op.payload.record!, op.deviceId)).id)
+  return { primary, copies, conflicted: [...conflicted], inactive: [...advertised].filter(id => !ids.has(id) && !explicit.has(id)) }
+}
+
 /** A committed reading is one attempt, not an independently mergeable saved
  * marker and response/audio leaves. Conflict frontiers are bounded per device;
  * continuing one creates a separate, explicitly chosen recovery session. */
 async function mergeReadingSession(history: StoredOperation[], all: StoredOperation[]) {
   const puts = history.filter(op => op.kind === 'put' && readingKind(op.payload.record?.kind))
+  if (puts[0]?.payload.record?.kind === 'starter-classroom') return mergeStarterSession(puts, all)
   const attested = (op: StoredOperation) => {
     const row = op.payload.record!, draft = row.draft as Record<string, unknown>
     if (row.kind === 'english-reading') {

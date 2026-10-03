@@ -9,6 +9,7 @@ import { japaneseDevelopment } from '../release-flags'
 import { readLanguageDay } from '../db/language-day'
 import type { Assessment, AudioAsset, DailyPlan, StudySession } from '../domain/types'
 import Recorder from '../components/Recorder.vue'
+import StarterCourseEntry from '../components/StarterCourseEntry.vue'
 import JapaneseCoach from '../components/JapaneseCoach.vue'
 import { useRecordingUrl } from '../composables/useRecordingUrl'
 import { useJapaneseSpace } from '../stores/japanese-space'
@@ -239,8 +240,10 @@ onBeforeUnmount(() => {
     <p v-if="!ready" role="status">正在打开独立的日语学习记录…</p>
     <template v-else>
       <p class="help-text" role="status">{{ notice }}</p>
+      <StarterCourseEntry v-if="!session" language="ja" />
       <div v-if="!session" class="section">
         <p v-if="placement?.basis === 'self-report'" class="help-text" data-testid="japanese-starting-point">起点：本人确认零基础。先从五个基础假名的字形与声音教学开始，不要求先读懂或写出日语。之后把少量假名学习和有提示的生活表达穿插起来；旧诊断不决定起点，听说能力仍待实际观察。</p>
+        <p v-else-if="placement?.basis === 'course-entry'" class="help-text">已从示范小课起步。后续安排会保留中文、假名和声音帮助；这只是教学路径，不是已会读写或听说的判定。</p>
         <template v-else>
           <button class="text-button" :disabled="busy || navigating" @click="confirmBeginner = !confirmBeginner">{{ placement ? '起点填错了？按零基础重新起步' : '我是零基础，不猜题直接起步' }}</button>
           <div v-if="confirmBeginner" class="panel">
@@ -250,7 +253,8 @@ onBeforeUnmount(() => {
           </div>
         </template>
       </div>
-      <section v-if="!placement" class="panel ja-panel">
+      <details v-if="!placement && !session" class="panel ja-panel"><summary>已有一点日语基础？可选做起点了解</summary>
+      <section>
         <h2>先了解你，不用提前准备</h2>
         <p>六个小问题，只调整假名提示和第一段练习。不知道就选“跳过”；这不是听说能力评分。</p>
         <form @submit.prevent="act(finishDiagnostic)">
@@ -263,7 +267,8 @@ onBeforeUnmount(() => {
           <button class="button primary" :disabled="busy || navigating || answerCount !== japanesePlacementItems.length">保存诊断，安排今天</button>
         </form>
       </section>
-      <template v-else-if="!session">
+      </details>
+      <template v-if="placement && !session">
         <section class="panel ja-panel">
           <p v-if="allowance" class="help-text">英日共用每天 {{ allowance.totalMinutes }} 分钟 · 日语当前安排 {{ allowance.allowances.ja.remaining }} 分钟。这是任务预算，不是计时成绩。</p>
           <h2>{{ task ? `今日练习：${task.title}` : '暂时没有新的必做任务' }}</h2>
@@ -282,7 +287,7 @@ onBeforeUnmount(() => {
         <section v-if="unfinished.length" class="section"><h2>接着上次的练习</h2><p v-for="saved in unfinished" :key="saved.id"><RouterLink :to="{ path: sessionPath(saved), query: { session: saved.id } }">{{ saved.kind === 'japanese-review' ? '日语延迟复习' : saved.kind === 'japanese-dialogue' ? '日语三轮对话' : saved.kind === 'japanese-extensive' ? '日语原版多读' : saved.kind === 'japanese-reading' ? (saved.materialId?.startsWith('ja-kana-') ? '日语假名与节拍' : '日语短篇阅读') : japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title }} · 继续草稿</RouterLink></p></section>
         <section v-if="recent.length" class="section"><h2>最近完成的练习</h2><p class="help-text">回听原件或接续已有 AI 请求，不重复记为完成。</p><p v-for="saved in recent" :key="saved.id"><RouterLink :to="{ path: '/ja', query: { session: saved.id } }">{{ japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title ?? '日语练习' }} · {{ new Date(saved.completedAt!).toLocaleDateString('zh-CN') }} · 回看</RouterLink></p></section>
       </template>
-      <section v-else-if="session.completedAt" class="panel ja-panel">
+      <section v-else-if="session?.completedAt" class="panel ja-panel">
         <h2>这次练习已保存</h2><p>回答、原始录音和重说录音都已保留。参考词块已加入日语间隔复习；完成练习不等于已掌握。</p>
         <p v-if="guide">{{ guide.coverage }} 系统会接续应用与延迟换场景，不只跳到下一个视频。</p>
         <h3>{{ lesson?.title ?? '日语练习' }}</h3>
@@ -299,7 +304,7 @@ onBeforeUnmount(() => {
         </template>
         <RouterLink to="/ja" class="button primary">返回日语今日安排</RouterLink>
       </section>
-      <section v-else-if="lesson" class="panel ja-panel">
+      <section v-else-if="session && lesson" class="panel ja-panel">
         <p v-if="draft.audioUnavailable" class="help-text" role="status">这个备份不含部分录音文件，文字回答和对照笔记仍保留。未完成的练习可重新录音继续；不会把缺失录音算作已验证的口语表现。</p>
         <p v-if="supportedReplacement" class="help-text" role="status">独立首答记录仍锁定。请录一份有参考帮助的替代练习，随后重说；它不会替换或冒充原来的独立录音。</p>
         <p class="eyebrow">{{ { listen: applicationPractice ? '1 / 4 · 先独立表达' : '1 / 4 · 先听懂意思', notice: '2 / 4 · 核对并应用', speak: '3 / 4 · 说清楚', compare: '4 / 4 · 修正后完整重说' }[step] }}</p>

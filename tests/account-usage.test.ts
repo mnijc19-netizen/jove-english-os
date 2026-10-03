@@ -5,6 +5,7 @@ import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import * as Vue from 'vue'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AccountPreferences, AccountUsage } from '../src/cloud/services'
+import * as costDisplay from '../src/domain/cost-display'
 
 // Actual component/lifecycle/events; only authenticated service IO is replaced.
 class Host {
@@ -66,6 +67,7 @@ beforeAll(() => {
   const script = compileScript(descriptor, { id: 'account-usage', inlineTemplate: true, templateOptions: { compilerOptions: { hoistStatic: false } } })
   const code = transpileModule(script.content, { compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 } }).outputText
   const dependencies: Record<string, unknown> = { vue: Vue, '../stores/cloud': { useCloud: () => cloud },
+    '../domain/cost-display': costDisplay,
     '../cloud/services': { readAccountServices: read, saveAccountPreferences: save } }
   const exports: { default?: Vue.Component } = {}
   new Function('require', 'exports', code)((id: string) => {
@@ -85,16 +87,18 @@ describe('account service settings UX', () => {
   it('does not request account data while signed out and distinguishes held from known charges', async () => {
     cloud.userId = ''
     const view = mount(); await flush()
-    expect(read).not.toHaveBeenCalled(); expect(text(view.root)).toContain('Sign in above')
+    expect(read).not.toHaveBeenCalled(); expect(text(view.root)).toContain('登录后可以查看账号实际用量、限额和录音保留设置')
     cloud.userId = 'owner-a'; await flush()
     expect(read).toHaveBeenCalledTimes(1)
-    expect(text(view.root)).toContain('Reported USDHeld USDUnconfirmed')
+    expect(text(view.root)).toContain('已知费用（约人民币）未确认预留（约人民币）待确认项')
     expect(text(view.root)).toContain('0.0400'); expect(text(view.root)).toContain('0.2000')
-    expect(text(view.root)).toContain('Hosting, storage and network bills are separate')
+    expect(text(view.root)).toContain('¥' + costDisplay.estimatedCny(period.reportedUsd))
+    expect(text(view.root)).toContain('¥' + costDisplay.estimatedCny(period.heldUsd))
+    expect(text(view.root)).toContain('托管、存储和网络账单不包含在这里')
   })
   it('requires an explicit number instead of turning an empty budget into zero', async () => {
     const view = mount(); await flush()
-    const input = field(view.root, 'Account daily limit')
+    const input = field(view.root, '账号每日上限（美元')
     input.value = ''; await change(input)
     expect(save).not.toHaveBeenCalled(); expect(input.value).toBe('1')
     expect(text(view.root)).toContain('Nothing was changed')
@@ -105,36 +109,36 @@ describe('account service settings UX', () => {
   it('saves only the selected preference and prevents concurrent changes while awaiting confirmation', async () => {
     const delayed = deferred<AccountPreferences>(); save.mockReturnValueOnce(delayed.promise)
     const view = mount(); await flush()
-    const input = field(view.root, 'Keep cloud recordings'); input.value = 'assessment-only'
+    const input = field(view.root, '云端录音保留'); input.value = 'assessment-only'
     const saving = change(input); await flush()
     expect(save.mock.calls[0]![0]).toEqual({ recording_retention: 'assessment-only' })
-    expect(field(view.root, 'Account daily limit').props.disabled).toBe(true)
-    expect(text(view.root)).toContain('Please wait')
-    await change(field(view.root, 'Account monthly limit')); expect(save).toHaveBeenCalledTimes(1)
+    expect(field(view.root, '账号每日上限（美元').props.disabled).toBe(true)
+    expect(text(view.root)).toContain('正在核对…')
+    await change(field(view.root, '账号每月上限（美元')); expect(save).toHaveBeenCalledTimes(1)
     delayed.resolve({ ...preferences, recording_retention: 'assessment-only' }); await saving
     expect(input.value).toBe('assessment-only')
     expect(input.props.disabled).toBe(false)
   })
   it('restores the last confirmed value after failure without claiming the update was saved', async () => {
     const view = mount(); await flush(); save.mockRejectedValueOnce(new Error('offline'))
-    const input = field(view.root, 'Account daily limit'); input.value = '3'; await change(input)
+    const input = field(view.root, '账号每日上限（美元'); input.value = '3'; await change(input)
     expect(input.value).toBe('1'); expect(text(view.root)).toContain('not confirmed')
     expect(text(view.root)).not.toContain('Saved to your account')
-    const checkbox = field(view.root, 'Include available rhythm'); checkbox.checked = false
+    const checkbox = field(view.root, '仅在服务能力已验证时启用专项反馈'); checkbox.checked = false
     save.mockRejectedValueOnce(new Error('offline')); await change(checkbox)
     expect(checkbox.checked).toBe(true)
   })
   it('aborts old account IO and ignores its late save result after another owner signs in', async () => {
     const delayed = deferred<AccountPreferences>(); save.mockReturnValueOnce(delayed.promise)
     const view = mount(); await flush()
-    const input = field(view.root, 'Account daily limit'); input.value = '9'
+    const input = field(view.root, '账号每日上限（美元'); input.value = '9'
     const saving = change(input); await flush()
     const signal = save.mock.calls[0]![2]!
     read.mockResolvedValueOnce({ ...result(), preferences: { ...preferences, daily_budget_usd: 2 } })
     cloud.userId = 'owner-b'; await flush()
     expect(signal.aborted).toBe(true)
     delayed.resolve({ ...preferences, daily_budget_usd: 9 }); await saving
-    expect(field(view.root, 'Account daily limit').value).toBe('2')
+    expect(field(view.root, '账号每日上限（美元').value).toBe('2')
     expect(text(view.root)).not.toContain('Saved to your account')
   })
   it('clears account data on logout and cancels pending refresh on unmount', async () => {

@@ -207,6 +207,15 @@ describe('adaptive daily plan', () => {
     const balanced = makePlan(profile, [], [], events, mats, undefined, now)
     expect(balanced.tasks.find(t => t.kind === 'speak')!.minutes).toBeGreaterThan(p.tasks.find(t => t.kind === 'speak')!.minutes)
   })
+  it('leaves versioned starter packages to their classroom without excluding ordinary course materials', () => {
+    const packages = [material('en-starter-1'), material('ja-starter-1')]
+    const ordinary = material('en-course-lesson-1')
+    const plan = makePlan(profile, [], [], [], [...packages, ordinary], undefined, now)
+    expect(plan.tasks.find(task => task.kind === 'listen')?.materialId).toBe(ordinary.id)
+    expect(plan.tasks.some(task => packages.some(course => course.id === task.materialId))).toBe(false)
+    const withoutOrdinary = makePlan(profile, [], [], [], packages, undefined, now)
+    expect(withoutOrdinary.tasks.some(task => packages.some(course => course.id === task.materialId))).toBe(false)
+  })
   it('preserves same-day completed identity/duration without completing new work', () => {
     const original = makePlan(profile, [], [], [], [material('tech')], undefined, now)
     original.tasks[0].done = true

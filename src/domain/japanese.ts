@@ -1,4 +1,4 @@
-import type { Assessment, Material, StudyEvent } from './types'
+import type { Assessment, Material, StudyEvent, StudySession } from './types'
 import { unavailableExternalIds } from '../content/external'
 import { japaneseTransferContexts } from '../content/japanese'
 
@@ -27,7 +27,7 @@ export const japaneseBeginnerStartId = 'ja-beginner-start'
 
 /** A declared starting preference replaces an unreliable initial quiz, not
  * ability evidence. Preserve that quiz and keep every unmeasured score unknown. */
-export function japaneseStartingPoint(diagnostic?: Assessment, beginner?: Assessment, now = Date.now()) {
+export function japaneseStartingPoint(diagnostic?: Assessment, beginner?: Assessment, now = Date.now(), sessions: StudySession[] = []) {
   if (beginner?.id === japaneseBeginnerStartId && beginner.stage === 'self-reported-beginner'
     && beginner.responses.startingPoint === 'beginner' && beginner.completedAt !== undefined
     && beginner.completedAt >= beginner.timestamp && beginner.completedAt <= now
@@ -36,8 +36,12 @@ export function japaneseStartingPoint(diagnostic?: Assessment, beginner?: Assess
       scriptCorrect: null, meaningCorrect: null, kanaSupport: true, furigana: 'full' as const,
       conversationProbe: 1, listening: 'unknown' as const, speaking: 'unknown' as const, proficiency: 'unverified' as const }
   }
-  return diagnostic?.completedAt ? { ...japanesePlacement(diagnostic.responses), basis: 'diagnostic' as const,
-    confirmedAt: diagnostic.completedAt } : undefined
+  if (diagnostic?.completedAt) return { ...japanesePlacement(diagnostic.responses), basis: 'diagnostic' as const, confirmedAt: diagnostic.completedAt }
+  const entry = sessions.filter(session => session.kind === 'starter-classroom' && session.materialId === 'ja-starter-1'
+    && !session.id.startsWith('reading-conflict:') && session.startedAt <= now).sort((a, b) => a.startedAt - b.startedAt)[0]
+  return entry ? { basis: 'course-entry' as const, confirmedAt: entry.startedAt,
+    scriptCorrect: null, meaningCorrect: null, kanaSupport: true, furigana: 'full' as const, conversationProbe: 1,
+    listening: 'unknown' as const, speaking: 'unknown' as const, proficiency: 'unverified' as const } : undefined
 }
 
 /** Counts timing units in supplied kana, never guesses kanji readings or scores

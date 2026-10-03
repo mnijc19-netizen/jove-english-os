@@ -4,9 +4,13 @@ import { useRouter } from "vue-router";
 import { useApp } from "../stores/app";
 import { englishTaskGuide, englishLearningOutcome, nextAssignedTask, taskPath } from "../domain/engine";
 import Icon from "../components/Icon.vue";
+import StarterCourseEntry from '../components/StarterCourseEntry.vue';
+import { starterLessons } from '../content/starter-courses';
 import type { PlanTask } from "../domain/types";
 import { planRecovery, selectMeaningfulReviews } from "../domain/longitudinal";
 const app = useApp();
+const legacyOpen = computed(() => app.profile.onboarded && (!app.events.some(event => event.type === 'STARTER_ATTEMPT' || event.data?.kind === 'starter-classroom')
+  || starterLessons.filter(lesson => lesson.language === 'en').every(lesson => app.events.some(event => event.type === 'TASK_COMPLETED' && event.data?.lessonId === lesson.id))))
 const router = useRouter(), starting = ref(false), startError = ref("");
 const recovery = computed(() => planRecovery(app.profile, app.events, app.clock));
 const reviewSelection = computed(() => selectMeaningfulReviews(app.cards, app.events, app.clock, {
@@ -65,7 +69,7 @@ async function start(task: PlanTask) {
           今天，练会一点真实表达。
         </h1>
         <p class="lede">
-          {{ app.profile.name }}，不用选课。跟着下一步，先尝试，再获得帮助。
+          {{ app.profile.name }}，不用自己排课。先看示范，学一句能用的表达；不会就给你帮助。
         </p>
       </div>
       <div class="daily-date">
@@ -74,12 +78,14 @@ async function start(task: PlanTask) {
         >
       </div>
     </div>
+    <StarterCourseEntry language="en" />
+    <details class="legacy-practice" :open="legacyOpen"><summary>已有基础或旧练习？展开原来的学习安排</summary>
     <div v-if="!app.profile.onboarded" class="onboard-banner">
       <span class="small-icon"><Icon name="sparkle" /></span>
       <div>
-        <strong>第一次来？先找到合适起点。</strong>
+        <strong>有一点基础？可以选做短诊断。</strong>
         <p>
-          做一次简短了解，之后由系统安排；现在也可以直接开始下面的练习。
+          完全零基础直接开始上面的小课，不需要猜题。有基础时，诊断帮助调整原来的练习。
         </p>
       </div>
       <RouterLink to="/onboarding" class="button secondary" aria-label="Find my starting point"
@@ -264,5 +270,6 @@ async function start(task: PlanTask) {
         >{{ material.externalReading ? '阅读原文' : 'Listen & explore' }} <Icon name="arrow" :size="16"
       /></RouterLink>
     </section>
+    </details>
   </div>
 </template>

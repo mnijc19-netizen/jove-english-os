@@ -19,6 +19,7 @@ import { db as learningDb } from '../src/db/db'
 import { addChunk, initialize } from '../src/db/repository'
 import { useApp } from '../src/stores/app'
 import * as engine from '../src/domain/engine'
+import * as starterCourses from '../src/content/starter-courses'
 import { canonical, changedFields, eventOccurrenceKey, parseOperation, projectOperations, type RecordValue } from '../src/sync/protocol'
 import { SyncJournal } from '../src/sync/journal'
 
@@ -167,8 +168,11 @@ describe('assigned learning loop with real local persistence', () => {
       vue: Vue, 'vue-router': { useRoute: () => route, useRouter: () => router },
       '../stores/app': { useApp: () => learning }, '../db/db': { db: learningDb }, '../db/repository': { addChunk },
       '../domain/engine': engine, '../domain/longitudinal': longitudinal, '../composables/useRequest': { useRequest },
+      '../content/starter-courses': starterCourses,
       '../components/ReadingPractice.vue': { default: loadComponent({ '../stores/app': { useApp: () => learning }, '../db/db': { db: learningDb } }) },
       '../components/EnglishReadingPractice.vue': { default: Vue.defineComponent({ render: () => null }) },
+      // Real classroom behavior is browser-tested; isolate this existing reading/assignment harness.
+      '../components/StarterCourseEntry.vue': { default: Vue.defineComponent({ render: () => null }) },
       '../components/AudioPlayer.vue': { default: Vue.defineComponent({ render: () => null }) },
       '../components/Icon.vue': { default: Vue.defineComponent({ render: () => null }) },
     }
@@ -210,7 +214,7 @@ describe('assigned learning loop with real local persistence', () => {
     expect(content(root)).toContain('今天的练习已保存。')
     expect(content(root)).toContain('今天最多安排 45 分钟')
     expect(content(root)).toContain(`已练 ${plan.tasks.length - 1} / ${plan.tasks.length - 1} 项 · 不是掌握率`)
-    expect(find(root, n => n.type === 'button' && ['Continue my practice', 'Start today’s practice'].some(label => content(n).includes(label)))).toBeUndefined()
+    expect(find(root, n => n.type === 'button' && ['接着练习', '开始学习'].some(label => content(n).includes(label)))).toBeUndefined()
     expect((await learningDb.events.toArray()).some(event => event.data?.taskId === extra.id && ['TASK_STARTED', 'TASK_OFFERED'].includes(event.type))).toBe(false)
     const beforeOpen = await learningDb.events.toArray()
     const continueButton = button(root, alreadyCompleted ? 'View optional practice' : 'Continue optional practice')

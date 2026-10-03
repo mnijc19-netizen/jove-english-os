@@ -7,8 +7,10 @@ import type { AIRequest } from '../server/ai'
 import { evaluatedResultSchema, lookupSchema, materialSchema } from './schemas'
 import { ProviderError, httpError } from './errors'
 import { abortable, checkAbort, consumeSse, readJson, withDeadline } from './transport'
-import { OpenRouterProvider, type ProviderNotice } from './provider'
+import { checkedStarterAttempt, checkedStarterFeedback, OpenRouterProvider, type ProviderNotice, type StarterFeedbackOptions } from './provider'
 import { normalizeTranscriptionAudio } from '../audio/transcription'
+import { starterFeedbackSchema, type StarterFeedback } from './starter-schema'
+import type { StarterAttempt } from '../domain/starter'
 
 export type LearningProvider = Pick<OpenRouterProvider, keyof OpenRouterProvider>
 const notices = z.array(z.strictObject({ kind: z.enum(['model-fallback', 'schema-fallback']), purpose: z.string(), from: z.string(), to: z.string() })).max(20)
@@ -24,6 +26,7 @@ const resultSchemas: Record<AIRequest['action'], z.ZodType> = {
   discover: z.array(z.strictObject({ title: z.string(), url: z.url(), description: z.string() })).max(3),
   transcribe: z.string().min(1).max(16000),
   synthesize: speechResult,
+  starterFeedback: starterFeedbackSchema.extend({ source: z.literal('ai'), model: z.string().trim().min(1).max(200).optional() }),
 }
 const pendingSchema = z.object({ requestId: z.uuid(), createdAt: z.number().finite(),
   recoveryUntil: z.number().finite().optional(),
@@ -301,6 +304,14 @@ export class CloudProvider implements LearningProvider {
   async testConnection(signal?: AbortSignal) { return z.strictObject({ label: z.string() }).parse(await this.request({ action: 'status' }, signal)) }
   async evaluate(input: Parameters<OpenRouterProvider['evaluate']>[0], signal?: AbortSignal) {
     return evaluatedResultSchema.parse(await this.request({ action: 'evaluate', input }, signal))
+  }
+  async starterFeedback(value: StarterAttempt, signal?: AbortSignal, options: StarterFeedbackOptions = {}): Promise<StarterFeedback> {
+    const { attempt } = checkedStarterAttempt(value, this.learningLanguage)
+    const parsed = z.strictObject({ review: z.boolean().optional() }).safeParse(options)
+    if (!parsed.success) throw new ProviderError('INPUT')
+    return checkedStarterFeedback(await this.request({ action: 'starterFeedback', attemptId: attempt.id, learningLanguage: this.learningLanguage,
+      ...(parsed.data.review ? { review: true } : {}) }, signal),
+      attempt, this.learningLanguage)
   }
   async chat(messages: Parameters<OpenRouterProvider['chat']>[0], context: Parameters<OpenRouterProvider['chat']>[1], onDelta?: (text: string) => void, signal?: AbortSignal) {
     return z.string().min(1).max(16000).parse(await this.request({ action: 'chat', messages: messages.slice(-12), context, stream: !!onDelta }, signal, onDelta))

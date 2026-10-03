@@ -23,10 +23,12 @@ export interface LanguageAllowance {
 }
 /** Planned/completed task minutes are workload accounting, not measured learning
  * time or mastery. Already completed work is never rewritten to fit the budget. */
-export function allocateLanguageDay(totalMinutes: number, spaces: Record<LearningLanguage, LanguageDay>, now: number) {
+export function allocateLanguageDay(totalMinutes: number, spaces: Record<LearningLanguage, LanguageDay>, now: number,
+  preference?: { primaryLanguage: LearningLanguage | 'balanced'; primaryShare: number }) {
   if (!Number.isInteger(totalMinutes) || totalMinutes < 1 || totalMinutes > 1440 || !Number.isFinite(now)) throw new Error('Invalid shared daily budget')
   const date = new Date(now).toLocaleDateString('en-CA'), languages = ['en', 'ja'] as const
   const completed = { en: 0, ja: 0 }, requiredCompleted = { en: 0, ja: 0 }, active = { en: 0, ja: 0 }
+  const starterReserved = { en: 0, ja: 0 }
   const allowed = (minutes: unknown): minutes is number => Number.isInteger(minutes) && Number(minutes) > 0 && Number(minutes) <= 1440
   for (const language of languages) {
     const space = spaces[language], tasks = space.plan?.date === date ? space.plan.tasks : []
@@ -44,6 +46,15 @@ export function allocateLanguageDay(totalMinutes: number, spaces: Record<Learnin
     requiredCompleted[language] = tasks.filter(task => task.done && !task.optional && allowed(task.minutes)).reduce((sum, task) => sum + task.minutes, 0)
     const started = startedTaskIds(space.events, now)
     active[language] = tasks.filter(task => !task.done && !task.optional && !done.has(task.id) && started.has(task.id) && allowed(task.minutes)).reduce((sum, task) => sum + task.minutes, 0)
+    // Standalone guided starter lessons also reserve workload. Merely switching
+    // between language homes must not offer their already-started minutes again.
+    const standalone = new Map<string, number>()
+    for (const event of space.events) if (event.type === 'TASK_STARTED' && event.source === 'objective'
+      && event.timestamp <= now && new Date(event.timestamp).toLocaleDateString('en-CA') === date
+      && event.data?.kind === 'starter-classroom' && typeof event.data.taskId === 'string' && allowed(event.data.minutes)
+      && !done.has(event.data.taskId) && !tasks.some(task => task.id === event.data?.taskId)) standalone.set(event.data.taskId, event.data.minutes)
+    starterReserved[language] = [...standalone.values()].reduce((sum, minutes) => sum + minutes, 0)
+    active[language] += starterReserved[language]
   }
   const credited = completed.en + completed.ja, remaining = Math.max(0, totalMinutes - credited)
   const allocated = { en: 0, ja: 0 }, reserved = { en: 0, ja: 0 }
@@ -55,7 +66,13 @@ export function allocateLanguageDay(totalMinutes: number, spaces: Record<Learnin
     reserved[language] = allocated[language] = Math.min(active[language], available)
     available -= reserved[language]
   }
-  const weight = (language: LearningLanguage) => 1 + Math.min(0.5, Math.max(0, Number.isFinite(spaces[language].dueCards) ? spaces[language].dueCards : 0) / 40)
+  if (preference && (!['en', 'ja', 'balanced'].includes(preference.primaryLanguage) || !Number.isFinite(preference.primaryShare)
+    || preference.primaryShare < 0.5 || preference.primaryShare > 0.9)) throw new Error('Invalid primary-language preference')
+  const weight = (language: LearningLanguage) => {
+    const base = preference && preference.primaryLanguage !== 'balanced'
+      ? language === preference.primaryLanguage ? preference.primaryShare : 1 - preference.primaryShare : 1
+    return base * (1 + Math.min(0.5, Math.max(0, Number.isFinite(spaces[language].dueCards) ? spaces[language].dueCards : 0) / 40))
+  }
   const first = new Date(now).getDate() % 2 ? 'ja' : 'en'
   // Small bounded integer allocation, based on the whole day's work. A switch
   // cannot create a fresh allowance, and overdue cards cannot monopolize it.
@@ -66,7 +83,7 @@ export function allocateLanguageDay(totalMinutes: number, spaces: Record<Learnin
   }
   const allowances = Object.fromEntries(languages.map(language => [language, {
     completed: completed[language], reserved: reserved[language], remaining: allocated[language],
-    planCap: requiredCompleted[language] + allocated[language],
+    planCap: requiredCompleted[language] + Math.max(0, allocated[language] - starterReserved[language]),
   }])) as Record<LearningLanguage, LanguageAllowance>
   return { date, totalMinutes, credited, remaining, overBudget: Math.max(0, credited - totalMinutes), allowances }
 }

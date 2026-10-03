@@ -478,7 +478,7 @@ async function discover() {
           </p>
           <div class="row between">
             <span class="muted">{{ m.externalReading ? '先读原文 → 自己表达 → 延迟回想' : m.externalStudy ? 'Listen → notice → recorded retell' : m.chunks.length + ' useful expressions' }}</span
-            ><RouterLink :to="{ path: m.externalReading ? '/learn' : '/listen', query: { material: m.id, ...(m.externalReading ? { mode: 'reading' } : {}) } }" class="text-button"
+            ><RouterLink :to="/^en-starter-\d+$/.test(m.id) ? { path: '/course/en', query: { lesson: m.id } } : { path: m.externalReading ? '/learn' : '/listen', query: { material: m.id, ...(m.externalReading ? { mode: 'reading' } : {}) } }" class="text-button"
               >Explore <Icon name="arrow" :size="16"
             /></RouterLink>
           </div>

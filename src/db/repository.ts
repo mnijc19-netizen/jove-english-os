@@ -322,6 +322,9 @@ function markMissingAudio(tables: Backup['tables'], available: Set<string>): voi
     const missing = new Set<string>()
     visit(session.draft, missing)
     if (missing.size) { session.draft.audioUnavailable = true; session.draft.missingAudioIds = [...missing] }
+    // The versioned classroom requires an explicit empty recording reference.
+    // A metadata-only restore preserves the attempt, not an absent audio file.
+    if (session.kind === 'starter-classroom') session.draft.audioId ??= ''
     // Japanese drafts have a strict resumable shape. Preserve text/first-answer
     // locks, but never leave an absent file masquerading as a saved recording.
     if (session.kind === 'japanese-practice') {

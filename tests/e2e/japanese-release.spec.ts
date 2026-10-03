@@ -19,6 +19,7 @@ test('Japanese production gate matches its navigation, diagnosis and data contro
   }
   await expect(japanese).toHaveCount(1)
   await expect(page.getByText('开发预览：本页尚未开放到正式网站。', { exact: false })).toHaveCount(0)
+  await page.getByText('已有一点日语基础？可选做起点了解', { exact: true }).click()
   const skip = page.getByRole('radio', { name: '跳过', exact: true })
   await expect(skip).toHaveCount(6)
   for (const choice of await skip.all()) await choice.check()
@@ -40,7 +41,8 @@ storageTest('Japanese delayed application saves a first answer before exposing r
   await page.route('https://openrouter.ai/**', route => { paid++; return route.abort() })
   await page.route('**/functions/v1/ai', route => { paid++; return route.abort() })
   await page.goto('#/ja')
-  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('radio', { name: '跳过', exact: true, includeHidden: true })).toHaveCount(6)
   await page.getByRole('button', { name: '我是零基础，不猜题直接起步', exact: true }).click()
   await page.getByRole('button', { name: '确认零基础起点', exact: true }).click()
   await expect(page.getByRole('heading', { name: /^今日练习：/ })).toBeVisible()
@@ -134,10 +136,10 @@ test('signed-in English opens Japanese on the first attempt without another logi
   await page.goto('#/today')
   await expect.poll(() => cursors.en).toBeGreaterThan(0)
   await page.goto('#/ja')
-  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  await expect(page.getByRole('radio', { name: '跳过', exact: true, includeHidden: true })).toHaveCount(6)
   await expect(page.getByRole('button', { name: '重试打开日语区', exact: true })).toHaveCount(0)
   await page.reload()
-  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  await expect(page.getByRole('radio', { name: '跳过', exact: true, includeHidden: true })).toHaveCount(6)
   await expect(page.getByRole('button', { name: '重试打开日语区', exact: true })).toHaveCount(0)
   expect(cursors.en).toBeGreaterThan(0); expect(cursors.ja).toBeGreaterThan(0)
   expect(unexpected).toEqual([])
@@ -163,6 +165,7 @@ test('a beginner can correct a guessed diagnosis without clearing it or changing
   })
   await page.goto('#/ja')
   for (const answer of ['neko', 'koohii', '一拍', '昨天看了电影', 'に', '邀请一起吃饭']) {
+    if (!(await page.getByRole('radio', { name: answer, exact: true }).isVisible())) await page.getByText('已有一点日语基础？可选做起点了解', { exact: true }).click()
     await page.getByRole('radio', { name: answer, exact: true }).check()
   }
   await page.getByRole('button', { name: '保存诊断，安排今天', exact: true }).click()
