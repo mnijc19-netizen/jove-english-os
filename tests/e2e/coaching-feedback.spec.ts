@@ -55,7 +55,7 @@ test('English saved conversation keeps corrections behind explicit help and surv
 test('Japanese saved dialogue uses the same answer-safe reveal without blending English records', async ({ page }) => {
   test.skip(process.env.VITE_JOVE_JAPANESE !== '1', 'Japanese build gate is off')
   await page.goto('#/ja')
-  await expect(page.getByRole('radio', { name: '跳过', exact: true })).toHaveCount(6)
+  await expect(page.getByRole('radio', { name: '跳过', exact: true, includeHidden: true })).toHaveCount(6)
   const original = '駅を行きたいです。', corrected = '駅に行きたいです。'
   await put(page, 'jove-english-os-ja', 'sessions', [{ id: 'fixture-feedback-ja', kind: 'japanese-dialogue', materialId: 'ja-irodori-starter-1',
     startedAt: Date.now(), stage: 'interact', draft: { revision: 1, taskId: 'fixture-task', minutes: 5, answer: { text: '', audioId: '', confirmed: false },

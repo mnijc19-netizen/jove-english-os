@@ -181,19 +181,36 @@ async function attachRecording(value: { audioId: string }) {
 }
 async function getAIFeedback(review = false) {
   if (!consent.value || !state.value || !app.keySet || !currentAnswerMatches.value) return
-  await flush()
-  const attempt = state.value.attempts.find(item => item.id === state.value?.draft.lastAttemptId)
-  const sessionId = state.value.session.id
-  if (!attempt) return
-  const saved = await run(async signal => {
-    await learning.assertCurrent()
-    if (account.configured && app.providerMode !== 'byok') await (language === 'en' ? account.syncNow() : space.syncNow())
-    const feedback = await provider.starterFeedback(attempt, signal, { review })
-    await learning.assertCurrent()
-    await learning.saveAIFeedback(attempt.id, feedback, feedback.model, Date.now(), review)
-    return learning.load(sessionId)
-  })
-  if (saved && !disposed) { restore(saved); await refresh() }
+  try {
+    await flush()
+    // Saving can wait behind another local write while the learner keeps typing.
+    if (!consent.value || !state.value || !app.keySet || !currentAnswerMatches.value) return
+    const attempt = state.value.attempts.find(item => item.id === state.value?.draft.lastAttemptId)
+    const sessionId = state.value.session.id
+    if (!attempt) return
+    const finished = await run(async signal => {
+      await learning.assertCurrent()
+      if (account.configured && app.providerMode !== 'byok') await (language === 'en' ? account.syncNow() : space.syncNow())
+      if (!consent.value || state.value?.session.id !== sessionId || state.value.draft.lastAttemptId !== attempt.id || !currentAnswerMatches.value) return false
+      const feedback = await provider.starterFeedback(attempt, signal, { review })
+      await learning.assertCurrent()
+      // Provider provenance is transport metadata, not part of the strict
+      // teaching DTO. Keep the verified model separate from model-authored text.
+      const { verdict, feedbackZh, correction, nextAction, evidence } = feedback
+      await learning.saveAIFeedback(attempt.id, { verdict, feedbackZh, correction, nextAction, evidence }, feedback.model, Date.now(), review)
+      return true
+    })
+    if (finished && !disposed && state.value?.session.id === sessionId) {
+      // Serialize the state read with autosaves, but never restore older input
+      // over a new unsent edit, mode change, transcript or recording reference.
+      saves = saves.catch(() => {}).then(async () => {
+        if (disposed || state.value?.session.id !== sessionId) return
+        const latest = await learning.load(sessionId)
+        if (!disposed && state.value?.session.id === sessionId) state.value = latest
+      })
+      await saves; await refresh()
+    }
+  } catch (failure) { error.value = failure instanceof Error ? failure.message : '反馈处理未完成，原回答和新草稿仍保留。' }
 }
 async function disputeCurrent() {
   await flush()

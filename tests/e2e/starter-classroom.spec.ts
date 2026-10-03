@@ -1,6 +1,7 @@
 import { type Page } from '@playwright/test'
 import { test, expect, records } from './browser-fixtures'
 import { starterLessons, type StarterLesson } from '../../src/content/starter-courses'
+import { defaultSettings } from '../../src/domain/types'
 
 // Fresh synthetic learners, real built UI/IndexedDB/audio decoding. Not a human
 // efficacy, native pronunciation or paid provider accuracy assessment.
@@ -10,6 +11,22 @@ async function blockPaid(page: Page) {
   await page.route('https://openrouter.ai/**', route => { calls.push(route.request().url()); return route.abort() })
   await page.route('**/functions/v1/ai', route => { calls.push(route.request().postData() ?? ''); return route.abort() })
   return calls
+}
+async function useSyntheticLocalProvider(page: Page) {
+  await page.goto('#/settings')
+  await expect(page.getByTestId('current-release')).toBeVisible()
+  await page.evaluate(async settings => {
+    const read = indexedDB.open('jove-english-os')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { read.onsuccess = () => resolve(read.result); read.onerror = () => reject(read.error) })
+    await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction(['secrets', 'settings'], 'readwrite')
+      tx.objectStore('secrets').put({ id: 'openrouter', value: 'synthetic-classroom-marker-not-a-key' })
+      tx.objectStore('secrets').put({ id: 'provider-mode', value: 'byok' })
+      tx.objectStore('settings').put({ id: 'main', value: { ...settings, strongModel: 'fixture/starter-strong' } })
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
+    }); database.close()
+  }, defaultSettings)
+  await page.goto('#/course/en'); await page.reload()
 }
 async function seed(page: Page, language: 'en' | 'ja', lesson: StarterLesson) {
   await page.evaluate(async ({ language, prerequisites }) => {
@@ -82,6 +99,106 @@ test('editing a valid answer returns to one primary check action instead of sile
   await page.getByRole('button', { name: '看看这次表达', exact: true }).click()
   await expect(page.getByText(lesson.expression.errors[0]!.feedbackZh, { exact: true })).toBeVisible()
   expect((await records(page, 'events')).filter(event => event.type === 'TASK_COMPLETED')).toHaveLength(0)
+})
+
+test('an answer edited while the real local save is pending cannot dispatch AI for the earlier answer', async ({ page }) => {
+  const calls = await blockPaid(page), lesson = starterLessons[0]!
+  await useSyntheticLocalProvider(page)
+  await page.getByRole('button', { name: '开始或接着上次学 · 约 3–5 分钟', exact: true }).click()
+  await teachAndRecognize(page, lesson)
+  const answer = page.getByRole('textbox', { name: '试着用刚教的表达回应', exact: true })
+  await answer.fill(lesson.expression.reference)
+  await page.getByRole('button', { name: '看看这次表达', exact: true }).click()
+  await page.getByText('需要时请 AI 核对当前回答', { exact: true }).click()
+  await page.getByRole('checkbox', { name: '同意本次云端处理', exact: true }).check()
+  // An actual native readwrite transaction holds the session store. It writes
+  // nothing; asynchronous get requests keep it alive until the test releases it.
+  await page.evaluate(() => new Promise<void>((resolve, reject) => {
+    const gate = window as Window & { __starterFlushRelease?: boolean }
+    gate.__starterFlushRelease = false
+    const open = indexedDB.open('jove-english-os')
+    open.onerror = () => reject(open.error)
+    open.onsuccess = () => {
+      const database = open.result, tx = database.transaction('sessions', 'readwrite'), store = tx.objectStore('sessions')
+      tx.oncomplete = () => database.close(); tx.onabort = () => database.close()
+      const keepAlive = () => { store.get('fixture-save-gate').onsuccess = () => { if (!gate.__starterFlushRelease) keepAlive() } }
+      keepAlive(); resolve()
+    }
+  }))
+  try {
+    await answer.fill(lesson.expression.reference + ' ')
+    await page.getByRole('button', { name: '请 AI 只核对这一处', exact: true }).click()
+    await expect(page.getByText('保存中…', { exact: true })).toBeVisible()
+    await answer.fill(lesson.expression.errors[0]!.input)
+  } finally { await page.evaluate(() => { (window as Window & { __starterFlushRelease?: boolean }).__starterFlushRelease = true }) }
+  await expect.poll(async () => (await records(page, 'sessions')).some(session => (session.draft as Record<string, unknown>).response === lesson.expression.errors[0]!.input)).toBe(true)
+  await expect(answer).toHaveValue(lesson.expression.errors[0]!.input)
+  expect(calls).toEqual([])
+  expect((await records(page, 'events')).some(event => event.type === 'STARTER_FEEDBACK' && event.source === 'ai')).toBe(false)
+})
+
+test('a delayed synthetic AI response preserves a new unsent practice-mode change and original attempt', async ({ page }) => {
+  const lesson = starterLessons[0]!, model = 'fixture/starter-strong'
+  await page.clock.install()
+  let releaseReply!: () => void, completionRequests = 0
+  const replyGate = new Promise<void>(resolve => { releaseReply = resolve })
+  await page.route('https://*.supabase.co/**', route => route.abort())
+  await page.route('https://openrouter.ai/**', async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/models')) return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: [{
+      id: model, name: 'Synthetic classroom fixture', architecture: { input_modalities: ['text'], output_modalities: ['text'] },
+      supported_parameters: ['structured_outputs', 'response_format'],
+    }] }) })
+    if (url.pathname.endsWith('/chat/completions')) {
+      completionRequests++
+      await replyGate
+      return route.fulfill({ headers: { 'Access-Control-Allow-Origin': '*' }, contentType: 'application/json', body: JSON.stringify({ model,
+        choices: [{ message: { content: JSON.stringify({ verdict: 'valid', feedbackZh: '本次示范句能表达问候和名字。',
+          correction: null, nextAction: 'continue', evidence: lesson.expression.reference }) }, finish_reason: 'stop' }],
+        usage: { total_tokens: 12, cost: 0 },
+      }) })
+    }
+    return route.abort()
+  })
+  // Only the isolated test browser receives a non-credential fixture marker.
+  await useSyntheticLocalProvider(page)
+  await page.getByRole('button', { name: '开始或接着上次学 · 约 3–5 分钟', exact: true }).click()
+  await teachAndRecognize(page, lesson)
+  await page.getByRole('button', { name: '不会打字 / 换成选句练习', exact: true }).click()
+  await page.getByRole('button', { name: `用这句试着回应：${lesson.expression.reference}`, exact: true }).click()
+  await page.getByRole('button', { name: '看看这次表达', exact: true }).click()
+  await expect.poll(async () => (await records(page, 'events')).filter(event => event.type === 'STARTER_ATTEMPT' && (event.data as Record<string, unknown>).stage === 'express')).toHaveLength(1)
+  const first = (await records(page, 'events')).find(event => event.type === 'STARTER_ATTEMPT' && (event.data as Record<string, unknown>).stage === 'express')!
+  await page.getByText('需要时请 AI 核对当前回答', { exact: true }).click()
+  await page.getByRole('checkbox', { name: '同意本次云端处理', exact: true }).check()
+  await page.getByRole('button', { name: '请 AI 只核对这一处', exact: true }).click()
+  try {
+    await expect.poll(() => completionRequests).toBe(1).catch(async failure => {
+      await page.getByText('诊断信息', { exact: true }).click()
+      throw new Error(`${failure.message}\nSynthetic fixture diagnosis: ${await page.locator('.ai-option').innerText()}`)
+    })
+    await page.clock.pauseAt(new Date(await page.evaluate(() => Date.now() + 1000)))
+    await page.getByRole('button', { name: '我想试着自己写', exact: true }).click()
+    const edited = page.getByRole('textbox', { name: '试着用刚教的表达回应', exact: true })
+    await expect(edited).toHaveValue('')
+    releaseReply()
+    await expect.poll(async () => (await records(page, 'events')).some(event => event.type === 'STARTER_FEEDBACK' && event.source === 'ai')).toBe(true).catch(async failure => {
+      await page.getByText('诊断信息', { exact: true }).click()
+      throw new Error(`${failure.message}\nSynthetic response diagnosis: ${await page.locator('.ai-option').innerText()}`)
+    })
+    await expect(edited).toBeEnabled()
+    await expect(edited).toHaveValue('')
+    await expect(page.getByText('下面是上一份已提交回答的反馈。', { exact: false })).toBeVisible()
+    await page.clock.runFor(400)
+    await expect.poll(async () => (await records(page, 'sessions')).some(session => {
+      const draft = session.draft as Record<string, unknown>
+      return draft.mode === 'text' && draft.response === ''
+    })).toBe(true)
+    await page.reload()
+    await expect(edited).toHaveValue('')
+    expect((await records(page, 'events')).find(event => event.id === first.id)).toEqual(first)
+    expect(completionRequests).toBe(1)
+  } finally { releaseReply() }
 })
 
 test('Japanese zero learner can listen and finish by supported selection without knowing kana or an input method', async ({ page }) => {
