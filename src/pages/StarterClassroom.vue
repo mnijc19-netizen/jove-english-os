@@ -284,7 +284,8 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page starter-page" lang="zh-CN">
-    <div class="page-heading"><div><p class="eyebrow">{{ language === 'en' ? '英语' : '日语' }} · 跟老师学</p><h1 tabindex="-1">{{ state?.lesson.titleZh ?? '从能用的一句话开始。' }}</h1></div><button class="text-button" :disabled="busy || captureActive || aiBusy" @click="act(leave)">暂停，回到今日安排</button></div>
+    <div class="page-heading"><div><p class="eyebrow">{{ language === 'en' ? '英语' : '日语' }} · 跟老师学 · 试用版</p><h1 tabindex="-1">{{ state?.lesson.titleZh ?? '从能用的一句话开始。' }}</h1></div><button class="text-button" :disabled="busy || captureActive || aiBusy" @click="act(leave)">暂停，回到今日安排</button></div>
+    <p class="help-text">新课堂试用版 · 教学、合成示范与 AI 反馈仍待人工复核。</p>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="!ready && !error" role="status">正在接续你的课堂…</p>
     <details v-if="recoveryCopies.length" class="panel" aria-label="恢复另一台设备的课堂草稿"><summary>另一台设备也保存了草稿，两份原件都保留</summary><p>选择一份接续，会建立新草稿；不会把不同答案、提示或录音拼在一起，也不会重复记为掌握。</p><div v-for="copy in recoveryCopies" :key="copy.id"><p>{{ starterLessons.find(lesson => lesson.id === copy.materialId)?.titleZh }} · {{ copy.completedAt ? '已完成原件' : '未完成草稿' }}</p><p :lang="language">{{ copy.draft.response || '还没有填写回应' }}</p><p class="help-text">{{ copy.draft.helped ? '已用帮助' : '尚未用帮助' }} · {{ copy.draft.audioId ? '保留了录音引用' : '没有关联录音' }}</p><RouterLink v-if="copy.completedAt" :to="{ path: route.path, query: { session: copy.id } }">回看已完成原件</RouterLink><button v-else class="button secondary" :disabled="busy" @click="act(() => recoverBranch(copy.id))">接着这份草稿学</button></div></details>

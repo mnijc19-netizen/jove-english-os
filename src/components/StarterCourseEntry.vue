@@ -38,6 +38,7 @@ onBeforeUnmount(() => { disposed = true; generation++ })
 </script>
 <template>
   <section v-if="ready" class="panel starter-entry" aria-label="跟老师一步步学" lang="zh-CN">
+    <p class="help-text">新课堂试用版 · 教学、合成示范与 AI 反馈仍待人工复核。</p>
     <template v-if="view === 'progress'"><h2>一句一句，看到自己能用什么</h2><p>学过、借助提示、独立表达、后续时段换情境使用分别记录，不把完成次数当掌握率。</p><ol><li v-for="course in courses" :key="course.id"><strong>{{ course.goalZh }}</strong><p>{{ starterGoalEvidence(course, events, app.clock).retainedUse ? '已有跨时段、不同情境的独立使用证据' : starterGoalEvidence(course, events, app.clock).independentUse ? '已有一次独立表达，后续记忆待验证' : starterGoalEvidence(course, events, app.clock).supportedUse ? '可以借助示范练习，独立使用待验证' : starterGoalEvidence(course, events, app.clock).understanding ? '已辨认意思，表达仍待练习' : '尚未取得这项学习证据' }}</p></li></ol><p>这些只代表当前小目标；听力、自然口语和整体水平不据此推定。</p><RouterLink :to="destination" class="button secondary">回到当前小课</RouterLink></template>
     <template v-else>
     <p class="eyebrow">{{ next?.review ? '把以前的表达再用一次' : '零基础也能跟上的小课' }}</p>

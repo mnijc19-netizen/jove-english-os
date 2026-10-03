@@ -42,6 +42,7 @@ async function seed(page: Page, language: 'en' | 'ja', lesson: StarterLesson) {
 }
 async function teachAndRecognize(page: Page, lesson: StarterLesson) {
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(lesson.titleZh)
+  await expect(page.getByText('新课堂试用版 · 教学、合成示范与 AI 反馈仍待人工复核。', { exact: true })).toBeVisible()
   await expect(page.getByText(lesson.model.meaningZh, { exact: true })).toBeVisible()
   await expect(page.getByRole('textbox')).toHaveCount(0)
   await page.getByRole('button', { name: '我看过示范了，试一个小问题', exact: true }).click()

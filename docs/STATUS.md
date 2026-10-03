@@ -1,6 +1,6 @@
 # Current status
 
-## October3 document-led teaching redesign — software candidate, not delivered
+## October3 document-led teaching redesign — limited-trial rollout, final human acceptance incomplete
 
 Owner approved implementation of `D:/chrome下载/Jove_Language_Modification_Spec.docx` after the requirements summary. This is a new scope and is not closed by the earlier remediation or beginner-navigation release.
 
@@ -32,11 +32,15 @@ Before a real rollout, the owner must save work on each device and preserve a la
 
 ### Remaining release gates — stop conditions, not fabricated passes
 
+Owner subsequently approved explicitly labelled limited-trial publication on October3. Main is activating this verified subset and will record the exact public runtime, deployed AI source readback and production learner paths below. Human/model/device/longitudinal gates remain open; trial approval does not turn them into passes.
+
+Trial activation checkpoint: only dedicated Jove `ai` was deployed, now version20/ACTIVE; `content` remains23 and `speech-assess`18. Downloaded `ai/index.ts`, `ai/deno.json` and shared runtime match the reviewed local build byte-for-byte (runtime SHA-256 `ff38b114d97733bd4b95d8b55f4fea0521d22f183f66851c61122b0decb968f4`). Native PostgreSQL migration-list transport terminated; the read-only Management API independently confirms all24 applied versions match local source, one owner member with RLS and two private buckets. No migration/data/secret/Auth configuration change was made. Legitimate owner sign-in in a fresh controlled browser succeeds: account AI status returns200 with zero usage entries; new starter action rejects a nonexistent unsynced attempt with409/`ATTEMPT_NOT_SYNCED` before billing. This is authenticated routing/configuration/guard evidence, not actual teaching feedback or the50-output/language accuracy gate. Existing0.40USD/day,3USD/month, minimal recording retention and7 uncertain historical usage rows are unchanged. New visible trial labels pass four focused English/Japanese desktop/mobile-WebKit paths; independent narrow review reports no new blocking P1/P2. Full exact trial publication CI/public acceptance still pending.
+
 1. Exact committed candidate Linux CI is complete as recorded above. Production backend activation/commit-bound readiness, Pages publication and actual-public classroom acceptance remain pending a permitted rollout; no production code/function changes have happened in this round. Do not repeat the unchanged software matrix for documentation-only checkpoints.
 2. Independent English/Japanese language and naturalness review of the six packages/14 audio clips; synthetic assets remain pending-review. Do not mark this done from file hashes, model-generated text or code review.
 3. Real provider outputs against the50 editorial answer fixtures per language, reviewed by a suitably skilled person. The document's suggested95% correct/relevant target has **not been measured**; mocked contract/security tests and expected fixture labels do not establish it. No automatic paid retry or removal of historical usage holds is authorized by this checklist.
 4. New physical-iPhone classroom playback/record/save/switch/resume evidence and real learner independent first-course/next-day/week use. Existing iPhone release/login evidence is historical, not proof for this newly changed classroom. Recruitment/sample size and trial scheduling need owner coordination; this cannot be completed by synthetic profiles in one uninterrupted coding session.
-5. Clarify with the owner whether an explicitly labelled limited trial may precede those human gates, or whether public release must wait. Two non-blocking questions were sent while development continued; no choice is assumed. Preserve the existing published site until a permitted rollout and final acceptance can actually be completed.
+5. Limited trial publication is now owner-approved. Final human-learning acceptance remains incomplete; retain visible trial/synthetic/pending-review labels and report the missing evidence instead of announcing complete validation.
 
 ## October3 absolute-beginner Japanese and discoverability correction — candidate
 

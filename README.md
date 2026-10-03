@@ -4,13 +4,13 @@ Formerly Jove English OS. The repository, public URL, PWA scope and existing Eng
 
 A personal, local-first language trainer for a native Chinese speaker, focused on natural listening and spontaneous speaking. It connects input, comprehension, chunks, retrieval, conversation, correction, delayed review and new-context transfer. Learning estimates carry evidence; completing a page never establishes mastery.
 
-## 新课堂候选版：尚未发布
+## 新课堂试用版：教学验证尚未完成
 
-10月3日文书要求的改版已实现为候选版，不能用下文旧版的“已发布”状态替代本轮验收。英语和日语各有三节原创入门课：先用中文解释、听一句短示范，再认意思、拼一句、表达自己的意思；遇到困难可缩小任务，不要求先会写或先会五十音。隔天到期后用不同场景复用，不把照着提示答对算成独立掌握。
+10月3日文书要求的改版已实现，主人批准明确标注为有限试用版；是否已发布、确切版本及验收记录以 [项目状态](docs/STATUS.md) 为准。英语和日语各有三节原创入门课：先用中文解释、听一句短示范，再认意思、拼一句、表达自己的意思；遇到困难可缩小任务，不要求先会写或先会五十音。隔天到期后用不同场景复用，不把照着提示答对算成独立掌握。
 
-候选版从 Today／日本語的课堂主按钮开始，跟随每一步的一个主要动作；“听不懂／需要帮助”保留辅助示范，录音不可用时可点选或打字继续。原有练习在另一个可展开区域，旧记录不清空。AI 是可选的当前回答纠错，先保存原答案再请求；失败时仍能继续本地课。短示范明确标注为待人工复核的合成语音，不冒充真人发音教材。三节课不是完整语言课程；既有真人外链、阅读和复习继续保留。
+试用版从 Today／日本語的课堂主按钮开始，跟随每一步的一个主要动作；“听不懂／需要帮助”保留辅助示范，录音不可用时可点选或打字继续。原有练习在另一个可展开区域，旧记录不清空。AI 是可选的当前回答纠错，先保存原答案再请求；失败时仍能继续本地课。短示范明确标注为待人工复核的合成语音，不冒充真人发音教材。三节课不是完整语言课程；既有真人外链、阅读和复习继续保留。
 
-本轮待完成的真实模型、人工教学／音频复核、iPhone 和次日／一周试用见 [项目状态](docs/STATUS.md)。这些不能用模拟回答或程序测试代替；当前正式网站仍为先前发布版本。
+本轮待完成的真实模型、人工教学／音频复核、iPhone 和次日／一周试用见 [项目状态](docs/STATUS.md)。这些不能用模拟回答或程序测试代替；有限试用不代表教学准确率或长期学习效果已经被证实。
 
 ## 中文使用说明
 
