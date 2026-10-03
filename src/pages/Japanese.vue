@@ -39,8 +39,9 @@ const placement = shallowRef<ReturnType<typeof japaneseStartingPoint>>()
 const confirmBeginner = ref(false)
 const task = computed(() => plan.value?.tasks.find(task => !task.done && !task.optional))
 const nextLesson = computed(() => japaneseLessons.find(item => item.id === task.value?.materialId))
-const delayedPractice = computed(() => !!guide.value?.independentFirst && guide.value.phase === 'delayed-transfer')
-const applicationPractice = computed(() => !!guide.value?.independentFirst)
+const textOnly = computed(() => draft.practiceMode === 'text' || draft.practiceMode === 'choice')
+const delayedPractice = computed(() => !textOnly.value && !!guide.value?.independentFirst && guide.value.phase === 'delayed-transfer')
+const applicationPractice = computed(() => !textOnly.value && !!guide.value?.independentFirst)
 const supportedReplacement = computed(() => delayedPractice.value && independentLocked.value && !!draft.audioUnavailable
   && !audio.value.some(asset => asset.id === draft.audioId && asset.blob.size > 0))
 const practiceContext = computed(() => guide.value?.contextPrompt || lesson.value?.transferZh || '')
@@ -49,14 +50,16 @@ const originalPlayback = useRecordingUrl(computed(() => audio.value.find(asset =
 const retryPlayback = useRecordingUrl(computed(() => audio.value.find(asset => asset.id === draft.retryAudioId)))
 const nextEnabled = computed(() => step.value === 'listen' ? applicationPractice.value
   ? !!draft.response.trim() && !!draft.example.trim() && (!delayedPractice.value || !!draft.audioId)
-  : draft.listened && !!draft.response.trim()
-  : step.value === 'notice' ? !!draft.expression.trim() && !!draft.example.trim() && (!applicationPractice.value || draft.listened)
-    : step.value === 'speak' ? !!draft.audioId : !!draft.retryAudioId && !!draft.comparison.trim())
+  : (textOnly.value || draft.listened) && !!draft.response.trim()
+  : step.value === 'notice' ? !!draft.expression.trim() && !!draft.example.trim() && (textOnly.value || !applicationPractice.value || draft.listened)
+    : step.value === 'speak' ? textOnly.value ? !!draft.example.trim() : !!draft.audioId
+      : (textOnly.value ? !!draft.retryText?.trim() : !!draft.retryAudioId) && !!draft.comparison.trim())
 
 async function refreshAudio() { audio.value = await database.audio.toArray() }
 function restore(saved: StudySession) {
   session.value = saved
   delete draft.audioUnavailable; delete draft.missingAudioIds; delete draft.effort
+  delete draft.practiceMode; delete draft.retryText; delete draft.helped
   Object.assign(draft, japanesePracticeDraft.parse(saved.draft))
   step.value = (saved.completedAt ? 'compare' : saved.stage) as JapanesePracticeStep
   dirty.value = false
@@ -156,13 +159,30 @@ function sessionPath(saved: StudySession) {
 async function move(next: JapanesePracticeStep) {
   if (captureActive.value || !session.value) return
   await flush()
-  if (delayedPractice.value && step.value === 'listen' && next === 'notice') {
+  if ((delayedPractice.value || textOnly.value) && step.value === 'listen' && next === 'notice') {
     await learning.lockIndependentAttempt(session.value.id)
     independentLocked.value = true
   }
   if (next === 'notice' && guide.value && !draft.expression.trim() && lesson.value) draft.expression = lesson.value.phrase
+  if (textOnly.value && next === 'speak') draft.helped = true
   const saved = await learning.save(session.value.id, { ...draft }, next)
   restore(saved)
+}
+async function chooseTextPractice(mode: 'text' | 'choice') {
+  if (!session.value || captureActive.value || coachActive.value) return
+  await flush()
+  draft.practiceMode = mode
+  if (mode === 'choice') draft.helped = true
+  changed(); await flush()
+  notice.value = mode === 'choice' ? '已改为有提示选句练习；原回答和录音保留，不计为独立表达或口语。'
+    : '已改为文字表达与修正，不需要麦克风；实际听过才勾选听音，口语与独立迁移仍待验证。'
+}
+function useTaughtExpression(retry = false) {
+  if (!lesson.value) return
+  draft.practiceMode = 'choice'; draft.helped = true
+  if (retry) draft.retryText = lesson.value.phrase
+  else { draft.expression = lesson.value.phrase; draft.example = lesson.value.phrase }
+  changed()
 }
 const recorderWorkspace = computed(() => {
   // Capture the session and recording role when Recorder mounts.
@@ -288,11 +308,11 @@ onBeforeUnmount(() => {
         <section v-if="recent.length" class="section"><h2>最近完成的练习</h2><p class="help-text">回听原件或接续已有 AI 请求，不重复记为完成。</p><p v-for="saved in recent" :key="saved.id"><RouterLink :to="{ path: '/ja', query: { session: saved.id } }">{{ japaneseLessons.find(lesson => lesson.id === saved.materialId)?.title ?? '日语练习' }} · {{ new Date(saved.completedAt!).toLocaleDateString('zh-CN') }} · 回看</RouterLink></p></section>
       </template>
       <section v-else-if="session?.completedAt" class="panel ja-panel">
-        <h2>这次练习已保存</h2><p>回答、原始录音和重说录音都已保留。参考词块已加入日语间隔复习；完成练习不等于已掌握。</p>
+        <h2>这次练习已保存</h2><p v-if="textOnly">文字／选句表达与修正分别保留，已有录音仍可回听。听懂、口语与独立迁移没有据此通过验证；完成练习不等于掌握。</p><p v-else>回答、原始录音和重说录音都已保留。参考词块已加入日语间隔复习；完成练习不等于已掌握。</p>
         <p v-if="guide">{{ guide.coverage }} 系统会接续应用与延迟换场景，不只跳到下一个视频。</p>
         <h3>{{ lesson?.title ?? '日语练习' }}</h3>
         <p class="help-text">以下是这次提交的原始记录，只回看，不改写。</p>
-        <dl class="saved-responses"><dt>听后回忆</dt><dd>{{ draft.response }}</dd><dt>自己尝试的表达</dt><dd lang="ja">{{ draft.example }}</dd><dt>对照后准备调整</dt><dd>{{ draft.comparison }}</dd></dl>
+        <dl class="saved-responses"><dt>{{ textOnly ? '第一次的回应' : '听后回忆' }}</dt><dd>{{ draft.response }}</dd><dt>自己尝试的表达</dt><dd lang="ja">{{ draft.example }}</dd><template v-if="textOnly"><dt>修正后的完整文字</dt><dd lang="ja">{{ draft.retryText }}</dd><dt>帮助条件</dt><dd>{{ draft.helped ? '使用了参考或选句帮助' : '未标记使用提示' }}；文字尚未独立核验</dd></template><dt>对照后准备调整</dt><dd>{{ draft.comparison }}</dd></dl>
         <p>首次回答录音</p><audio v-if="originalPlayback" :src="originalPlayback" controls aria-label="日语首次回答录音" /><p v-else class="help-text">本机暂未取得这段录音；文字仍保留，可联网后同步。</p>
         <p>完整重说录音</p><audio v-if="retryPlayback" :src="retryPlayback" controls aria-label="日语完整重说录音" /><p v-else class="help-text">本机暂未取得这段录音；文字仍保留，可联网后同步。</p>
         <template v-if="lesson">
@@ -309,6 +329,8 @@ onBeforeUnmount(() => {
         <p v-if="supportedReplacement" class="help-text" role="status">独立首答记录仍锁定。请录一份有参考帮助的替代练习，随后重说；它不会替换或冒充原来的独立录音。</p>
         <p class="eyebrow">{{ { listen: applicationPractice ? '1 / 4 · 先独立表达' : '1 / 4 · 先听懂意思', notice: '2 / 4 · 核对并应用', speak: '3 / 4 · 说清楚', compare: '4 / 4 · 修正后完整重说' }[step] }}</p>
         <h2>{{ lesson.title }}</h2><p class="learning-goal">这次要会用：{{ lesson.canDo }}</p>
+        <div class="row wrap"><button class="button secondary" :aria-pressed="draft.practiceMode === 'text'" :disabled="busy || navigating || captureActive || coachActive" @click="act(() => chooseTextPractice('text'))">不用麦克风，改用文字练习</button><button class="button secondary" :aria-pressed="draft.practiceMode === 'choice'" :disabled="busy || navigating || captureActive || coachActive" @click="act(() => chooseTextPractice('choice'))">不会打日语，改用选句练习</button></div>
+        <p v-if="textOnly" class="help-text" role="status">文字／选句 → 保存原表达 → 核对并修正。录音可选，已有原音频不删除；这不是独立听力、口语或迁移通过的证据。</p>
         <p v-if="guide">{{ guide.goal }}</p>
         <p v-if="applicationPractice">新情境：{{ practiceContext }}</p>
         <p class="help-text">{{ japaneseCourseNames[lesson.course] }} · 第 {{ lesson.position }} 课 · 教材等级不是你的能力成绩</p>
@@ -324,8 +346,8 @@ onBeforeUnmount(() => {
               <p v-if="delayedPractice">再把自己的回答录下来，保存后才展开参考。不会自动评价口音或把录音长度当成能力。</p>
             </template>
             <template v-else>
-              <label class="ja-choice"><input v-model="draft.listened" type="checkbox" @change="changed">我已经实际听过一段原声</label>
-              <label>他们在什么情境，说了什么？可用中文，也可以写下没听懂的地方。<textarea v-model="draft.response" maxlength="10000" rows="4" @input="changed" /></label>
+              <label class="ja-choice"><input v-model="draft.listened" type="checkbox" @change="changed">我已经实际听过一段原声{{ textOnly ? '（仅实际听过才勾选，不是文字练习的必选项）' : '' }}</label>
+              <label>{{ textOnly ? '你想怎样回应这个情境？可用中文说意思，也可以如实写还不会。' : '他们在什么情境，说了什么？可用中文，也可以写下没听懂的地方。' }}<textarea v-model="draft.response" maxlength="10000" rows="4" :readonly="independentLocked" @input="changed" /></label>
             </template>
           </template>
           <template v-else-if="step === 'notice'">
@@ -336,24 +358,27 @@ onBeforeUnmount(() => {
             <p v-if="readingSupport" class="help-text">{{ readingSupport.reason }}</p>
             <p>{{ lesson.grammarZh }}</p><p class="help-text">{{ lesson.soundZh }}</p>
             <p v-if="guide" class="help-text">今天的表达已由系统推荐；你只需把它用于自己的情况，也可以按真实意思修改，不必自己挑学习内容。上方例句不会自动变成你的回答。</p>
-            <template v-if="placement?.kanaSupport && !applicationPractice"><p>还不会写日语很正常。可以先把已解释的短句作为跟读提示，听原声后尝试说出来；这是有帮助的模仿，不算独立书写或已经会说。</p><button type="button" class="button secondary" @click="draft.example = lesson.phrase; changed()">先用示例练说，不要求自己打日语</button></template>
+            <template v-if="(placement?.kanaSupport || textOnly) && !applicationPractice"><p>不会打字时可选已讲过的句子，再核对使用情境；这是有提示练习，不算独立书写或口语。</p><button type="button" class="button secondary" @click="useTaughtExpression()">选择已讲例句，不用打日语</button></template>
             <label>选一个想用的日语表达<input v-model="draft.expression" lang="ja" maxlength="10000" @input="changed"></label>
             <label>换成自己的情况，说或写一句<textarea v-model="draft.example" lang="ja" maxlength="10000" rows="3" @input="changed" /></label>
           </template>
           <template v-if="step === 'speak' || step === 'compare'">
             <p>{{ practiceContext }}</p>
-            <p v-if="step === 'compare'">回放自己的录音，再听原声。一次只改一个地方，然后完整重说。这里只保存练习，不给自动发音或音高分数。</p>
+            <p v-if="textOnly">原文字表达已保留：<span lang="ja">{{ draft.example }}</span>。用单独的修正栏调整，不覆盖原答；已有录音可回听，不要求补录。</p>
+            <p v-else-if="step === 'compare'">回放自己的录音，再听原声。一次只改一个地方，然后完整重说。这里只保存练习，不给自动发音或音高分数。</p>
+            <template v-if="textOnly && step === 'compare'"><label>修正后的完整日语表达（不覆盖原答；原句合适也可保持不变）<textarea v-model="draft.retryText" lang="ja" maxlength="10000" rows="3" @input="changed" /></label><button type="button" class="button secondary" @click="useTaughtExpression(true)">借助已讲例句完成修正</button><p class="help-text">保存你写下或选择的文字，不自动当作正确范例；口语与独立能力仍待新题验证。</p></template>
             <label v-if="step === 'compare'">这次准备调整什么？<textarea v-model="draft.comparison" maxlength="10000" rows="3" @input="changed" /></label>
             <label v-if="step === 'compare'">这次的难度感觉（可不填，系统据此调整任务，不作能力评分）
               <select v-model="draft.effort" @change="effortChanged"><option :value="undefined">暂不反馈</option><option value="hard">比较吃力，需要放慢</option><option value="okay">有挑战，基本跟得上</option><option value="easy">比较轻松</option></select>
             </label>
           </template>
         </fieldset>
-        <audio v-if="step === 'compare' && originalPlayback" :src="originalPlayback" controls aria-label="日语首次回答录音" />
-        <Recorder
+        <audio v-if="(step === 'compare' || textOnly) && originalPlayback" :src="originalPlayback" controls aria-label="日语首次回答录音" />
+        <details v-if="textOnly" class="recording-option"><summary>可选：补录这句日语（不影响文字练习完成）</summary><p>先保存在本机，不自动上传；不替换原来的首答记录，也不证明已会说。</p><Recorder v-if="step === 'speak' || step === 'compare'" :key="session.id + step" :workspace="recorderWorkspace" :saved-audio-id="step === 'compare' ? draft.retryAudioId : draft.audioId" :disabled="busy || navigating" label="日语可选补录" @active="captureActive = $event" /></details>
+        <template v-else><Recorder
           v-if="step === 'speak' || step === 'compare' || (delayedPractice && step === 'listen')" :key="session.id + step" :workspace="recorderWorkspace"
           :saved-audio-id="step === 'compare' ? draft.retryAudioId : draft.audioId" :disabled="busy || navigating || (delayedPractice && step !== 'compare' && independentLocked && !supportedReplacement)"
-          :label="step === 'compare' ? '日语：对照后完整重说' : '日语：新情境回答'" @active="captureActive = $event" />
+          :label="step === 'compare' ? '日语：对照后完整重说' : '日语：新情境回答'" @active="captureActive = $event" /></template>
         <JapaneseCoach
           v-if="step === 'compare'" :key="session.id" :database="database" :session-id="session.id" :audio-id="draft.audioId"
           :reference="`${lesson.canDo}。任务：${practiceContext}。本站表达示例（不是原站字幕）：${lesson.phrase}`" :target="lesson.phrase"

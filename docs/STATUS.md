@@ -1,5 +1,32 @@
 # Current status
 
+## October3 second requirements QA — corrective candidate, publication pending
+
+The owner requested another functional QA and synchronization to the official site. The answer is **not all final requirements are complete**: the six-lesson limited trial is usable software, not a complete zero-to-fluent curriculum or verified human-learning outcome. Preserve its trial and synthetic-audio labels.
+
+Newly reproduced software defects are being closed in this candidate: (1) three completed entry lessons led back to an empty classroom instead of a usable continuation; (2) beginning English first could leave an uninitialized Japanese learner with a false zero allowance, with concurrent admissions also needing a shared-origin reservation lock; (3) existing publisher English/Japanese courses still required recordings to finish; (4) entry goals with delayed-use evidence stopped receiving long-term review; (5) a bookmarked continuation page could hide due entry reviews. The existing conservative Japanese `course-entry` starting point already worked and is not a newly invented ability assessment.
+
+Corrections retain the original infrastructure and evidence: real continuation routes, explicit direct Japanese zero-start admission, writing/selection alternatives with separate original/corrected text and unknown speaking/transfer, shared-budget admission without premature profile writes, and deterministic FSRS goal rechecks without erasing historical retained-use milestones. Native writing-path QA exposed an empty audio reference; new no-recording events now omit that reference rather than weakening global recording validation. Cross-origin/offline-device concurrency is not claimed to be an atomic global time transaction.
+
+Scope boundaries remaining after these corrections:
+
+| Requirement | Actual boundary |
+| --- | --- |
+| Three entry lessons per language, teach/help/repair/save/delayed use | Implemented; current corrective software/public acceptance recorded below when complete |
+| Extended classroom curriculum, gradual English alphabet/phonics units | Not a complete implemented curriculum; expand after content review and real trial, not by claiming six lessons cover fluency |
+| Japanese kana/mora/kanji/register and continuing input | Existing foundation, original reading and publisher-linked paths remain; not a fully reviewed in-class sound/character curriculum |
+| Human speech and pronunciation model quality | Publisher playback is primary real input; fourteen supplemental synthetic clips still need qualified listening review |
+| AI structured feedback, guards/fallback/budget | Implemented; the saved-classroom live accuracy and fifty human-reviewed outputs per language are unmeasured |
+| Save/sync/desktop/mobile and learning outcomes | Engineering evidence is separate from current physical-iPhone continuity and real first-day/next-day/week learner evidence |
+
+This round uses no new paid AI call and does not remove historical billing holds, alter secrets/Auth/cloud identities, clear histories or change Android support. Existing paid service-smoke evidence is reused, not restated as new-classroom teaching validation. Focused regression and independent cross-review precede one exact-source release; pending human/linguistic/device/longitudinal gates stay pending.
+
+Candidate software checks:272 focused domain/content/classroom/sync/provider/Japanese tests pass across the scoped runs, including27 Japanese workspace cases after the final missing-reference fix. Types, production build and changed-file lint pass without new warnings;346-file source/build secret-pattern scan and whitespace checks pass. Eighteen distinct built desktop/mobile-WebKit journeys pass across the targeted rounds: English/Japanese no-microphone completion, separate first/corrected text, reload, pending-reference recovery, post-entry continuation, direct zero-start kana admission, English-first Japanese admission, bookmarked due-review visibility and writing with an unavailable old recording reference. An early WebKit test injected a denial into an absent microphone API and threw uncaught errors; only that fixture was corrected to truthfully distinguish denied versus missing support, and its two paths then pass. No course path or uncaught-error gate was skipped/relaxed. An initial expectation of always returning to Today was corrected to verify the actual next assigned task instead. The earlier exact empty-audio-reference save failure and Japanese missing-first-text event were real defects and are fixed, not hidden by those fixture changes.
+
+The final old-recording fallback preserves existing English/Japanese audio IDs and raw first answers even when their bytes are not on this device. Only explicit writing/selection can proceed with truthful `audioAvailable:false` metadata; newly forged/replaced Japanese references are rejected, and oral completion still requires real originals. This does not delete recordings or rewrite persisted historical events. The final Japanese regression exercises missing metadata-only/deleted local bytes, replacement/clearing rejection, original-answer retention, text completion and unchanged skill/English records.
+
+Independent cross-review covers the shared-budget reservation/fences, FSRS first-attempt/dispute rules, language-specific writing/choice evidence, continuation/due-review priority and unpublished pending-reflection recovery. Pending recovery changes only an unpersisted empty audio reference after matching every same-ID queue payload; different raw answers and all persisted histories remain untouched. Existing hosted ai20/content23/speech-assess18 are ACTIVE with no direct server/AI/Auth/budget/migration source changes. The new local bundle contains extra unused FSRS module initialization and variable renames and is **not byte-identical** to the deployed runtime; independent review found no changed backend request path and no backend redeployment is claimed. Exact clean-source CI and public acceptance remain required before this candidate is reported as published.
+
 ## October3 document-led teaching redesign — limited trial published, final human acceptance incomplete
 
 Owner approved implementation of `D:/chrome下载/Jove_Language_Modification_Spec.docx` after the requirements summary. This is a new scope and is not closed by the earlier remediation or beginner-navigation release.

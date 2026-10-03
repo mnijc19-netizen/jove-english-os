@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { test as storageTest, records } from './browser-fixtures'
+import type { StudyEvent } from '../../src/domain/types'
 
 // Built-bundle contract, unlike japanese-preview's DEV-only source fixtures.
 // Fresh synthetic profiles only; no owner login, provider call or PWA claim.
@@ -33,6 +34,85 @@ test('Japanese production gate matches its navigation, diagnosis and data contro
   await expect(page.locator('#data-language')).toBeVisible()
   await page.locator('#data-language').selectOption('ja')
   await expect(page.getByText('当前操作只针对日语。', { exact: false })).toBeVisible()
+})
+
+storageTest('Japanese legacy practice survives unavailable microphone with a separate written correction and no oral credit', async ({ page }, testInfo) => {
+  storageTest.skip(process.env.VITE_JOVE_JAPANESE !== '1', 'Japanese build gate is off')
+  let paid = 0
+  await page.route('https://openrouter.ai/**', route => { paid++; return route.abort() })
+  await page.route('**/functions/v1/ai', route => { paid++; return route.abort() })
+  await page.addInitScript(() => {
+    const probe = window as Window & { __joveLegacyMicrophone?: 'denied' | 'missing' }
+    const mediaDevices = navigator.mediaDevices
+    if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') {
+      probe.__joveLegacyMicrophone = 'missing'
+      return
+    }
+    Object.defineProperty(mediaDevices, 'getUserMedia', { configurable: true,
+      value: async () => {
+        probe.__joveLegacyMicrophone = 'denied'
+        throw new DOMException('Synthetic microphone denial', 'NotAllowedError')
+      } })
+  })
+  await page.goto('#/ja')
+  await page.getByRole('button', { name: '我是零基础，不猜题直接起步', exact: true }).click()
+  await page.getByRole('button', { name: '确认零基础起点', exact: true }).click()
+  await expect(page.getByRole('heading', { name: /^今日练习：/ })).toBeVisible()
+  await page.evaluate(async () => {
+    const request = indexedDB.open('jove-english-os-ja')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) })
+    const id = 'fixture-ja-no-mic', materialId = 'ja-irodori-starter-1', timestamp = Date.now() - 1000
+    try { await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction(['sessions', 'events'], 'readwrite')
+      tx.objectStore('sessions').put({ id, kind: 'japanese-practice', materialId, startedAt: timestamp, stage: 'listen',
+        draft: { taskId: 'fixture-ja-no-mic-task', revision: 0, listened: false, response: '',
+          expression: '', example: '', audioId: '', retryAudioId: '', comparison: '' } })
+      tx.objectStore('events').put({ id: `${id}:course-assignment`, type: 'JAPANESE_COURSE_ASSIGNED', timestamp, sessionId: id, source: 'objective',
+        data: { materialId, coursePhase: 'delayed-transfer', contextId: `${materialId}:context:2`, contextPrompt: '早上向同事礼貌问候。' } })
+      tx.objectStore('events').put({ id: `${id}:started`, type: 'TASK_STARTED', timestamp, sessionId: id, source: 'objective',
+        data: { taskId: 'fixture-ja-no-mic-task', materialId, minutes: 5 } })
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
+    }) } finally { database.close() }
+  })
+  const english = await records(page, 'events')
+  await page.goto('#/ja?session=fixture-ja-no-mic')
+  await page.getByRole('button', { name: 'Record response', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Record response', exact: true })).toBeEnabled()
+  const microphoneState = () => page.evaluate(() =>
+    (window as Window & { __joveLegacyMicrophone?: 'denied' | 'missing' }).__joveLegacyMicrophone)
+  await expect.poll(microphoneState).toMatch(/^(denied|missing)$/)
+  testInfo.annotations.push({ type: 'microphone', description: (await microphoneState())! })
+  await page.getByRole('button', { name: '不用麦克风，改用文字练习', exact: true }).click()
+  await expect(page.getByText('文字／选句 → 保存原表达 → 核对并修正。', { exact: false })).toBeVisible()
+  await page.getByRole('textbox', { name: '你想怎样回应这个情境？可用中文说意思，也可以如实写还不会。', exact: true }).fill('还不会，先练早晨问候')
+  await page.getByRole('button', { name: '保存并继续', exact: true }).click()
+  await expect.poll(async () => (await records(page, 'events', 'jove-english-os-ja'))
+    .some(event => event.id === 'fixture-ja-no-mic:independent-attempt')).toBe(true)
+  await expect(page.getByText('以下是本站练习例句，不是原站逐字字幕：', { exact: true })).toBeVisible()
+  const first = (await records(page, 'events', 'jove-english-os-ja') as unknown as StudyEvent[]).find(event => event.id === 'fixture-ja-no-mic:independent-attempt')!
+  expect(first.data).toMatchObject({ practiceMode: 'text', recordingBeforeHelp: false, speakingVerified: false, independentTransferVerified: false })
+  expect(first.data?.audioId).toBeUndefined()
+  await page.getByRole('textbox', { name: '换成自己的情况，说或写一句', exact: true }).fill('おはよう。')
+  await page.getByRole('button', { name: '保存并继续', exact: true }).click()
+  await page.getByRole('button', { name: '保存并继续', exact: true }).click()
+  await page.getByRole('button', { name: '借助已讲例句完成修正', exact: true }).click()
+  await page.getByRole('textbox', { name: '这次准备调整什么？', exact: true }).fill('对同事使用更礼貌的问候，不覆盖原句。')
+  await page.getByRole('button', { name: '保存这次完整练习', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '这次练习已保存', exact: true })).toBeVisible()
+  await page.reload()
+  await expect(page.getByRole('heading', { name: '这次练习已保存', exact: true })).toBeVisible()
+  const saved = (await records(page, 'sessions', 'jove-english-os-ja')).find(row => row.id === 'fixture-ja-no-mic')!
+  expect(saved.draft).toMatchObject({ practiceMode: 'choice', helped: true, listened: false, audioId: '', retryAudioId: '',
+    example: 'おはよう。', retryText: 'おはようございます。' })
+  const events = await records(page, 'events', 'jove-english-os-ja')
+  expect(events.find(event => event.id === first.id)).toEqual(first)
+  expect(events.find(event => event.id === 'fixture-ja-no-mic:reflection')).toMatchObject({ type: 'JAPANESE_TEXT_PRACTICE', source: 'text', prompted: true,
+    data: { listened: false, practiceMode: 'choice', independentTransferVerified: false, speakingVerified: false } })
+  expect(events.filter(event => event.id === 'fixture-ja-no-mic:completed')).toHaveLength(1)
+  expect(await records(page, 'audio', 'jove-english-os-ja')).toEqual([])
+  expect((await records(page, 'skills', 'jove-english-os-ja')).every(skill => skill.evidenceCount === 0)).toBe(true)
+  expect(await records(page, 'events')).toEqual(english)
+  expect(paid).toBe(0)
 })
 
 storageTest('Japanese delayed application saves a first answer before exposing reference help', async ({ page }) => {

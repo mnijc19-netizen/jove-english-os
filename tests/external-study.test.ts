@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { externalMaterials, externalPracticeReady, externalLessonCandidates, externalCoursePractice, unavailableExternalIds, externalExpressionGuide } from '../src/content/external'
+import { externalMaterials, externalPracticeReady, externalLessonCandidates, externalCoursePractice, unavailableExternalIds, externalExpressionGuide, validExternalReflection, normalizePendingWrittenReflection } from '../src/content/external'
 import { materialSchema } from '../src/db/schema'
 import { aggregateSkills, makePlan } from '../src/domain/engine'
 import { defaultProfile, type StudyEvent } from '../src/domain/types'
@@ -69,6 +69,25 @@ describe('publisher-linked guided lessons', () => {
       id:String(i),type,source:i===1?'self-report':'objective',timestamp:Date.now(),data:{materialId:externalMaterials[0]!.id,playbackObserved:false}}))
     expect(aggregateSkills(events).every(s=>s.evidenceCount===0)).toBe(true)
   })
+  it('permits explicitly chosen written practice without inventing a recording or oral ability', () => {
+    const draft = { listened: true, answer: 'They introduce themselves.', expression: 'My name is', example: 'My name is Jove.', audioId: '', responseMode: 'text' as const }
+    expect(externalPracticeReady(draft)).toBe(true)
+    expect(externalPracticeReady({ ...draft, responseMode: 'audio' })).toBe(false)
+    expect(externalPracticeReady({ ...draft, listened: false })).toBe(false)
+    const now = Date.UTC(2026, 9, 3), event: StudyEvent = { id: 'written-participation', sessionId: 'written-session',
+      type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report', timestamp: now,
+      data: { materialId: externalMaterials[0]!.id, response: draft.answer, expression: draft.expression, example: draft.example,
+        responseMode: 'text', speakingVerified: false, listened: true, playbackObserved: false, comprehensionVerified: false } }
+    expect(validExternalReflection(event, externalMaterials[0]!.id, now)).toBe(true)
+    expect(validExternalReflection({ ...event, data: { ...event.data, speakingVerified: true } }, externalMaterials[0]!.id, now)).toBe(false)
+    const pending = { ...event, data: { ...event.data, audioId: '' } }
+    const normalized = normalizePendingWrittenReflection(pending)
+    expect(normalized).toEqual(event)
+    expect(pending.data.audioId).toBe('')
+    const oral = { ...pending, data: { ...pending.data, responseMode: 'audio' } }
+    expect(normalizePendingWrittenReflection(oral)).toBe(oral)
+    expect(aggregateSkills([event]).every(skill => skill.evidenceCount === 0)).toBe(true)
+  })
 })
 
 describe('external course continuity across weeks', () => {
@@ -83,6 +102,19 @@ describe('external course continuity across weeks', () => {
   })
   const selected = (events: StudyEvent[], materials = pool) =>
     makePlan(profile, [], [], events, materials, undefined, now).tasks.find(t => t.kind === 'listen')?.materialId
+
+  it('keeps written first and delayed application connected without certifying speaking', () => {
+    const materialId = pool[0]!.id
+    const input = reflection(materialId, now - 2 * day)
+    input.data = { ...input.data, guidedVersion: 1, coursePhase: 'input-application', contextId: `${materialId}:application:0`,
+      responseMode: 'text', speakingVerified: false, audioId: '', retryAudioId: '', firstExample: 'I Jove.', retryText: 'I am Jove.' }
+    delete input.data.audioId
+    expect(externalCoursePractice(materialId, [input], now)).toMatchObject({ phase: 'delayed-application', complete: false })
+    const delayed = reflection(materialId, now, { data: { ...input.data, coursePhase: 'delayed-application', contextId: `${materialId}:application:1` } })
+    expect(externalCoursePractice(materialId, [delayed, input], now).complete).toBe(true)
+    expect(externalCoursePractice(materialId, [input, { ...delayed, data: { ...delayed.data, retryText: '' } }], now).complete).toBe(false)
+    expect(aggregateSkills([input, delayed]).every(skill => skill.evidenceCount === 0)).toBe(true)
+  })
 
   it('remembers a submitted lesson beyond seven days and selects eligible new input', () => {
     const first = selected([])!

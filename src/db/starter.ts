@@ -8,6 +8,27 @@ import type { JoveDatabase } from './db'
 import { eventSchema, sessionSchema } from './schema'
 import { createLearningRepository } from './repository'
 import { readLanguageDay } from './language-day'
+import { languageDatabases } from '../domain/language'
+
+const starterAdmissions = new Map<string, Promise<void>>()
+
+/** Keep the cross-database preflight and commit in one origin-wide admission.
+ * Acquire outside IndexedDB transactions; isolated/test stores use a local queue. */
+async function withStarterAdmission<T>(english: JoveDatabase, admit: () => Promise<T>): Promise<T> {
+  if (Dexie.currentTransaction) throw new Error('Starter admission must start outside an existing transaction')
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
+  if (locks) return locks.request(`jove-language-os:starter-budget:${english.name}`, { mode: 'exclusive' }, admit)
+  const previous = starterAdmissions.get(english.name) ?? Promise.resolve()
+  let release!: () => void
+  const pending = new Promise<void>(resolve => { release = resolve })
+  starterAdmissions.set(english.name, pending)
+  await previous
+  try { return await admit() }
+  finally {
+    release()
+    if (starterAdmissions.get(english.name) === pending) starterAdmissions.delete(english.name)
+  }
+}
 
 export const starterDraftSchema = z.strictObject({
   version: z.literal(1), lessonVersion: z.number().int().min(1), revision: z.number().int().min(0),
@@ -99,8 +120,9 @@ export function createStarterClassroom(database: JoveDatabase, english: JoveData
     await assertCurrent()
     return selected
   }
-  async function allowance(now = Date.now()) {
-    const day = await readLanguageDay(english, now, database.language === 'ja' ? database : undefined)
+  async function allowance(now = Date.now()) { return remainingAllowance(now) }
+  async function remainingAllowance(now: number, admitJapanese = false) {
+    const day = await readLanguageDay(english, now, database.language === 'ja' ? database : undefined, { admitJapanese })
     if (day) return Math.max(0, day.allowances[database.language].remaining - day.allowances[database.language].reserved)
     const profile = await english.profiles.get('main'), events = await english.events.toArray()
     const receipts = new Map<string, number>()
@@ -115,6 +137,9 @@ export function createStarterClassroom(database: JoveDatabase, english: JoveData
     return Math.max(0, (profile?.dailyMinutes ?? 45) - [...receipts.values(), ...started.values()].reduce((sum, minutes) => sum + minutes, 0))
   }
   async function start(lessonId: string, pace: 'quick' | 'standard' = 'standard', now = Date.now(), review = false): Promise<StarterState> {
+    return withStarterAdmission(english, () => startAdmitted(lessonId, pace, now, review))
+  }
+  async function startAdmitted(lessonId: string, pace: 'quick' | 'standard', now: number, review: boolean): Promise<StarterState> {
     await assertCurrent()
     const lesson = starterLesson(lessonId)
     if (!lesson || lesson.language !== database.language) throw new Error('这节课不属于当前语言。')
@@ -122,7 +147,13 @@ export function createStarterClassroom(database: JoveDatabase, english: JoveData
     const previous = await database.sessions.filter(session => session.kind === 'starter-classroom' && session.materialId === lessonId
       && !session.id.startsWith('reading-conflict:') && !session.completedAt && session.draft.purpose === (review ? 'review' : 'lesson')).first()
     if (previous) return load(previous.id)
-    const remaining = await allowance(now), minutes = review ? 3 : lesson.minutes[pace]
+    // A per-tab queue cannot safely replace an origin lock for shared stores.
+    // Existing drafts remain resumable on older browsers, without new reservations.
+    if (english.name === languageDatabases.en && !(typeof navigator !== 'undefined' && navigator.locks)
+      && (database.language === 'ja' || (await Dexie.getDatabaseNames()).includes(languageDatabases.ja))) {
+      throw new Error('当前浏览器无法协调两种语言的共同时间额度，请更新浏览器后开新课；已保存的课仍可继续。')
+    }
+    const remaining = await remainingAllowance(now, database.language === 'ja'), minutes = review ? 3 : lesson.minutes[pace]
     if (remaining < minutes) throw new Error(`今天剩余安排不足${minutes}分钟。可继续已保存的课，或在首页减少其他安排；不会额外叠加必做任务。`)
     const sessions = await database.sessions.toArray()
     if (review) {

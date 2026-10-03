@@ -78,8 +78,9 @@ export function externalExpressionGuide(material: Material) {
 }
 
 /** Self-report is useful reflection, but no third-party playback is observable. */
-export function externalPracticeReady(draft: { listened: boolean; answer: string; expression: string; example: string; audioId: string }) {
-  return draft.listened && !!draft.answer.trim() && !!draft.expression.trim() && !!draft.example.trim() && !!draft.audioId
+export function externalPracticeReady(draft: { listened: boolean; answer: string; expression: string; example: string; audioId: string; responseMode?: 'audio' | 'text' }) {
+  return draft.listened && !!draft.answer.trim() && !!draft.expression.trim() && !!draft.example.trim()
+    && (draft.responseMode === 'text' || !!draft.audioId)
 }
 
 function voaCoursePosition(material: Material): { course: string; position: number } | undefined {
@@ -107,17 +108,30 @@ export function externalCatalogFresh(material: Material, now: number): boolean {
 }
 
 const practiceDay = 86_400_000
+/** Only pending written participation may shed an empty, never-valid reference.
+ * The caller must first prove this event has NOT been persisted. Raw text stays. */
+export function normalizePendingWrittenReflection(event: StudyEvent): StudyEvent {
+  if (event.type !== 'EXTERNAL_LISTEN_REFLECTION' || event.source !== 'self-report' || event.data?.responseMode !== 'text'
+    || event.data.speakingVerified !== false || event.data.audioId !== '') return event
+  const data = { ...event.data }
+  delete data.audioId
+  return { ...event, data }
+}
 export function validExternalReflection(event: StudyEvent, materialId: string, now: number) {
   const data = event.data
   return event.type === 'EXTERNAL_LISTEN_REFLECTION' && event.source === 'self-report' && !!event.sessionId
     && Number.isFinite(event.timestamp) && event.timestamp >= 0 && event.timestamp <= now && data?.materialId === materialId
     && data.listened === true && data.playbackObserved === false && data.comprehensionVerified === false
-    && ['response', 'expression', 'example', 'audioId'].every(key => typeof data[key] === 'string' && String(data[key]).trim())
+    && ['response', 'expression', 'example'].every(key => typeof data[key] === 'string' && String(data[key]).trim())
+    && (data.responseMode === 'text' ? data.speakingVerified === false && (data.audioId === undefined
+      || typeof data.audioId === 'string' && !!data.audioId.trim())
+      : typeof data.audioId === 'string' && !!data.audioId.trim())
 }
 function guidedReflection(event: StudyEvent) {
   const data = event.data
-  return data?.guidedVersion === 1 && typeof data.retryAudioId === 'string' && !!data.retryAudioId.trim()
-    && data.retryAudioId !== data.audioId && typeof data.firstExample === 'string' && !!data.firstExample.trim()
+  return data?.guidedVersion === 1 && typeof data.firstExample === 'string' && !!data.firstExample.trim()
+    && (data.responseMode === 'text' ? data.speakingVerified === false && typeof data.retryText === 'string' && !!data.retryText.trim()
+      : typeof data.retryAudioId === 'string' && !!data.retryAudioId.trim() && data.retryAudioId !== data.audioId)
 }
 /** A practice sequence, not coverage of an entire publisher lesson or a mastery verdict.
  * Legacy participation retains its original scheduling contract; new work needs a

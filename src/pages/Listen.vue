@@ -6,7 +6,8 @@ import { db } from "../db/db";
 import { addChunk, saveError } from "../db/repository";
 import { useRequest } from "../composables/useRequest";
 import { demoMaterials } from "../content/materials";
-import { externalPracticeReady, externalCoursePractice, validExternalReflection, externalExpressionGuide } from "../content/external";
+import { externalPracticeReady, externalCoursePractice, validExternalReflection, externalExpressionGuide, normalizePendingWrittenReflection } from "../content/external";
+import { canonical } from '../sync/protocol';
 import { contentAudioIsTransient, prepareContentAudio } from "../cloud/content";
 import type { Evaluation, MaterialChunk, StudyEvent, StudySession } from "../domain/types";
 import AudioPlayer from "../components/AudioPlayer.vue";
@@ -34,6 +35,7 @@ interface WordLookup {
 }
 interface ListeningDraft {
   externalGuidedVersion?: number;
+  externalResponseMode?: 'audio' | 'text';
   externalCoursePhase: 'input-application' | 'delayed-application'; externalContextId: string; externalContextPrompt: string;
   externalFirstExample: string; externalRetryText: string; externalRetryAudioId: string; externalOriginalAudioId: string;
   externalFeedback: Evaluation | null; externalFeedbackInput: string; externalAdoptedCorrection: string;
@@ -49,6 +51,7 @@ interface ListeningDraft {
   playbackRates: number[]; playbackRateUnknown: boolean;
 }
 const freshDraft = (): ListeningDraft => ({
+  externalResponseMode: 'audio',
   externalGuidedVersion: 1, externalFirstExample: '', externalRetryText: '', externalRetryAudioId: '', externalOriginalAudioId: '',
   externalCoursePhase: 'input-application', externalContextId: '', externalContextPrompt: '',
   externalFeedback: null, externalFeedbackInput: '', externalAdoptedCorrection: '',
@@ -82,8 +85,9 @@ const savedAudioId = computed({ get: () => draft.audioId, set: (value: string) =
 const material = computed(() => app.materials.find(m => m.id === materialId.value));
 const externalGuide = computed(() => material.value?.externalStudy ? externalExpressionGuide(material.value) : null);
 const externalReady = computed(() => externalPracticeReady({ listened: draft.listened, answer: draft.answer,
-  expression: draft.externalExpression, example: draft.externalExample, audioId: draft.audioId })
-  && (draft.externalGuidedVersion !== 1 || !!draft.externalRetryAudioId && draft.externalRetryAudioId !== draft.audioId));
+  expression: draft.externalExpression, example: draft.externalExample, audioId: draft.audioId, responseMode: draft.externalResponseMode })
+  && (draft.externalResponseMode === 'text' ? !!draft.externalRetryText.trim()
+    : draft.externalGuidedVersion !== 1 || !!draft.externalRetryAudioId && draft.externalRetryAudioId !== draft.audioId));
 const externalGoal = computed(() => material.value ? englishLearningOutcome({ id: draft.taskId, kind: 'listen', title: material.value.title,
   materialId: material.value.id, minutes: 0, reason: '', done: false }, material.value).goal : '');
 const externalCorrection = computed(() => {
@@ -230,6 +234,19 @@ async function evidence(event: Omit<StudyEvent, "id" | "timestamp"> & { id?: str
   await save();
   await flushEvidence();
 }
+async function recoverPendingWrittenReflection() {
+  const original = draft.externalReflection, token = generation, sessionId = sid.value;
+  if (!original || original.id !== `${sessionId}-external-reflection` || original.sessionId !== sessionId) return;
+  const normalized = normalizePendingWrittenReflection(original);
+  if (normalized === original || await db.events.get(original.id)) return;
+  if (disposed || token !== generation || sid.value !== sessionId) return;
+  const pendingRows = draft.outbox.filter(event => event.id === original.id);
+  if (pendingRows.some(event => canonical(event) !== canonical(original))) throw new Error('两份待保存原答不同，已保留原件，请勿覆盖。');
+  if (!validExternalReflection(normalized, materialId.value, Date.now())) return;
+  draft.externalReflection = normalized;
+  draft.outbox = draft.outbox.map(event => event.id === original.id ? normalized : event);
+  await save();
+}
 watch(draft, reportSave, { deep: true, flush: "sync" });
 const pointerId = (id: string) => "listen-active:" + id;
 const contentExposureTypes = new Set([
@@ -325,7 +342,7 @@ async function load(fresh = false) {
     if (token === generation && !disposed) hydrating.value = false;
   }
   if (token === generation && !disposed && !restoreFailed.value) {
-    try { await save(); if (draft.outbox.length) await flushEvidence(); }
+    try { await recoverPendingWrittenReflection(); await save(); if (draft.outbox.length) await flushEvidence(); }
     catch { localError.value = "Your draft includes pending learning evidence. Retry saving to finish recording it."; }
   }
 }
@@ -585,7 +602,8 @@ async function externalRetryRecorded(value: { audioId: string; duration: number 
   await save(); } catch { localError.value = '重说录音已保留，请重试保存练习记录。'; }
 }
 function coachExternalWriting() {
-  if (working.value || busy.value || captureActive.value || externalLocked.value || !app.keySet || !app.online || !draft.audioId) return;
+  if (working.value || busy.value || captureActive.value || externalLocked.value || !app.keySet || !app.online
+    || !draft.audioId && draft.externalResponseMode !== 'text') return;
   return safely(async () => {
     const token = generation, sessionId = sid.value, input = (draft.externalRetryText || draft.externalFirstExample || draft.externalExample).trim();
     if (!input || draft.externalFeedbackInput === input && draft.externalFeedback) return;
@@ -626,6 +644,8 @@ async function finishExternal() {
   const expectedGeneration = generation;
   let readyToFinish = false;
   await safely(async () => {
+    await recoverPendingWrittenReflection();
+    if (disposed || expectedGeneration !== generation) return;
     const id = materialId.value, sessionId = sid.value, token = generation;
     // Freeze before I/O: route changes replace reactive fields, and retries must
     // reuse the exact immutable evidence ID, timestamp and payload.
@@ -637,7 +657,8 @@ async function finishExternal() {
     const reflection: StudyEvent = historical ? persisted! : frozen.externalReflection ?? {
       id: `${sessionId}-external-reflection`, timestamp: Date.now(), type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report', sessionId,
       data: { materialId: id, response: frozen.answer, expression: frozen.externalExpression, example: frozen.externalExample,
-        meaning: frozen.externalMeaning, audioId: frozen.audioId, listened: true, playbackObserved: false, comprehensionVerified: false,
+        meaning: frozen.externalMeaning, ...(frozen.audioId ? { audioId: frozen.audioId } : {}), listened: true, playbackObserved: false, comprehensionVerified: false,
+        ...(frozen.externalResponseMode === 'text' ? { responseMode: 'text', speakingVerified: false } : {}),
         ...(frozen.externalGuidedVersion === 1 ? { guidedVersion: 1, coursePhase: frozen.externalCoursePhase,
           contextId: frozen.externalContextId, retryAudioId: frozen.externalRetryAudioId, firstExample: frozen.externalFirstExample,
           retryText: frozen.externalRetryText, originalAudioId: frozen.externalOriginalAudioId,
@@ -646,7 +667,12 @@ async function finishExternal() {
     // The original reflection was persisted only after both assets were saved.
     // Missing local blobs after synchronization/backup do not invent a new
     // recording or block idempotent closure of that historical participation.
-    if (!historical) {
+    if (!historical && reflection.data?.responseMode === 'text' && typeof reflection.data.audioId === 'string') {
+      const asset = await db.audio.get(reflection.data.audioId);
+      if (!current()) return;
+      if (!asset?.blob.size) reflection.data.audioAvailable = false;
+    }
+    if (!historical && reflection.data?.responseMode !== 'text') {
       const asset = await db.audio.get(String(reflection.data!.audioId));
       if (!current()) return;
       if (!asset?.blob.size) throw new Error('原录音暂不可用。请先同步取回；这份已冻结的历史仍保留，也可以另开一次练习。');
@@ -856,17 +882,20 @@ onBeforeUnmount(() => {
       <textarea id="external-example" v-model="draft.externalExample" lang="en" rows="2" maxlength="1000" :readonly="externalLocked || working" />
       <label for="external-meaning">已核对的意思（可选；填好后加入间隔复习）</label>
       <input id="external-meaning" v-model="draft.externalMeaning" maxlength="800" :readonly="externalLocked || working" />
-      <button class="button primary" aria-label="Continue to spoken retell" :disabled="!draft.externalExpression.trim() || !draft.externalExample.trim() || (externalDelayed && !draft.listened) || working" @click="externalStep(2)">接下来：把自己的回答说出来</button>
+      <button class="button primary" aria-label="Continue to spoken retell" :disabled="!draft.externalExpression.trim() || !draft.externalExample.trim() || (externalDelayed && !draft.listened) || working" @click="externalStep(2)">接下来：改一处，再完整表达</button>
       </div>
       <div v-if="stage >= 2" class="response-area">
       <h3 aria-label="3 · Close the script and retell">3 · 说清楚，改一处，再完整重说</h3>
-      <p>关掉原文，把自己的回答用 1–4 句英语说出来。回听第一遍，只改一处最影响理解的地方；如果已经表达清楚，第二遍尝试更自然地一口气说完。</p>
+      <p>关掉原文，把自己的回答用 1–4 句英语说出来；不便录音时，也可以完整写出来。只改一处最影响理解的地方，正确的句子不用为了纠错而改错。</p>
+      <fieldset :disabled="working || captureActive || externalLocked"><legend>这次怎样练表达？</legend><label><input v-model="draft.externalResponseMode" type="radio" value="audio">录音、回听，再完整重说</label><label><input v-model="draft.externalResponseMode" type="radio" value="text">这次不录音，用文字练习</label></fieldset>
+      <p v-if="draft.externalResponseMode === 'text'" class="help-text">首次写作和这次修正分别保存。只记录文字练习，口语仍待验证；已有录音不会删除。</p>
       <p class="help-text">首次写作保留：<span lang="en">{{ draft.externalFirstExample || draft.externalExample }}</span></p>
       <p v-if="externalMissingOriginal" class="help-text" role="status">原录音本机尚不可用，可联网同步取回；也可以补录继续本次练习。原首录事件和文字不会被改写，补录不会冒充独立首答。</p>
       <Recorder
+        v-if="draft.externalResponseMode !== 'text'"
         label="External lesson retell" :saved-audio-id="savedAudioId" :disabled="working || externalLocked || externalRetryCaptureActive || (draft.externalGuidedVersion === 1 && externalOriginalAvailable)"
         @active="shadowCaptureActive = $event" @recorded="externalRecorded" />
-      <template v-if="draft.audioId">
+      <template v-if="draft.audioId || draft.externalResponseMode === 'text'">
         <button v-if="app.keySet" class="button secondary" :disabled="working || busy || captureActive || externalLocked || !app.online" @click="coachExternalWriting">让 AI 帮我改清楚这段英语</button>
         <p class="help-text">AI 只点评你的文字表达，不猜原站听力答案或打发音分。也可以自己对照真人文本，改一处后继续；没有 AI 不会卡住学习。</p>
         <p v-if="error" class="error" role="alert">{{ error }} 首次回答和录音仍保留，可以继续自己核对。</p>
@@ -874,7 +903,7 @@ onBeforeUnmount(() => {
         <button v-if="externalCorrection" class="text-button" :disabled="working || captureActive || externalLocked || !externalFeedbackVisible || !!draft.externalAdoptedCorrection" @click="adoptExternalCorrection">{{ draft.externalAdoptedCorrection ? '已加入针对性复习' : '这条纠错符合我的意思，加入后续复习' }}</button>
         <label for="external-retry-text">修正后的完整表达（不覆盖首次写作；无需为了纠错而改正确的句子）</label>
         <textarea id="external-retry-text" v-model="draft.externalRetryText" lang="en" rows="2" maxlength="1000" :readonly="externalLocked || working" />
-        <div v-if="draft.externalGuidedVersion === 1">
+        <div v-if="draft.externalGuidedVersion === 1 && draft.externalResponseMode !== 'text'">
           <h4>回听 → 完整重说</h4>
           <Recorder
             label="External lesson complete retry" :saved-audio-id="draft.externalRetryAudioId" :disabled="working || externalLocked || shadowCaptureActive"

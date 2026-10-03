@@ -28,17 +28,17 @@ async function useSyntheticLocalProvider(page: Page) {
   }, defaultSettings)
   await page.goto('#/course/en'); await page.reload()
 }
-async function seed(page: Page, language: 'en' | 'ja', lesson: StarterLesson) {
-  await page.evaluate(async ({ language, prerequisites }) => {
+async function seed(page: Page, language: 'en' | 'ja', lesson: StarterLesson, completedAgo = 1000) {
+  await page.evaluate(async ({ language, prerequisites, completedAgo }) => {
     const read = indexedDB.open(language === 'ja' ? 'jove-english-os-ja' : 'jove-english-os')
     const database = await new Promise<IDBDatabase>((resolve, reject) => { read.onsuccess = () => resolve(read.result); read.onerror = () => reject(read.error) })
     await new Promise<void>((resolve, reject) => {
       const tx = database.transaction('sessions', 'readwrite')
       for (const id of prerequisites) tx.objectStore('sessions').put({ id: `fixture-completed-${id}`, kind: 'starter-classroom', materialId: id,
-        startedAt: Date.now() - 3000, completedAt: Date.now() - 1000, stage: 'done', draft: { purpose: 'lesson' } })
+        startedAt: Date.now() - completedAgo - 2000, completedAt: Date.now() - completedAgo, stage: 'done', draft: { purpose: 'lesson' } })
       tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
     }); database.close()
-  }, { language, prerequisites: lesson.prerequisites })
+  }, { language, prerequisites: lesson.prerequisites, completedAgo })
 }
 async function teachAndRecognize(page: Page, lesson: StarterLesson) {
   await expect(page.getByRole('heading', { level: 1 })).toHaveText(lesson.titleZh)
@@ -264,6 +264,90 @@ test('two unsuccessful attempts automatically simplify without erasing either or
   const attempts = (await records(page, 'events')).filter(row => row.type === 'STARTER_ATTEMPT' && (row.data as Record<string, unknown>).stage === 'express')
   expect(attempts).toHaveLength(2)
   expect(attempts.every(row => (row.data as Record<string, unknown>).response === lesson.expression.errors[0]!.input)).toBe(true)
+})
+
+test('a bookmarked continuation page still prioritizes due entry review instead of hiding it', async ({ page }) => {
+  const calls = await blockPaid(page), lessons = starterLessons.filter(lesson => lesson.language === 'en')
+  await page.goto('#/course/en')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('从能用的一句话开始。')
+  await seed(page, 'en', { ...lessons[2]!, prerequisites: lessons.map(lesson => lesson.id) }, 2 * 86400000)
+  await page.goto('#/today?practice=1')
+  const review = page.getByRole('link', { name: '先把学过的表达再用一次 · 约 3 分钟', exact: true })
+  await expect(review).toBeVisible()
+  await expect(page.locator('.legacy-practice')).not.toHaveAttribute('open', '')
+  await review.click()
+  await page.getByRole('button', { name: '开始或接着上次学 · 约 3–5 分钟', exact: true }).click()
+  await expect(page.locator('.starter-example')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: lessons[0]!.transfer[0]!.promptZh, exact: true })).toBeVisible()
+  expect(calls).toEqual([])
+})
+
+test('Japanese literacy can admit a declared zero learner directly without a diagnostic or input method', async ({ page }) => {
+  test.skip(process.env.VITE_JOVE_JAPANESE !== '1', 'Japanese production build gate is off')
+  const calls = await blockPaid(page)
+  await page.goto('#/ja/literacy')
+  await page.getByRole('button', { name: '我还是零基础，接着学假名', exact: true }).click()
+  await expect(page).toHaveURL(/#\/ja\/read\?session=/)
+  await expect(page.getByTestId('kana-teaching')).toContainText('先认识，不用猜，也不用写日语')
+  await expect(page.getByRole('textbox')).toHaveCount(0)
+  expect(calls).toEqual([])
+})
+
+test('starting English first does not lock a new Japanese learner out of the shared daily budget', async ({ page }) => {
+  test.skip(process.env.VITE_JOVE_JAPANESE !== '1', 'Japanese production build gate is off')
+  const calls = await blockPaid(page)
+  await page.goto('#/course/en')
+  await page.getByRole('button', { name: '开始或接着上次学 · 约 3–5 分钟', exact: true }).click()
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(starterLessons[0]!.titleZh)
+  await page.getByRole('button', { name: '暂停，回到今日安排', exact: true }).click()
+  await page.goto('#/course/ja')
+  await page.getByRole('button', { name: '开始或接着上次学 · 约 3–5 分钟', exact: true }).click()
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(starterLessons.find(lesson => lesson.language === 'ja')!.titleZh)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect((await records(page, 'sessions')).filter(row => row.kind === 'starter-classroom')).toHaveLength(1)
+  expect((await records(page, 'sessions', 'jove-english-os-ja')).filter(row => row.kind === 'starter-classroom')).toHaveLength(1)
+  expect(calls).toEqual([])
+})
+
+for (const language of ['en', 'ja'] as const) test(`completed ${language} entry lessons lead to a usable continuation, not another empty classroom`, async ({ page }) => {
+  test.skip(language === 'ja' && process.env.VITE_JOVE_JAPANESE !== '1', 'Japanese production build gate is off')
+  const calls = await blockPaid(page)
+  await page.goto(`#/course/${language}`)
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('从能用的一句话开始。')
+  const lessons = starterLessons.filter(lesson => lesson.language === language)
+  await seed(page, language, { ...lessons[2]!, prerequisites: lessons.map(lesson => lesson.id) })
+  // Actual classroom admission enables its language only after reserving a task.
+  await page.evaluate(async language => {
+    const read = indexedDB.open(language === 'ja' ? 'jove-english-os-ja' : 'jove-english-os')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { read.onsuccess = () => resolve(read.result); read.onerror = () => reject(read.error) })
+    await new Promise<void>((resolve, reject) => {
+      const tx = database.transaction('profiles', 'readwrite'), request = tx.objectStore('profiles').get('main')
+      request.onsuccess = () => tx.objectStore('profiles').put({ ...request.result, onboarded: true })
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
+    }); database.close()
+  }, language)
+  await page.reload()
+  await expect(page.getByRole('button', { name: '开始或接着上次学 · 约 3–5 分钟', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '接续系统安排', exact: true })).toBeVisible()
+  await page.goto(language === 'en' ? '#/today' : '#/ja')
+  await page.getByRole('link', { name: language === 'en' ? '接着系统安排学下一步' : '接着学假名与阅读', exact: true }).click()
+  if (language === 'en') {
+    await expect(page).toHaveURL(/#\/today\?practice=1$/)
+    await expect(page.locator('.legacy-practice')).toHaveAttribute('open', '')
+    await expect(page.getByRole('button', { name: 'Start today’s practice', exact: true })).toBeVisible()
+    await expect(page.getByLabel('下一项学习指引', { exact: true })).toBeVisible()
+  } else {
+    await expect(page).toHaveURL(/#\/ja\/literacy$/)
+    await page.getByRole('button', { name: '开始下一步', exact: true }).click()
+    await expect(page).toHaveURL(/#\/ja\/read\?session=/)
+    await expect(page.getByTestId('kana-teaching')).toContainText('先认识，不用猜，也不用写日语')
+    await expect(page.getByRole('textbox')).toHaveCount(0)
+  }
+  expect(calls).toEqual([])
+  const completed = (await records(page, 'sessions', language === 'en' ? 'jove-english-os' : 'jove-english-os-ja'))
+    .filter(row => String(row.id).startsWith('fixture-completed-'))
+  expect(completed).toHaveLength(3)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
 test.describe('starter classroom offline continuity', () => {

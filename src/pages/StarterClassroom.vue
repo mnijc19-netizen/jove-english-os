@@ -4,7 +4,7 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vu
 import { db as english, createLanguageDatabase } from '../db/db'
 import { createStarterClassroom, type StarterDraft, type StarterState } from '../db/starter'
 import { starterLessons } from '../content/starter-courses'
-import { starterGoalEvidence, starterDemonstrationPath, type StarterStage } from '../domain/starter'
+import { nextStarterLesson, starterGoalEvidence, starterDemonstrationPath, type StarterStage } from '../domain/starter'
 import type { LearningLanguage } from '../domain/language'
 import type { AudioAsset, StudyEvent, StudySession } from '../domain/types'
 import { useApp } from '../stores/app'
@@ -36,6 +36,8 @@ const provider = language === 'en' ? app.provider : japaneseProvider({ database,
 const courseList = computed(() => starterLessons.filter(lesson => lesson.language === language))
 const selected = computed(() => courseList.value.find(lesson => lesson.id === route.query.lesson))
 const home = language === 'ja' ? '/ja' : '/today'
+const continuation = language === 'ja' ? { path: '/ja/literacy' } : { path: '/today', query: { practice: '1' } }
+const nextLesson = computed(() => nextStarterLesson(language, sessions.value, events.value, app.clock))
 const stage = computed(() => state.value?.session.stage as StarterStage | undefined)
 const currentContext = computed(() => state.value?.lesson.transfer.find(context => context.id === state.value?.draft.contextId))
 const meaning = computed(() => stage.value === 'transfer' ? currentContext.value?.meaningZh : state.value?.lesson.model.meaningZh)
@@ -150,7 +152,7 @@ async function continueNext() {
   const next = await learning.next()
   if (next?.session) { restore(await learning.load(next.session.id)); await router.replace({ query: { session: next.session.id } }) }
   else if (next) await begin(next.lesson.id, 'quick', next.review)
-  else error.value = '三节入口课已学过，延迟回顾还没到时间。今天可以先到这里，或回到今日安排继续分级材料；不用重复做题填满时间。'
+  else await router.push(continuation)
 }
 async function submit() {
   await flush()
@@ -290,7 +292,7 @@ onBeforeUnmount(() => {
     <p v-if="!ready && !error" role="status">正在接续你的课堂…</p>
     <details v-if="recoveryCopies.length" class="panel" aria-label="恢复另一台设备的课堂草稿"><summary>另一台设备也保存了草稿，两份原件都保留</summary><p>选择一份接续，会建立新草稿；不会把不同答案、提示或录音拼在一起，也不会重复记为掌握。</p><div v-for="copy in recoveryCopies" :key="copy.id"><p>{{ starterLessons.find(lesson => lesson.id === copy.materialId)?.titleZh }} · {{ copy.completedAt ? '已完成原件' : '未完成草稿' }}</p><p :lang="language">{{ copy.draft.response || '还没有填写回应' }}</p><p class="help-text">{{ copy.draft.helped ? '已用帮助' : '尚未用帮助' }} · {{ copy.draft.audioId ? '保留了录音引用' : '没有关联录音' }}</p><RouterLink v-if="copy.completedAt" :to="{ path: route.path, query: { session: copy.id } }">回看已完成原件</RouterLink><button v-else class="button secondary" :disabled="busy" @click="act(() => recoverBranch(copy.id))">接着这份草稿学</button></div></details>
     <template v-if="ready && !state">
-      <section class="panel starter-focus"><h2>先示范，再练习；完全不会也可以。</h2><p v-if="selected">你正在查看“{{ selected.titleZh }}”。如果还没学过前面的基础，系统会先接续起步课。</p><p>不需要先测验、看完整视频或填写感想。每次只学一个小目标，不会就用中文帮助。</p><button class="button primary" :disabled="busy" @click="act(continueNext)">开始或接着上次学 · 约 3–5 分钟</button></section>
+      <section class="panel starter-focus"><h2>先示范，再练习；完全不会也可以。</h2><p v-if="selected">你正在查看“{{ selected.titleZh }}”。如果还没学过前面的基础，系统会先接续起步课。</p><p>不需要先测验、看完整视频或填写感想。每次只学一个小目标，不会就用中文帮助。</p><button v-if="nextLesson" class="button primary" :disabled="busy" @click="act(continueNext)">开始或接着上次学 · 约 3–5 分钟</button><template v-else><p>三节入口课已经练过，延迟回顾还没到时间。不重复开课填满今天；下面可以回看，也可以接着已有基础与分级练习。</p><RouterLink :to="continuation" class="button primary">接续系统安排</RouterLink></template></section>
       <ol class="course-list"><li v-for="lesson in courseList" :key="lesson.id"><h3>第 {{ lesson.position }} 课 · {{ lesson.titleZh }}</h3><p>{{ lesson.goalZh }}</p><p class="help-text">{{ starterGoalEvidence(lesson, events).retainedUse ? '已有后续时段换情境使用的证据' : starterGoalEvidence(lesson, events).independentUse ? '出现独立表达，下次再确认是否记住' : sessions.some(saved => saved.materialId === lesson.id && saved.completedAt) ? '已学习，独立使用仍待验证' : '从示范开始' }}</p><button class="button secondary" :disabled="busy" @click="act(() => begin(lesson.id, 'standard'))">{{ sessions.some(saved => saved.materialId === lesson.id && !saved.completedAt) ? '继续这节课' : '标准小课' }} · {{ lesson.minutes.standard }} 分钟</button></li></ol>
       <p v-if="language === 'ja'"><RouterLink to="/ja/literacy">另外每天认识几个假名，不要求先背完五十音。</RouterLink></p>
     </template>

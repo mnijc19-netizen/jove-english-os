@@ -1,9 +1,11 @@
 import 'fake-indexeddb/auto'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { JoveDatabase } from '../src/db/db'
 import { createLearningRepository } from '../src/db/repository'
 import { createJapaneseWorkspace, japanesePracticeDraft } from '../src/db/japanese'
 import { createStarterClassroom, starterDraftSchema, starterMaterials, type StarterState } from '../src/db/starter'
+import { readLanguageDay } from '../src/db/language-day'
+import { languageDatabases } from '../src/domain/language'
 import { starterLesson } from '../src/content/starter-courses'
 import { demoMaterials } from '../src/content/materials'
 import { japaneseKana } from '../src/content/japanese-kana'
@@ -12,17 +14,17 @@ import {
   starterDelay, starterGoalEvidence, validateStarterFeedback, type StarterAttempt,
 } from '../src/domain/starter'
 import type { StarterFeedbackOutput } from '../src/ai/starter-schema'
-import type { AudioAsset, StudyEvent, StudySession } from '../src/domain/types'
+import type { AudioAsset, DailyPlan, StudyEvent, StudySession } from '../src/domain/types'
 
 const now = Date.UTC(2026, 9, 3, 4)
 const owner = '00000000-0000-4000-8000-000000000001'
 const otherOwner = '00000000-0000-4000-8000-000000000002'
 const databases: JoveDatabase[] = []
-afterEach(async () => { for (const database of databases.splice(0)) await database.delete() })
+afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); for (const database of databases.splice(0)) await database.delete() })
 
-async function setup(language: 'en' | 'ja' = 'en', active: () => boolean = () => true) {
+async function setup(language: 'en' | 'ja' = 'en', active: () => boolean = () => true, japaneseName = `starter-test-ja-${crypto.randomUUID()}`) {
   const english = new JoveDatabase(`starter-test-en-${crypto.randomUUID()}`, 'en')
-  const japanese = new JoveDatabase(`starter-test-ja-${crypto.randomUUID()}`, 'ja')
+  const japanese = new JoveDatabase(japaneseName, 'ja')
   databases.push(english, japanese)
   await createLearningRepository(english).initialize(demoMaterials)
   await createLearningRepository(japanese).initialize([])
@@ -641,6 +643,190 @@ describe('starter classroom saved sessions, ownership and concurrency', () => {
     expect(states[0]!.session.id).toBe(states[1]!.session.id)
     expect(await database.sessions.where('kind').equals('starter-classroom').count()).toBe(1)
     expect(await database.events.where('type').equals('TASK_STARTED').count()).toBe(1)
+  })
+
+  it('admits an explicit Japanese first lesson after English starts, without changing the English draft or shared total', async () => {
+    const { classroom, english, japanese } = await setup()
+    await english.profiles.update('main', { dailyMinutes: 45 })
+    const en = await classroom.start('en-starter-1', 'quick', now)
+    await classroom.save(en.session.id, en.draft.revision, {
+      response: '尚未提交的英语回答', mode: 'text', audioId: '', romaji: false, activeMs: 1234,
+    })
+    const ja = createStarterClassroom(japanese, english)
+    await ja.open()
+    const before = { profile: await english.profiles.get('main'), sessions: await english.sessions.toArray(), events: await english.events.toArray() }
+    expect((await japanese.profiles.get('main'))?.onboarded).toBe(false)
+    expect(await ja.allowance(now)).toBe(0)
+
+    const state = await ja.start('ja-starter-1', 'quick', now)
+    expect(state.session.stage).toBe('teach')
+    expect((await japanese.profiles.get('main'))?.onboarded).toBe(true)
+    const day = await readLanguageDay(english, now, japanese)
+    expect(day).toMatchObject({ totalMinutes: 45, credited: 0, allowances: { en: { reserved: 5 }, ja: { reserved: 5 } } })
+    expect(day!.credited + day!.allowances.en.remaining + day!.allowances.ja.remaining).toBe(45)
+    expect({ profile: await english.profiles.get('main'), sessions: await english.sessions.toArray(), events: await english.events.toArray() }).toEqual(before)
+  })
+
+  it('does not enable Japanese or reserve work when the shared budget is exhausted', async () => {
+    const { classroom, english, japanese } = await setup()
+    await english.profiles.update('main', { dailyMinutes: 15 })
+    await classroom.start('en-starter-1', 'quick', now)
+    await english.events.add({ id: 'earlier-en-completed', type: 'TASK_COMPLETED', source: 'objective', timestamp: now,
+      data: { taskId: 'earlier-en-task', minutes: 10 } })
+    const ja = createStarterClassroom(japanese, english)
+    await ja.open()
+    const before = { profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }
+    await expect(ja.start('ja-starter-1', 'quick', now)).rejects.toThrow(/剩余安排不足/)
+    expect({ profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }).toEqual(before)
+    expect(await english.events.count()).toBe(2)
+  })
+
+  it.each([false, true])('does not let the old unstarted English plan swallow Japanese admission, with legacy started=%s', async started => {
+    const { classroom, english, japanese } = await setup()
+    await english.profiles.update('main', { dailyMinutes: 45 })
+    const en = await classroom.start('en-starter-1', 'quick', now)
+    const date = new Date(now).toLocaleDateString('en-CA')
+    const plan: DailyPlan = { id: date, date, minutes: 40, focus: 'naturalListening', evidenceFingerprint: 'before-ja-entry', createdAt: now,
+      tasks: [
+        { id: 'legacy-input', kind: 'listen', title: '旧听力', reason: '原安排', minutes: 10, done: false },
+        { id: 'legacy-later', kind: 'speak', title: '尚未开始', reason: '原安排', minutes: 30, done: false },
+      ] }
+    await english.plans.put(plan)
+    if (started) await english.events.add({ id: 'legacy-input-start', type: 'TASK_STARTED', source: 'objective', timestamp: now,
+      data: { taskId: 'legacy-input', kind: 'listen' } })
+    const ja = createStarterClassroom(japanese, english)
+    await ja.open()
+    const original = { session: await english.sessions.get(en.session.id), events: await english.events.toArray() }
+    const preview = await readLanguageDay(english, now, japanese, { admitJapanese: true })
+    expect(preview?.allowances.en.reserved).toBe(started ? 15 : 5)
+    expect(preview!.allowances.ja.remaining).toBeGreaterThanOrEqual(5)
+    expect((await japanese.profiles.get('main'))?.onboarded).toBe(false)
+    expect((await ja.start('ja-starter-1', 'quick', now)).session.stage).toBe('teach')
+    const admitted = await readLanguageDay(english, now, japanese)
+    expect(admitted?.allowances.en.reserved).toBe(started ? 15 : 5)
+    expect(admitted?.allowances.ja.reserved).toBe(5)
+    expect(admitted!.credited + admitted!.allowances.en.remaining + admitted!.allowances.ja.remaining).toBe(45)
+    expect(await english.plans.get(date)).toEqual(plan)
+    expect({ session: await english.sessions.get(en.session.id), events: await english.events.toArray() }).toEqual(original)
+  })
+
+  it('does not persist Japanese activation after a prerequisite or transaction failure', async () => {
+    const { classroom, english, japanese } = await setup()
+    await english.profiles.update('main', { dailyMinutes: 45 })
+    await classroom.start('en-starter-1', 'quick', now)
+    const ja = createStarterClassroom(japanese, english)
+    await ja.open()
+    const before = { profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }
+    await expect(ja.start('ja-starter-2', 'quick', now)).rejects.toThrow(/上一节/)
+    expect({ profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }).toEqual(before)
+    vi.spyOn(japanese.events, 'add').mockRejectedValueOnce(new Error('simulated reservation write failure'))
+    await expect(ja.start('ja-starter-1', 'quick', now)).rejects.toThrow('simulated reservation write failure')
+    expect({ profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }).toEqual(before)
+    const update = japanese.profiles.update.bind(japanese.profiles)
+    vi.spyOn(japanese.profiles, 'update').mockImplementationOnce((key, changes) => update(key, changes).then(() => {
+      throw new Error('simulated failure after activation write')
+    }))
+    await expect(ja.start('ja-starter-1', 'quick', now)).rejects.toThrow('simulated failure after activation write')
+    expect({ profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }).toEqual(before)
+    const recovered = await ja.start('ja-starter-1', 'quick', now)
+    expect(recovered.session.stage).toBe('teach')
+    expect(await japanese.events.where('type').equals('TASK_STARTED').count()).toBe(1)
+  })
+
+  it('deduplicates concurrent Japanese first admissions at the last five minutes without charging or enabling twice', async () => {
+    const { classroom, english, japanese } = await setup()
+    await english.profiles.update('main', { dailyMinutes: 10 })
+    await classroom.start('en-starter-1', 'quick', now)
+    const first = createStarterClassroom(japanese, english), second = createStarterClassroom(japanese, english)
+    await first.open(); await second.open()
+    const states = await Promise.all([first.start('ja-starter-1', 'quick', now), second.start('ja-starter-1', 'quick', now)])
+    expect(states[0]!.session.id).toBe(states[1]!.session.id)
+    expect(await japanese.sessions.where('kind').equals('starter-classroom').count()).toBe(1)
+    expect(await japanese.events.where('type').equals('TASK_STARTED').count()).toBe(1)
+    expect((await japanese.profiles.get('main'))?.onboarded).toBe(true)
+    expect(await first.allowance(now)).toBe(0)
+    expect((await first.start('ja-starter-1', 'quick', now)).session.id).toBe(states[0]!.session.id)
+  })
+
+  it.each(['en', 'ja'] as const)('keeps concurrent %s-first English/Japanese admissions within the shared budget', async firstLanguage => {
+    // Use the real peer name so English discovers Japanese exactly as in production.
+    const { classroom, english, japanese } = await setup('en', () => true, languageDatabases.ja)
+    await english.profiles.update('main', { dailyMinutes: 15 })
+    await finishQuick(classroom, await classroom.start('en-starter-1', 'quick', now))
+    const original = { sessions: await english.sessions.toArray(), events: await english.events.toArray() }
+    const ja = createStarterClassroom(japanese, english)
+    await ja.open()
+    const enStart = () => classroom.start('en-starter-2', 'standard', now + 100)
+    const jaStart = () => ja.start('ja-starter-1', 'quick', now + 100)
+    const results = await Promise.allSettled(firstLanguage === 'en' ? [enStart(), jaStart()] : [jaStart(), enStart()])
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1)
+    // Inspect actual receipts, not the allocator's clipped over-budget reservations.
+    const booked = (await Promise.all([english.events.toArray(), japanese.events.toArray()])).reduce((sum, events) => {
+      const tasks = new Map(events.filter(event => ['TASK_STARTED', 'TASK_COMPLETED'].includes(event.type))
+        .map(event => [String(event.data?.taskId), Number(event.data?.minutes)]))
+      expect([...tasks.values()].every(Number.isFinite)).toBe(true)
+      return sum + [...tasks.values()].reduce((total, minutes) => total + minutes, 0)
+    }, 0)
+    expect(booked).toBeLessThanOrEqual(15)
+    for (const session of original.sessions) expect(await english.sessions.get(session.id)).toEqual(session)
+    for (const event of original.events) expect(await english.events.get(event.id)).toEqual(event)
+    expect((await japanese.profiles.get('main'))?.onboarded).toBe(results[firstLanguage === 'ja' ? 0 : 1]?.status === 'fulfilled')
+  })
+
+  it.each(['local-owner', 'shared-owner', 'active-context'] as const)('does not activate Japanese after the admission %s changes', async boundary => {
+    const { classroom, english, japanese } = await setup()
+    await classroom.start('en-starter-1', 'quick', now)
+    let active = true
+    const ja = createStarterClassroom(japanese, english, () => active)
+    await ja.open()
+    const before = { profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }
+    let release!: () => void, acquired!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    const requested = new Promise<void>(resolve => { acquired = resolve })
+    const request = vi.fn(async (_name: string, _options: { mode: string }, admit: () => Promise<unknown>) => {
+      acquired(); await held; return admit()
+    })
+    vi.stubGlobal('navigator', { locks: { request } })
+    const pending = ja.start('ja-starter-1', 'quick', now)
+    await requested
+    expect((await japanese.profiles.get('main'))?.onboarded).toBe(false)
+    if (boundary === 'active-context') active = false
+    else await (boundary === 'local-owner' ? japanese : english).syncMeta.put({ id: 'owner', value: otherOwner })
+    const rejected = expect(pending).rejects.toThrow(/账号|记录/)
+    release()
+    await rejected
+    expect(request).toHaveBeenCalledWith(`jove-language-os:starter-budget:${english.name}`, { mode: 'exclusive' }, expect.any(Function))
+    expect({ profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }).toEqual(before)
+  })
+
+  it('rejects Japanese admission previews without a matching explicit workspace, without activating either profile', async () => {
+    const { english, japanese } = await setup()
+    const before = { en: await english.profiles.get('main'), ja: await japanese.profiles.get('main') }
+    await expect(readLanguageDay(english, now, undefined, { admitJapanese: true })).rejects.toThrow(/requires its own workspace/)
+    await japanese.syncMeta.put({ id: 'owner', value: otherOwner })
+    await expect(readLanguageDay(english, now, japanese, { admitJapanese: true })).rejects.toThrow(/account changed/)
+    expect({ en: await english.profiles.get('main'), ja: await japanese.profiles.get('main') }).toEqual(before)
+  })
+
+  it('fails closed for new shared-store admissions without origin locks but preserves saved-course resumption', async () => {
+    const english = new JoveDatabase(languageDatabases.en, 'en'), japanese = new JoveDatabase(languageDatabases.ja, 'ja')
+    databases.push(english, japanese)
+    await createLearningRepository(english).initialize(demoMaterials)
+    await createLearningRepository(japanese).initialize([])
+    for (const database of [english, japanese]) await database.syncMeta.put({ id: 'owner', value: owner })
+    const ja = createStarterClassroom(japanese, english)
+    await ja.open()
+    const before = { profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }
+    vi.stubGlobal('navigator', {})
+    await expect(ja.start('ja-starter-1', 'quick', now)).rejects.toThrow(/协调两种语言/)
+    expect({ profile: await japanese.profiles.get('main'), sessions: await japanese.sessions.toArray(), events: await japanese.events.toArray() }).toEqual(before)
+    vi.stubGlobal('navigator', { locks: { request: async (_name: string, _options: unknown, admit: () => Promise<unknown>) => admit() } })
+    const state = await ja.start('ja-starter-1', 'quick', now)
+    const saved = await ja.save(state.session.id, state.draft.revision, { response: 'まだ下書き', mode: 'text', audioId: '', romaji: true, activeMs: 123 })
+    const events = await japanese.events.toArray()
+    vi.stubGlobal('navigator', {})
+    expect((await ja.start('ja-starter-1', 'quick', now)).session).toEqual(saved.session)
+    expect(await japanese.events.toArray()).toEqual(events)
   })
 
   it('preserves both raw recordings, raw transcription and separate edited first/retry answers', async () => {

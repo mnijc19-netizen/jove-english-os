@@ -207,6 +207,64 @@ test('external lesson saves a guided draft without media downloads or invented a
   expect(Math.abs(title!.x-description!.x)).toBeLessThan(1)
 })
 
+for (const missingOriginal of [false, true]) test(`English publisher practice can finish and reload in writing mode without microphone or oral credit${missingOriginal ? ' while preserving an unavailable old recording reference' : ''}`, async ({ page }) => {
+  const paid: string[] = []
+  await page.route('**/functions/v1/ai', route => { paid.push('account-ai'); return route.abort() })
+  await page.route('https://openrouter.ai/**', route => { paid.push('provider'); return route.abort() })
+  await page.goto('#/listen?material=external-voa-welcome')
+  await page.getByRole('checkbox', { name: 'I listened and have returned (self-report).', exact: true }).check()
+  await page.locator('#external-summary').fill('They say their names.')
+  await page.getByRole('button', { name: 'Continue to notice an expression', exact: true }).click()
+  await page.locator('#external-example').fill('My name Jove.')
+  await page.getByRole('button', { name: 'Continue to spoken retell', exact: true }).click()
+  if (missingOriginal) {
+    await expect.poll(async () => (await records(page, 'sessions') as unknown as StudySession[]).some(row => row.draft.externalFirstExample === 'My name Jove.')).toBe(true)
+    await page.evaluate(async () => {
+      const request = indexedDB.open('jove-english-os')
+      const database = await new Promise<IDBDatabase>((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error) })
+      await new Promise<void>((resolve, reject) => {
+        const tx = database.transaction('sessions', 'readwrite'), store = tx.objectStore('sessions'), read = store.getAll()
+        read.onsuccess = () => {
+          const session = read.result.find(row => row.kind === 'listen' && row.materialId === 'external-voa-welcome')
+          store.put({ ...session, stage: '2', draft: { ...session.draft, stage: 2, audioId: 'fixture-missing-previous-recording', externalOriginalAudioId: 'fixture-missing-previous-recording' } })
+        }
+        tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error)
+      }); database.close()
+    })
+    await page.reload()
+  }
+  await page.getByRole('radio', { name: '这次不录音，用文字练习', exact: true }).check()
+  await page.locator('#external-retry-text').fill('My name is Jove.')
+  await expect.poll(async () => (await records(page, 'sessions') as unknown as StudySession[]).some(row => row.draft.externalResponseMode === 'text'
+    && row.draft.externalRetryText === 'My name is Jove.')).toBe(true)
+  await page.reload()
+  await expect(page.getByRole('radio', { name: '这次不录音，用文字练习', exact: true })).toBeChecked()
+  await expect(page.locator('#external-retry-text')).toHaveValue('My name is Jove.')
+  await expect(page.getByText('只记录文字练习，口语仍待验证', { exact: false })).toBeVisible()
+  await page.getByRole('button', { name: 'Save practice and continue', exact: true }).click()
+  await expect.poll(async () => (await records(page, 'sessions') as unknown as StudySession[])
+    .some(row => row.materialId === 'external-voa-welcome' && !!row.completedAt)).toBe(true)
+  const today = (await records(page, 'plans') as unknown as DailyPlan[]).find(plan => plan.date === new Date().toLocaleDateString('en-CA'))
+  const next = today && nextAssignedTask(today)
+  const expectedPath = next ? taskPath(next).path : '/today'
+  await expect.poll(() => new URL(page.url()).hash.split('?')[0]).toBe(`#${expectedPath}`)
+  const events = await records(page, 'events') as unknown as StudyEvent[]
+  const reflections = events.filter(event => event.type === 'EXTERNAL_LISTEN_REFLECTION')
+  expect(reflections).toHaveLength(1)
+  expect(reflections[0]!.data).toMatchObject({ responseMode: 'text', speakingVerified: false, retryAudioId: '',
+    firstExample: 'My name Jove.', retryText: 'My name is Jove.', playbackObserved: false, comprehensionVerified: false })
+  if (missingOriginal) expect(reflections[0]!.data).toMatchObject({ audioId: 'fixture-missing-previous-recording', audioAvailable: false })
+  else expect(reflections[0]!.data?.audioId).toBeUndefined()
+  expect(events.filter(event => event.type.startsWith('EXTERNAL_RETELL'))).toEqual([])
+  expect(events.filter(event => event.skill !== undefined || event.score !== undefined)).toEqual([])
+  expect(await records(page, 'audio')).toEqual([])
+  expect(paid).toEqual([])
+  const session = (await records(page, 'sessions') as unknown as StudySession[]).find(row => row.materialId === 'external-voa-welcome')!
+  await page.goto(`#/listen?session=${session.id}&material=external-voa-welcome`)
+  await expect(page.getByRole('radio', { name: '这次不录音，用文字练习', exact: true })).toBeChecked()
+  expect((await records(page, 'events')).filter(event => event.type === 'EXTERNAL_LISTEN_REFLECTION')).toHaveLength(1)
+})
+
 test('English returns to a delayed different-context application before showing old help', async ({ page }) => {
   await page.goto('#/today')
   await expandLegacyPractice(page)
@@ -240,6 +298,41 @@ test('English returns to a delayed different-context application before showing 
   expect(session.draft).toMatchObject({ externalCoursePhase: 'delayed-application', externalFirstExample: 'Hello, I am Jove. What do you work on?',
     externalExample: 'Hello, I am Jove. What do you do?' })
   expect((await records(page, 'events')).some(row => row.skill !== undefined || row.score !== undefined)).toBe(false)
+})
+
+test('a pending written reflection recovers an empty audio reference without rewriting submitted history', async ({ page }) => {
+  await page.route('**/functions/v1/ai', route => route.abort())
+  await page.route('https://openrouter.ai/**', route => route.abort())
+  await page.goto('#/listen?material=external-voa-welcome')
+  await expect(page.locator('#external-summary')).toBeVisible()
+  const pending = await page.evaluate(async () => {
+    const read = indexedDB.open('jove-english-os')
+    const database = await new Promise<IDBDatabase>((resolve, reject) => { read.onsuccess = () => resolve(read.result); read.onerror = () => reject(read.error) })
+    try { return await new Promise<StudyEvent>((resolve, reject) => {
+      const tx = database.transaction('sessions', 'readwrite'), store = tx.objectStore('sessions'), request = store.getAll()
+      let event: StudyEvent
+      request.onsuccess = () => {
+        const session = request.result.find(row => row.kind === 'listen' && row.materialId === 'external-voa-welcome')
+        event = { id: `${session.id}-external-reflection`, sessionId: session.id, type: 'EXTERNAL_LISTEN_REFLECTION', source: 'self-report',
+          timestamp: Date.now(), data: { materialId: session.materialId, response: 'They greet each other.', expression: 'My name is', example: 'My name Jove.',
+            audioId: '', responseMode: 'text', speakingVerified: false, listened: true, playbackObserved: false, comprehensionVerified: false,
+            guidedVersion: 1, coursePhase: 'input-application', contextId: 'external-voa-welcome:application:0', firstExample: 'My name Jove.',
+            retryText: 'My name is Jove.', retryAudioId: '' } }
+        store.put({ ...session, stage: '2', draft: { ...session.draft, stage: 2, listened: true, answer: 'They greet each other.',
+          externalResponseMode: 'text', externalExpression: 'My name is', externalExample: 'My name Jove.', externalFirstExample: 'My name Jove.',
+          externalRetryText: 'My name is Jove.', externalReflection: event, outbox: [event] } })
+      }
+      tx.oncomplete = () => resolve(event); tx.onabort = () => reject(tx.error)
+    }) } finally { database.close() }
+  })
+  await page.reload()
+  await expect.poll(async () => (await records(page, 'events')).some(event => event.id === pending.id)).toBe(true)
+  const expected = { ...pending, data: { ...pending.data } }; delete expected.data.audioId
+  expect((await records(page, 'events')).find(event => event.id === pending.id)).toEqual(expected)
+  await page.getByRole('button', { name: 'Save practice and continue', exact: true }).click()
+  await expect.poll(async () => (await records(page, 'sessions')).some(session => session.id === pending.sessionId && !!session.completedAt)).toBe(true)
+  expect((await records(page, 'events')).filter(event => event.id === pending.id)).toEqual([expected])
+  expect(await records(page, 'audio')).toEqual([])
 })
 
 test('a persisted external reflection can finish after metadata-only restoration without inventing audio', async ({ page }) => {

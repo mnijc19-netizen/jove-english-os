@@ -1,3 +1,4 @@
+import { createEmptyCard, fsrs, Rating } from 'ts-fsrs'
 import { starterLesson, starterLessons, type StarterLesson } from '../content/starter-courses'
 import { starterFeedbackSchema, type StarterFeedback } from '../ai/starter-schema'
 import type { LearningLanguage } from './language'
@@ -125,17 +126,66 @@ export function starterGoalEvidence(lesson: StarterLesson, events: StudyEvent[],
     speakingVerified: false, lastAttemptAt: Math.max(0, ...attempts.map(attempt => attempt.timestamp)) }
 }
 
+function starterReviewDue(lesson: StarterLesson, events: StudyEvent[], now: number) {
+  const attempts = events.filter(event => (event.source === 'text' || event.source === 'objective' && event.data?.mode === 'choice')
+    && Number.isSafeInteger(event.timestamp)
+    && event.timestamp >= 0 && event.timestamp <= now).map(starterAttemptFromEvent)
+    .filter((attempt): attempt is StarterAttempt => !!attempt && attempt.lessonId === lesson.id
+      && attempt.lessonVersion === lesson.version && !!attempt.response.trim() && attempt.response.length <= 500
+      && (attempt.stage === 'express' ? attempt.contextId === `${lesson.id}:introduced`
+        : attempt.stage === 'transfer' && lesson.transfer.some(context => context.id === attempt.contextId)))
+    .sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id))
+  // At most the first independent production per session. Supported preparation
+  // may precede it, but a failed/uncertain first answer cannot be upgraded by retry.
+  const firstBySession = new Map<string, StarterAttempt>()
+  for (const attempt of attempts) {
+    const first = firstBySession.get(attempt.sessionId)
+    if (!first || (first.prompted || first.mode === 'choice') && !attempt.prompted && attempt.mode !== 'choice')
+      firstBySession.set(attempt.sessionId, attempt)
+  }
+  const observations = [...firstBySession.values()].sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id))
+  if (!observations.length) return 0
+  // Classroom repair is intra-session; instantiate only for delayed retrieval.
+  const starterScheduler = fsrs({ enable_fuzz: false, enable_short_term: false })
+  let card = createEmptyCard(new Date(observations[0]!.timestamp)), lastRated: StarterAttempt | undefined, due = 0
+  for (const attempt of observations) {
+    const matching = events.filter(event => event.sessionId === attempt.sessionId && event.timestamp >= attempt.timestamp
+      && event.data?.attemptId === attempt.id && event.data.lessonId === lesson.id
+      && (event.type !== 'STARTER_FEEDBACK' || event.data.lessonVersion === lesson.version))
+    const effective = effectiveStarterFeedback(attempt.id, matching, now)
+    let feedback: StarterFeedback | null = null
+    if (effective) {
+      try { feedback = validateStarterFeedback({ verdict: effective.verdict, feedbackZh: effective.feedbackZh,
+        correction: effective.correction, nextAction: effective.nextAction, evidence: effective.evidence }, lesson, attempt) }
+      catch { /* Malformed/mismatched feedback cannot establish recall. */ }
+    }
+    if (attempt.prompted || attempt.mode === 'choice' || !feedback || feedback.verdict === 'uncertain'
+      || feedback.verdict === 'valid' && lastRated && (attempt.timestamp - lastRated.timestamp < starterDelay
+        || attempt.contextId === lastRated.contextId)) {
+      due = attempt.timestamp + starterDelay
+      continue
+    }
+    card = starterScheduler.next(card, new Date(attempt.timestamp), feedback.verdict === 'valid' ? Rating.Good : Rating.Again).card
+    lastRated = attempt
+    due = Math.max(card.due.getTime(), attempt.timestamp + starterDelay)
+  }
+  return due
+}
+
 export function nextStarterLesson(language: LearningLanguage, sessions: StudySession[], events: StudyEvent[], now = Date.now()) {
   const courses = starterLessons.filter(lesson => lesson.language === language)
   const drafts = sessions.filter(session => session.kind === 'starter-classroom' && !session.id.startsWith('reading-conflict:') && !session.completedAt
     && courses.some(lesson => lesson.id === session.materialId)).sort((a, b) => a.startedAt - b.startedAt)
   if (drafts[0]) return { lesson: starterLesson(drafts[0].materialId!)!, session: drafts[0], review: drafts[0].draft.purpose === 'review' }
-  for (const lesson of courses) {
+  const reviews = courses.flatMap(lesson => {
     const completed = sessions.filter(session => session.kind === 'starter-classroom' && session.materialId === lesson.id && !!session.completedAt)
     const last = completed.sort((a, b) => b.completedAt! - a.completedAt!)[0]
-    if (last && last.completedAt! + starterDelay <= now && !starterGoalEvidence(lesson, events, now).retainedUse)
-      return { lesson, review: true }
-  }
+    if (!last) return []
+    const due = Math.max(last.completedAt! + starterDelay,
+      starterGoalEvidence(lesson, events, now).retainedUse ? starterReviewDue(lesson, events, now) : 0)
+    return due <= now ? [{ lesson, review: true, due }] : []
+  }).sort((a, b) => a.due - b.due || a.lesson.position - b.lesson.position)
+  if (reviews[0]) return { lesson: reviews[0].lesson, review: true }
   const next = courses.find(lesson => !sessions.some(session => session.kind === 'starter-classroom'
     && session.materialId === lesson.id && session.draft.purpose !== 'review' && !!session.completedAt))
   return next ? { lesson: next, review: false } : null

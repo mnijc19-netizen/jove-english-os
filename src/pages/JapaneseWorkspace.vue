@@ -118,6 +118,14 @@ async function startNext() {
   allowedNavigation = router.resolve(destination).fullPath
   try { await router.push(destination) } finally { allowedNavigation = '' }
 }
+async function continueFromZero() {
+  // Explicit self-report, not an ability score inferred from finishing lessons.
+  await learning.confirmBeginnerStart()
+  await refresh()
+  if (!disposed && firstTask.value && matchesTask(firstTask.value)) await startNext()
+  else if (!disposed) notice.value = firstTask.value ? '零基础起点已保存。今天先接续下面系统选好的当前任务；已有草稿仍然保留。'
+    : '零基础起点已保存。今天的共用时间已安排完，或正在等到期复习；不用加做。已有草稿仍可继续，下次会接着安排基础教学。'
+}
 function safeLeave(to: { fullPath: string }) {
   if (busy.value && to.fullPath !== allowedNavigation) { notice.value = '正在打开或保存安排，请稍后再切换。'; return false }
 }
@@ -140,7 +148,8 @@ onBeforeUnmount(() => { disposed = true; generation++; void pending.finally(() =
     <template v-if="ready">
       <section v-if="!startingPoint" class="panel workspace-next">
         <h2>先告诉系统：我从零开始</h2><p>不懂五十音也没关系。回到今日安排确认零基础，系统会从假名的字形和声音带你入门，不必猜日语诊断题。</p>
-        <RouterLink to="/ja" class="button primary">从零基础开始</RouterLink>
+        <template v-if="mode === 'literacy'"><p>如果你还不会假名，确认后就接着学五个字的字形和真人声音。不会做诊断也能继续；已有课和录音不删除，也不记成能力分数。</p><button class="button primary" :disabled="busy" @click="act(continueFromZero)">我还是零基础，接着学假名</button><RouterLink to="/ja" class="text-button">已有基础？查看可选起点了解</RouterLink></template>
+        <RouterLink v-else to="/ja" class="button primary">从零基础开始</RouterLink>
       </section>
       <section v-else class="panel workspace-next">
         <p class="eyebrow">系统选好的下一步</p>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { useApp } from "../stores/app";
 import { englishTaskGuide, englishLearningOutcome, nextAssignedTask, taskPath } from "../domain/engine";
 import Icon from "../components/Icon.vue";
@@ -9,8 +9,10 @@ import { starterLessons } from '../content/starter-courses';
 import type { PlanTask } from "../domain/types";
 import { planRecovery, selectMeaningfulReviews } from "../domain/longitudinal";
 const app = useApp();
-const legacyOpen = computed(() => app.profile.onboarded && (!app.events.some(event => event.type === 'STARTER_ATTEMPT' || event.data?.kind === 'starter-classroom')
-  || starterLessons.filter(lesson => lesson.language === 'en').every(lesson => app.events.some(event => event.type === 'TASK_COMPLETED' && event.data?.lessonId === lesson.id))))
+const route = useRoute(), continuing = computed(() => route.query.practice === '1');
+const starterPending = ref(false);
+const legacyOpen = computed(() => !starterPending.value && (continuing.value || app.profile.onboarded && (!app.events.some(event => event.type === 'STARTER_ATTEMPT' || event.data?.kind === 'starter-classroom')
+  || starterLessons.filter(lesson => lesson.language === 'en').every(lesson => app.events.some(event => event.type === 'TASK_COMPLETED' && event.data?.lessonId === lesson.id)))))
 const router = useRouter(), starting = ref(false), startError = ref("");
 const recovery = computed(() => planRecovery(app.profile, app.events, app.clock));
 const reviewSelection = computed(() => selectMeaningfulReviews(app.cards, app.events, app.clock, {
@@ -78,14 +80,20 @@ async function start(task: PlanTask) {
         >
       </div>
     </div>
-    <StarterCourseEntry language="en" />
+    <StarterCourseEntry language="en" :continuation="continuing" @attention="starterPending = $event" />
+    <section v-if="continuing && !starterPending" class="panel" aria-label="入门之后的学习接续">
+      <h2>接着系统安排，学下一小步。</h2>
+      <p>下面只做当前一项：看具体目标，获得输入和帮助，再尝试表达。已有草稿、录音和复习都保留；到期时再回顾入门表达，不用反复重做。</p>
+      <p class="help-text">新课堂试用版 · 教学、合成示范与 AI 反馈仍待人工复核。</p>
+      <RouterLink to="/course/en" class="button secondary">需要时回看入门课</RouterLink>
+    </section>
     <details class="legacy-practice" :open="legacyOpen"><summary>已有基础或旧练习？展开原来的学习安排</summary>
     <div v-if="!app.profile.onboarded" class="onboard-banner">
       <span class="small-icon"><Icon name="sparkle" /></span>
       <div>
         <strong>有一点基础？可以选做短诊断。</strong>
         <p>
-          完全零基础直接开始上面的小课，不需要猜题。有基础时，诊断帮助调整原来的练习。
+          {{ continuing ? '你可以直接接着下面的安排学；短诊断是可选的，不要求猜题或重做入门课。' : '完全零基础直接开始上面的小课，不需要猜题。有基础时，诊断帮助调整原来的练习。' }}
         </p>
       </div>
       <RouterLink to="/onboarding" class="button secondary" aria-label="Find my starting point"

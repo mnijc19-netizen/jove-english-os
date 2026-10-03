@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { JoveDatabase } from '../src/db/db'
 import { createLearningRepository } from '../src/db/repository'
 import { createJapaneseWorkspace, japanesePracticeDraft } from '../src/db/japanese'
-import { japanesePlacementItems, japaneseBeginnerStartId, japaneseStartingPoint } from '../src/domain/japanese'
+import { japanesePlacementItems, japaneseBeginnerStartId, japaneseStartingPoint, japanesePracticeHistory, japaneseCoursePractice } from '../src/domain/japanese'
 import { demoMaterials } from '../src/content/materials'
 import type { AudioAsset } from '../src/domain/types'
 import { readLanguageDay } from '../src/db/language-day'
@@ -337,6 +337,106 @@ describe('Japanese usable practice persistence', () => {
     await expect(learning.save(session.id, { ...japanesePracticeDraft.parse(saved.draft), audioId: 'foreign' }, 'notice')).rejects.toThrow('日语区')
     await expect(learning.finish(session.id, now + 1000)).rejects.toThrow('两次录音')
     expect(await ja.cards.count()).toBe(0); expect((await ja.sessions.get(session.id))?.completedAt).toBeUndefined()
+  })
+  it.each([
+    { practiceMode: 'text' as const, legacy: false },
+    { practiceMode: 'choice' as const, legacy: false },
+    { practiceMode: 'text' as const, legacy: true },
+  ])('completes genuine $practiceMode practice (legacy=$legacy) without fabricating microphone or listening evidence', async ({ practiceMode, legacy }) => {
+    const { learning, en, ja } = await setup()
+    await learning.saveDiagnostic(skipped, true, now)
+    const plan = (await learning.today(now))!, task = plan.tasks.find(item => item.kind === 'listen')!
+    let session = await learning.start(task.id, now)
+    if (legacy) await ja.events.delete(`${session.id}:course-assignment`)
+    const beforeSkills = await ja.skills.toArray(), beforeEnglish = await en.events.toArray()
+    session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), practiceMode,
+      response: '先借助中文了解早上问候', example: 'おはよう。', helped: practiceMode === 'choice' }, 'listen')
+    const beforeLock = session
+    const locked = await learning.lockIndependentAttempt(session.id, now + 1)
+    expect(locked?.data).toMatchObject({ practiceMode, recordingBeforeHelp: false,
+      independentTransferVerified: false, speakingVerified: false })
+    expect(await learning.lockIndependentAttempt(session.id, now + 2)).toEqual(locked)
+    expect(await ja.sessions.get(session.id)).toEqual(beforeLock)
+    session = await learning.save(session.id, japanesePracticeDraft.parse(session.draft), 'notice')
+    const first = (await ja.events.get(`${session.id}:independent-attempt`))!
+    expect(first).toEqual(locked)
+    if (legacy) {
+      expect(first.contextId).toBeUndefined()
+      expect(first.data?.coursePhase).toBeUndefined()
+      expect(await ja.events.get(`${session.id}:course-assignment`)).toBeUndefined()
+    }
+    expect(first).toMatchObject({ source: 'self-report', data: { response: '先借助中文了解早上问候', recordingBeforeHelp: false,
+      practiceMode, masteryAssessed: false, acousticAssessed: false } })
+    expect(first.data?.audioId).toBeUndefined()
+    if (practiceMode === 'choice') expect(first.prompted).toBe(true)
+    await expect(learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft),
+      response: '看参考后的新回答' }, 'notice')).rejects.toThrow('首答已锁定')
+    session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft),
+      expression: 'おはようございます', example: 'おはよう。' }, 'speak')
+    session = await learning.save(session.id, japanesePracticeDraft.parse(session.draft), 'compare')
+    await expect(learning.finish(session.id, now + 10)).rejects.toThrow(/修正|文字/)
+    session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft),
+      retryText: 'おはようございます。', comparison: '面对不熟悉的人改成礼貌问候。' }, 'compare')
+    const complete = await learning.finish(session.id, now + 20)
+    expect(complete.stage).toBe('completed')
+    expect(japanesePracticeDraft.parse(complete.draft)).toMatchObject({ practiceMode, listened: false, audioId: '', retryAudioId: '',
+      response: '先借助中文了解早上问候', example: 'おはよう。', retryText: 'おはようございます。' })
+    expect(await ja.events.get(first.id)).toEqual(first)
+    expect(await ja.audio.count()).toBe(0)
+    expect(await ja.skills.toArray()).toEqual(beforeSkills)
+    expect(await en.events.toArray()).toEqual(beforeEnglish)
+    const reflection = (await ja.events.get(`${session.id}:reflection`))!
+    expect(reflection).toMatchObject({ type: 'JAPANESE_TEXT_PRACTICE', source: 'text',
+      data: { listened: false, practiceMode, independentTransferVerified: false, speakingVerified: false, comprehensionVerified: false } })
+    const retry = (await ja.events.get(`${session.id}:retry`))!
+    expect(retry.data).toMatchObject({ originalText: 'おはよう。', retryText: 'おはようございます。', practiceMode, acousticAssessed: false })
+    const events = await ja.events.toArray()
+    expect(japanesePracticeHistory(events, now + 20)).toEqual([])
+    expect(japaneseCoursePractice(task.materialId!, events, now + 86400000).complete).toBe(false)
+    expect((await learning.today(now + 21))!.tasks.find(item => item.id === task.id)?.done).toBe(true)
+    expect((await learning.today(now + 86400000))?.tasks.find(item => item.kind === 'listen')?.materialId).toBe('ja-irodori-starter-2')
+    await learning.finish(session.id, now + 22)
+    expect(await ja.events.toArray()).toEqual(events)
+    expect((await readLanguageDay(en, now + 22, ja))!.allowances.ja.completed).toBe(task.minutes)
+  })
+  it('finishes written practice with unchanged missing originals but rejects forged or replaced references', async () => {
+    const { learning, en, ja } = await setup()
+    await learning.saveDiagnostic(skipped, true, now)
+    let session = await learning.start((await learning.today(now))!.tasks.find(item => item.kind === 'listen')!.id, now)
+    await ja.audio.bulkAdd([recording('old-original'), recording('old-retry'), recording('other-real-recording')])
+    session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), listened: true,
+      response: '早上问候', expression: 'おはようございます', example: 'おはよう。', comparison: '改用礼貌问候',
+      audioId: 'old-original', retryAudioId: 'old-retry' }, 'compare')
+    const rawFirst = await ja.events.get(`${session.id}:independent-attempt`)
+    const beforeSkills = await ja.skills.toArray(), beforeEnglish = await en.events.toArray()
+    await expect(learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), practiceMode: 'text',
+      audioId: 'other-real-recording' }, 'compare')).rejects.toThrow(/原录音|引用/)
+    await ja.audio.put({ ...recording('old-original'), blob: new Blob([]) })
+    await ja.audio.delete('old-retry')
+    await expect(learning.finish(session.id, now + 1)).rejects.toThrow('录音原件')
+    await expect(learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), practiceMode: 'text',
+      audioId: 'forged-recording' }, 'compare')).rejects.toThrow(/原录音|引用/)
+    await expect(learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), practiceMode: 'text',
+      retryAudioId: '' }, 'compare')).rejects.toThrow(/原录音|引用/)
+    session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), practiceMode: 'text',
+      retryText: 'おはようございます。' }, 'compare')
+    expect(japanesePracticeDraft.parse(session.draft)).toMatchObject({ audioId: 'old-original', retryAudioId: 'old-retry',
+      audioUnavailable: true, missingAudioIds: ['old-original', 'old-retry'] })
+    await expect(learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), practiceMode: 'recording' }, 'compare')).rejects.toThrow('日语区')
+    session = await learning.save(session.id, { ...japanesePracticeDraft.parse(session.draft), practiceMode: 'choice' }, 'compare')
+    const complete = await learning.finish(session.id, now + 2)
+    expect(complete.completedAt).toBe(now + 2)
+    expect(complete.draft).toMatchObject({ audioId: 'old-original', retryAudioId: 'old-retry', audioUnavailable: true })
+    expect(await ja.events.get(`${session.id}:independent-attempt`)).toEqual(rawFirst)
+    expect((await ja.audio.get('old-original'))!.blob.size).toBe(0)
+    expect(await ja.audio.get('old-retry')).toBeUndefined()
+    const written = (await ja.events.toArray()).filter(event => event.sessionId === session.id && event.source === 'text')
+    expect(written.filter(event => event.type === 'JAPANESE_TEXT_PRACTICE')).toEqual([expect.objectContaining({
+      data: expect.objectContaining({ audioAvailable: false, missingAudioIds: ['old-original', 'old-retry'],
+        speakingVerified: false, independentTransferVerified: false, comprehensionVerified: false }) })])
+    expect(written.every(event => event.skill === undefined && event.score === undefined)).toBe(true)
+    expect(await ja.skills.toArray()).toEqual(beforeSkills)
+    expect(await en.events.toArray()).toEqual(beforeEnglish)
   })
   it('saves both originals, reflection and reference review cards once without mastery credit', async () => {
     const { learning, en, ja } = await setup()

@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { createEmptyCard, fsrs, Rating } from 'ts-fsrs'
+import type { StarterFeedback } from '../src/ai/starter-schema'
 import manifest from '../public/audio/starter/manifest.json'
-import { starterDemonstrationPath, starterDemonstrationTexts } from '../src/domain/starter'
+import {
+  nextStarterLesson, starterDelay, starterDemonstrationPath, starterDemonstrationTexts,
+  starterGoalEvidence, type StarterAttempt,
+} from '../src/domain/starter'
+import type { StudyEvent, StudySession } from '../src/domain/types'
 import {
   starterContentPolicy,
   starterFeedbackFixtures,
@@ -13,6 +19,153 @@ import {
 
 const languageIds = (language: 'en' | 'ja') => [1, 2, 3].map(position => `${language}-starter-${position}`)
 const hasChinese = (value: string) => /\p{Script=Han}/u.test(value)
+
+const reviewEpoch = Date.UTC(2026, 9, 3, 12)
+function probeEvents(lesson: StarterLesson, attempt: StarterAttempt, verdict: StarterFeedback['verdict'] = 'valid'): StudyEvent[] {
+  return [
+    { id: attempt.id, type: 'STARTER_ATTEMPT', timestamp: attempt.timestamp, sessionId: attempt.sessionId,
+      source: attempt.mode === 'choice' ? 'objective' : 'text', prompted: attempt.prompted, contextId: attempt.contextId,
+      data: { lessonId: attempt.lessonId, lessonVersion: attempt.lessonVersion, stage: attempt.stage,
+        contextId: attempt.contextId, response: attempt.response, mode: attempt.mode, ...(attempt.audioId ? { audioId: attempt.audioId } : {}) } },
+    { id: `${attempt.id}:feedback`, type: 'STARTER_FEEDBACK', timestamp: attempt.timestamp, sessionId: attempt.sessionId,
+      source: 'objective', data: { attemptId: attempt.id, lessonId: lesson.id, lessonVersion: lesson.version,
+        verdict, feedbackZh: '核对当前情境。', correction: '',
+        nextAction: verdict === 'valid' ? 'continue' : verdict === 'uncertain' ? 'clarify' : 'retry', evidence: attempt.response } },
+  ]
+}
+function retainedHistory(lesson: StarterLesson) {
+  const context = lesson.transfer.find(item => item.id === 'ja-starter-3-reply') ?? lesson.transfer[0]!
+  const attempts: StarterAttempt[] = [
+    { id: `${lesson.id}:first`, sessionId: `${lesson.id}:lesson`, lessonId: lesson.id, lessonVersion: lesson.version,
+      stage: 'express', contextId: `${lesson.id}:introduced`, response: lesson.expression.reference,
+      prompted: false, mode: 'text', timestamp: reviewEpoch },
+    { id: `${lesson.id}:later`, sessionId: `${lesson.id}:review`, lessonId: lesson.id, lessonVersion: lesson.version,
+      stage: 'transfer', contextId: context.id, response: context.reference,
+      prompted: false, mode: 'text', timestamp: reviewEpoch + starterDelay + 100 },
+  ]
+  const sessions: StudySession[] = attempts.map((attempt, index) => ({ id: attempt.sessionId, kind: 'starter-classroom',
+    materialId: lesson.id, startedAt: attempt.timestamp, completedAt: attempt.timestamp + 1, stage: 'done',
+    draft: { lessonVersion: lesson.version, purpose: index ? 'review' : 'lesson' } }))
+  const events = attempts.flatMap(attempt => probeEvents(lesson, attempt))
+  return { attempts, sessions, events }
+}
+function appendProbe(history: ReturnType<typeof retainedHistory>, lesson: StarterLesson, at: number,
+  patch: Partial<StarterAttempt> = {}, verdict: StarterFeedback['verdict'] = 'valid') {
+  const attempt: StarterAttempt = { id: `${lesson.id}:probe:${history.attempts.length}`, sessionId: `${lesson.id}:session:${history.attempts.length}`,
+    lessonId: lesson.id, lessonVersion: lesson.version, timestamp: at, stage: 'transfer',
+    contextId: lesson.transfer[1]!.id, response: lesson.transfer[1]!.reference, mode: 'text', prompted: false, ...patch }
+  history.attempts.push(attempt)
+  history.events.push(...probeEvents(lesson, attempt, verdict))
+  const existing = history.sessions.find(session => session.id === attempt.sessionId)
+  if (existing) existing.completedAt = Math.max(existing.completedAt!, at + 1)
+  else history.sessions.push({ id: attempt.sessionId, kind: 'starter-classroom', materialId: lesson.id,
+    startedAt: at, completedAt: at + 1, stage: 'done', draft: { lessonVersion: lesson.version, purpose: 'review' } })
+  return attempt
+}
+const reviewScheduler = fsrs({ enable_fuzz: false, enable_short_term: false })
+function replayCard(history: ReturnType<typeof retainedHistory>, ratings = history.attempts.map(() => Rating.Good)) {
+  let card = createEmptyCard(new Date(history.attempts[0]!.timestamp))
+  history.attempts.forEach((attempt, index) => { card = reviewScheduler.next(card, new Date(attempt.timestamp), ratings[index]! as Rating.Again | Rating.Good).card })
+  return card
+}
+function expectReviewBoundary(lesson: StarterLesson, history: ReturnType<typeof retainedHistory>, due: number) {
+  expect(nextStarterLesson(lesson.language, history.sessions, history.events, due - 1)?.review).not.toBe(true)
+  expect(nextStarterLesson(lesson.language, history.sessions, history.events, due)).toMatchObject({ lesson: { id: lesson.id }, review: true })
+}
+
+describe('starter long-term retrieval scheduling', () => {
+  it.each(['en', 'ja'] as const)('%s keeps all three historically retained goals in later review', language => {
+    const histories = starterLessons.filter(lesson => lesson.language === language).map(retainedHistory)
+    const sessions = histories.flatMap(history => history.sessions), events = histories.flatMap(history => history.events)
+    const ninetyDaysLater = reviewEpoch + 90 * starterDelay
+    for (const lesson of starterLessons.filter(lesson => lesson.language === language))
+      expect(starterGoalEvidence(lesson, events, ninetyDaysLater).retainedUse).toBe(true)
+    expect(nextStarterLesson(language, sessions, events, ninetyDaysLater)).toMatchObject({ review: true })
+  })
+
+  it.each(starterLessons.map(lesson => [lesson.id, lesson] as const))('%s uses deterministic FSRS due dates and extends after spaced independent success', (_id, lesson) => {
+    const history = retainedHistory(lesson), initial = replayCard(history)
+    expectReviewBoundary(lesson, history, initial.due.getTime())
+    appendProbe(history, lesson, initial.due.getTime())
+    const repeated = replayCard(history)
+    expect(repeated.due.getTime() - history.attempts[2]!.timestamp).toBeGreaterThan(initial.due.getTime() - history.attempts[1]!.timestamp)
+    expectReviewBoundary(lesson, history, repeated.due.getTime())
+    const serialized = JSON.stringify({ sessions: history.sessions, events: history.events })
+    expect(nextStarterLesson(lesson.language, history.sessions, history.events, repeated.due.getTime()))
+      .toEqual(nextStarterLesson(lesson.language, [...history.sessions].reverse(), [...history.events].reverse(), repeated.due.getTime()))
+    expect(JSON.stringify({ sessions: history.sessions, events: history.events })).toBe(serialized)
+  })
+
+  it.each(['invalid', 'partial'] as const)('shrinks review after an independent %s result without deleting historical retention', verdict => {
+    const lesson = starterLesson('en-starter-1')!, history = retainedHistory(lesson), original = replayCard(history)
+    const latest = appendProbe(history, lesson, original.due.getTime(), { response: 'Not the requested introduction.' }, verdict)
+    const failed = replayCard(history, [Rating.Good, Rating.Good, Rating.Again])
+    expect(failed.due.getTime() - latest.timestamp).toBeLessThan(original.due.getTime() - history.attempts[1]!.timestamp)
+    expect(starterGoalEvidence(lesson, history.events, latest.timestamp + starterDelay).retainedUse).toBe(true)
+    expectReviewBoundary(lesson, history, Math.max(failed.due.getTime(), latest.timestamp + 1 + starterDelay))
+  })
+
+  it.each(['prompted', 'choice', 'uncertain', 'disputed', 'opposing'] as const)('keeps a short verification interval for %s rather than scheduling it as independent success', kind => {
+    const lesson = starterLesson('en-starter-1')!, history = retainedHistory(lesson)
+    const at = history.attempts[1]!.timestamp + starterDelay + 100
+    const latest = appendProbe(history, lesson, at, { prompted: kind === 'prompted', mode: kind === 'choice' ? 'choice' : 'text' }, kind === 'uncertain' ? 'uncertain' : 'valid')
+    if (kind === 'disputed') history.events.push({ id: `${latest.id}:disputed`, type: 'STARTER_FEEDBACK_DISPUTED',
+      source: 'self-report', sessionId: latest.sessionId, timestamp: at, data: { attemptId: latest.id, lessonId: lesson.id } })
+    if (kind === 'opposing') history.events.push({ ...probeEvents(lesson, latest, 'invalid')[1]!, id: `${latest.id}:feedback:ai`, source: 'ai', timestamp: at + 1 })
+    expect(starterGoalEvidence(lesson, history.events, at + starterDelay).retainedUse).toBe(true)
+    expectReviewBoundary(lesson, history, at + 1 + starterDelay)
+  })
+
+  it('counts at most the first independent result in a session, never a corrected retry', () => {
+    const lesson = starterLesson('en-starter-1')!, history = retainedHistory(lesson), oldDue = replayCard(history).due.getTime()
+    const failed = appendProbe(history, lesson, oldDue, { response: 'Not an introduction.' }, 'invalid')
+    const failedDue = replayCard(history, [Rating.Good, Rating.Good, Rating.Again]).due.getTime()
+    appendProbe(history, lesson, oldDue + 100, { sessionId: failed.sessionId })
+    expectReviewBoundary(lesson, history, Math.max(failedDue, oldDue + 101 + starterDelay))
+  })
+
+  it('does not count same-session successes twice or a same-context/under-24h probe as delayed transfer', () => {
+    const lesson = starterLesson('en-starter-1')!, history = retainedHistory(lesson), oldDue = replayCard(history).due.getTime()
+    const first = appendProbe(history, lesson, oldDue)
+    const onceDue = replayCard(history).due.getTime()
+    appendProbe(history, lesson, oldDue + 100, { sessionId: first.sessionId, contextId: lesson.transfer[2]!.id, response: lesson.transfer[2]!.reference })
+    expectReviewBoundary(lesson, history, onceDue)
+    appendProbe(history, lesson, oldDue + starterDelay + 100, { contextId: first.contextId })
+    expectReviewBoundary(lesson, history, oldDue + 2 * starterDelay + 101)
+    const tooSoon = retainedHistory(lesson)
+    appendProbe(tooSoon, lesson, tooSoon.attempts[1]!.timestamp + starterDelay - 1)
+    expectReviewBoundary(lesson, tooSoon, tooSoon.attempts[2]!.timestamp + 1 + starterDelay)
+  })
+
+  it.each(['prompted', 'choice', 'uncertain'] as const)('does not permanently drop an unverified goal completed through %s', kind => {
+    const lesson = starterLesson('ja-starter-1')!, history = retainedHistory(lesson)
+    history.attempts.forEach(attempt => { attempt.prompted = true; if (kind === 'choice') attempt.mode = 'choice' })
+    history.events = history.attempts.flatMap(attempt => probeEvents(lesson, attempt, kind === 'uncertain' ? 'uncertain' : 'valid'))
+    expect(starterGoalEvidence(lesson, history.events, reviewEpoch + 3 * starterDelay).retainedUse).toBe(false)
+    expectReviewBoundary(lesson, history, history.sessions[1]!.completedAt! + starterDelay)
+  })
+
+  it.each(['version', 'context', 'source', 'feedback-evidence', 'feedback-session'] as const)('never credits an untrusted %s probe', kind => {
+    const lesson = starterLesson('en-starter-1')!, history = retainedHistory(lesson), oldDue = replayCard(history).due.getTime()
+    const latest = appendProbe(history, lesson, oldDue)
+    const attempt = history.events.find(event => event.id === latest.id)!, feedback = history.events.find(event => event.id === `${latest.id}:feedback`)!
+    if (kind === 'version') attempt.data!.lessonVersion = lesson.version + 1
+    if (kind === 'context') attempt.data!.contextId = 'not-in-this-course'
+    if (kind === 'source') attempt.source = 'self-report'
+    if (kind === 'feedback-evidence') feedback.data!.evidence = 'not part of the answer'
+    if (kind === 'feedback-session') feedback.sessionId = 'another-session'
+    expectReviewBoundary(lesson, history, latest.timestamp + 1 + starterDelay)
+  })
+
+  it('preserves open-draft precedence and language isolation even when retained goals are due', () => {
+    const lesson = starterLesson('en-starter-1')!, history = retainedHistory(lesson), now = reviewEpoch + 90 * starterDelay
+    const draft: StudySession = { id: 'active-draft', kind: 'starter-classroom', materialId: lesson.id, startedAt: now - 100,
+      stage: 'transfer', draft: { purpose: 'review', lessonVersion: lesson.version } }
+    history.sessions.push(draft)
+    expect(nextStarterLesson('en', history.sessions, history.events, now)).toMatchObject({ session: { id: draft.id }, review: true })
+    expect(nextStarterLesson('ja', history.sessions, history.events, now)).toMatchObject({ lesson: { id: 'ja-starter-1' }, review: false })
+  })
+})
 
 describe('original Chinese-native absolute-beginner starter content', () => {
   it('exports the exact six stable version-one lesson contracts and safe ID lookup', () => {

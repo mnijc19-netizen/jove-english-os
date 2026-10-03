@@ -31,8 +31,10 @@ export const japanesePracticeDraft = z.strictObject({
   expression: text, example: text, audioId: text, retryAudioId: text, comparison: text,
   effort: z.enum(['hard', 'okay', 'easy']).optional(),
   audioUnavailable: z.boolean().optional(), missingAudioIds: z.array(text).optional(),
+  practiceMode: z.enum(['recording', 'text', 'choice']).optional(), retryText: text.optional(), helped: z.boolean().optional(),
 })
 export type JapanesePracticeDraft = z.infer<typeof japanesePracticeDraft>
+function textPractice(draft: JapanesePracticeDraft) { return draft.practiceMode === 'text' || draft.practiceMode === 'choice' }
 const diagnosticId = 'ja-initial-diagnostic'
 const steps = ['listen', 'notice', 'speak', 'compare'] as const
 export type JapanesePracticeStep = typeof steps[number]
@@ -100,13 +102,13 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     if (phase !== 'input' && phase !== 'application' && phase !== 'delayed-transfer') return null
     const firstAttempt = await database.events.get(`${sessionId}:independent-attempt`)
     return { phase, contextId: String(assignment!.data!.contextId), contextPrompt: String(assignment!.data!.contextPrompt),
-      independentFirst: phase !== 'input' && assignment?.data?.beginnerScaffold !== true, firstAttemptSaved: !!firstAttempt,
+      independentFirst: phase !== 'input' && assignment?.data?.beginnerScaffold !== true && !textPractice(japanesePracticeDraft.parse(session.draft)), firstAttemptSaved: !!firstAttempt,
       goal: assignment?.data?.beginnerScaffold === true ? '先听原声与中文解释，再借助已学短句练说；不用自由写日语，这是有提示练习。' : japanesePracticePhaseGoal(phase),
       coverage: '本站 Can-do 多次练习，不代表已学完整课原站内容或已经掌握。' }
   }
   async function freezeFirstAttempt(session: StudySession, draft: JapanesePracticeDraft, now: number) {
     const assignment = await database.events.get(`${session.id}:course-assignment`)
-    if (!assignment) return null
+    if (!assignment && !textPractice(draft)) return null
     const id = `${session.id}:independent-attempt`, existing = await database.events.get(id)
     if (existing) {
       if (existing.data?.response !== draft.response) throw new Error('首答已锁定；请把对照后的修改保存在自己的例句中。')
@@ -115,14 +117,16 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     if (session.stage !== 'listen' || !draft.response.trim()) throw new Error('先在查看参考前保存自己的书面首答。')
     const audio = draft.audioId ? await database.audio.get(draft.audioId) : undefined
     const earlyRecording = audio?.kind === 'recording' && audio.blob.size > 0 && audio.createdAt >= session.startedAt
-    const scaffold = assignment.data?.beginnerScaffold === true
-    if (assignment.data?.coursePhase === 'delayed-transfer' && !scaffold && !earlyRecording)
+    const scaffold = assignment?.data?.beginnerScaffold === true
+    if (assignment?.data?.coursePhase === 'delayed-transfer' && !scaffold && !textPractice(draft) && !earlyRecording)
       throw new Error('先保存这次独立书写与新的首答录音，再看参考。')
     const event = eventSchema.parse({ id, type: 'JAPANESE_COURSE_FIRST_ATTEMPT', source: 'self-report', timestamp: now,
-      sessionId: session.id, contextId: String(assignment.data!.contextId), ...(scaffold ? { prompted: true } : {}),
-      data: { materialId: session.materialId!, response: draft.response, coursePhase: String(assignment.data!.coursePhase),
-        ...(earlyRecording ? { audioId: draft.audioId } : {}), recordingBeforeHelp: !!earlyRecording,
-        contextId: String(assignment.data!.contextId), ...(scaffold ? { beginnerScaffold: true } : {}), acousticAssessed: false, masteryAssessed: false } })
+      sessionId: session.id, ...(assignment ? { contextId: String(assignment.data!.contextId) } : {}), ...(scaffold || draft.helped || draft.practiceMode === 'choice' ? { prompted: true } : {}),
+      data: { materialId: session.materialId!, response: draft.response,
+        ...(assignment ? { coursePhase: String(assignment.data!.coursePhase), contextId: String(assignment.data!.contextId) } : {}),
+        ...(earlyRecording ? { audioId: draft.audioId } : {}), recordingBeforeHelp: !!earlyRecording && !textPractice(draft),
+        ...(textPractice(draft) ? { practiceMode: draft.practiceMode!, independentTransferVerified: false, speakingVerified: false } : {}),
+        ...(scaffold ? { beginnerScaffold: true } : {}), acousticAssessed: false, masteryAssessed: false } })
     await database.events.add(event)
     return event
   }
@@ -133,10 +137,14 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const id = `${sessionId}:independent-attempt`, existing = await database.events.get(id)
       if (existing) return existing
       const session = await database.sessions.get(sessionId), assignment = await database.events.get(`${sessionId}:course-assignment`)
-      if (!session || session.completedAt || session.kind !== 'japanese-practice'
-        || assignment?.data?.beginnerScaffold === true || !['application', 'delayed-transfer'].includes(String(assignment?.data?.coursePhase))) throw new Error('请从本次应用或延迟任务保存首答。')
+      if (!session || session.completedAt || session.kind !== 'japanese-practice') throw new Error('请从本次应用或延迟任务保存首答。')
+      const draft = japanesePracticeDraft.parse(session.draft)
+      // Recordless first answers need the same immutable boundary, not an
+      // independent-speaking claim. Preserve the stricter legacy audio gate.
+      if (!textPractice(draft) && (!assignment || assignment.data?.beginnerScaffold === true
+        || !['application', 'delayed-transfer'].includes(String(assignment.data?.coursePhase)))) throw new Error('请从本次应用或延迟任务保存首答。')
       if (session.stage !== 'listen') throw new Error('请在查看参考前锁定独立首答；不能把对照后的回答当作首答。')
-      return freezeFirstAttempt(session, japanesePracticeDraft.parse(session.draft), now)
+      return freezeFirstAttempt(session, draft, now)
     })
   }
   async function assignCourse(session: StudySession, now: number) {
@@ -211,14 +219,22 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
           && !sessions.some(session => session.draft.taskId === task.id))
       const current = replaceInitialPlan ? undefined : savedPlan
       // Curriculum exposure chooses a next task, not a higher proficiency score.
-      const history = japanesePracticeHistory(events, now)
+      // Text participation may select a following lesson, never satisfy the
+      // domain's listening/recorded delayed-transfer evidence contract.
+      const textHistory = events.filter(event => event.type === 'JAPANESE_TEXT_PRACTICE' && event.source === 'text'
+        && event.timestamp <= now && sessions.some(session => session.id === event.sessionId && session.kind === 'japanese-practice'
+          && session.completedAt && session.completedAt <= now && session.materialId === event.data?.materialId
+          && japanesePracticeDraft.safeParse(session.draft).success && textPractice(japanesePracticeDraft.parse(session.draft))))
+      const history = [...japanesePracticeHistory(events, now), ...textHistory].sort((a, b) => a.timestamp - b.timestamp)
       const completedIds = new Set(history.map(event => event.data?.materialId))
       const practiced = materials.filter(material => completedIds.has(material.id))
       const scriptReady = !beginner || new Set(foundationHistory.filter(h => /^ja-kana-hiragana-([1-9]|10)$/u.test(h.reading.id)).map(h => h.reading.id)).size >= 10
       const courseMaterials = beginner && !scriptReady ? materials.filter(material => ['ja-irodori-starter-1', 'ja-irodori-starter-2'].includes(material.id)) : materials
       const target = beginner && !scriptReady ? 0.1 : Math.max(0.1 + (placement.conversationProbe - 1) * 0.025, ...practiced.map(material => material.difficulty))
       const probe = courseMaterials.find(material => material.id === `ja-irodori-starter-${placement.conversationProbe}`)
-      const next = nextJapaneseLesson(courseMaterials, events, target, now)
+      const textIds = new Set(textHistory.map(event => event.data?.materialId))
+      const next = nextJapaneseLesson(courseMaterials.filter(material => !textIds.has(material.id)), events, target, now)
+        ?? nextJapaneseLesson(courseMaterials, events, target, now)
       const material = !completedIds.size && probe && nextJapaneseLesson([probe], events, target, now) ? probe : next
       // Keep explicitly resolved/skipped optional rows as history, but never
       // mark them done: completed optional work legitimately consumes time.
@@ -340,9 +356,9 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     const draft = japanesePracticeDraft.parse(input)
     if (!steps.includes(step)) throw new Error('无效的练习步骤')
     if (step !== 'listen' && !draft.response.trim()) throw new Error('先保存自己的首答；没听懂也可以如实写下。')
-    if (['speak', 'compare'].includes(step) && !draft.listened) throw new Error('请在对照阶段实际听过原声，再进入录音。')
+    if (['speak', 'compare'].includes(step) && !textPractice(draft) && !draft.listened) throw new Error('请在对照阶段实际听过原声，再进入录音。')
     if (['speak', 'compare'].includes(step) && (!draft.expression.trim() || !draft.example.trim())) throw new Error('先选一个表达，再写一句自己的话。')
-    if (step === 'compare' && !draft.audioId) throw new Error('请先录下自己的回答。')
+    if (step === 'compare' && !textPractice(draft) && !draft.audioId) throw new Error('请先录下自己的回答。')
     await checkOwner()
     return database.transaction('rw', database.sessions, database.audio, database.events, database.syncMeta, async () => {
       await fence()
@@ -351,17 +367,36 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       if (session.completedAt) throw new Error('这次练习已经保存完成，请返回今日任务。')
       const stored = japanesePracticeDraft.parse(session.draft)
       if (stored.taskId !== draft.taskId || stored.revision !== draft.revision) throw new Error('这份练习已在其他页面更新，请重新打开；当前输入未覆盖已保存内容。')
+      if (stored.helped || draft.helped || draft.practiceMode === 'choice') draft.helped = true
       const assignment = await database.events.get(`${sessionId}:course-assignment`)
       const independentFirst = assignment?.data?.beginnerScaffold !== true && ['application', 'delayed-transfer'].includes(String(assignment?.data?.coursePhase))
-      if (step !== 'listen' && !independentFirst && !draft.listened) throw new Error('先听一段原声，再写下听懂的意思；没听懂也可以如实写下。')
+      if (step !== 'listen' && !textPractice(draft) && !independentFirst && !draft.listened) throw new Error('先听一段原声，再写下听懂的意思；没听懂也可以如实写下。')
       const firstAttempt = await database.events.get(`${sessionId}:independent-attempt`)
-      if (step !== 'listen' && independentFirst && assignment?.data?.coursePhase === 'delayed-transfer' && !firstAttempt)
+      if (step !== 'listen' && !textPractice(draft) && independentFirst && assignment?.data?.coursePhase === 'delayed-transfer' && !firstAttempt)
         throw new Error('先保存独立书写与录音首答，再展开参考和进入对照。')
-      if ((step !== 'listen' && assignment) || firstAttempt)
+      if ((step !== 'listen' && (assignment || textPractice(draft))) || firstAttempt)
         await freezeFirstAttempt(session, draft, Date.now())
-      for (const id of [draft.audioId, draft.retryAudioId].filter(Boolean)) {
+      if (textPractice(draft) && ['speak', 'compare'].includes(step)) {
+        const id = `${sessionId}:written-expression`, first = await database.events.get(id)
+        if (first && first.data?.response !== draft.example) throw new Error('原文字表达已保留，请在修正栏写新的完整表达，不覆盖首次回答。')
+        if (!first) await database.events.add(eventSchema.parse({ id, type: 'JAPANESE_TEXT_FIRST_EXPRESSION', timestamp: Date.now(),
+          sessionId, source: 'text', prompted: !!draft.helped, data: { materialId: session.materialId!, response: draft.example,
+            practiceMode: draft.practiceMode!, masteryAssessed: false, acousticAssessed: false } }))
+      }
+      const missingAudioIds: string[] = []
+      for (const field of ['audioId', 'retryAudioId'] as const) {
+        const id = draft[field]
+        if (textPractice(draft) && stored[field] && id !== stored[field]) throw new Error('原录音引用已保留；文字练习不能更换或清空已有录音。')
+        if (!id) continue
         const audio = await database.audio.get(id)
-        if (!audio?.blob.size || audio.kind !== 'recording') throw new Error('请先将录音成功保存在日语区。')
+        if (!audio?.blob.size || audio.kind !== 'recording') {
+          if (!textPractice(draft) || id !== stored[field] || audio && audio.kind !== 'recording') throw new Error('请先将录音成功保存在日语区。')
+          missingAudioIds.push(id)
+        }
+      }
+      if (textPractice(draft)) {
+        draft.audioUnavailable = missingAudioIds.length > 0
+        draft.missingAudioIds = missingAudioIds
       }
       const next = sessionSchema.parse({ ...session, stage: step, draft: { ...draft, revision: draft.revision + 1 } })
       await database.sessions.put(next)
@@ -432,24 +467,38 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const firstAttempt = await database.events.get(`${sessionId}:independent-attempt`)
       if (['application', 'delayed-transfer'].includes(String(assignment?.data?.coursePhase)) && !firstAttempt)
         throw new Error('应用与延迟任务需要先保存独立书写，再对照重说；原草稿仍保留。')
-      if (session.stage !== 'compare' || !draft.listened || !draft.response.trim() || !draft.expression.trim() || !draft.example.trim()
+      const written = textPractice(draft)
+      if (written) {
+        if (session.stage !== 'compare' || !draft.response.trim() || !draft.expression.trim() || !draft.example.trim()
+          || !draft.comparison.trim() || !draft.retryText?.trim()) throw new Error('请保存原文字表达、修正后的完整表达和对照说明；不需要录音。')
+      } else if (session.stage !== 'compare' || !draft.listened || !draft.response.trim() || !draft.expression.trim() || !draft.example.trim()
         || !draft.comparison.trim() || !draft.audioId || !draft.retryAudioId || draft.audioId === draft.retryAudioId) throw new Error('请完成回答、两次录音和对照笔记后保存。')
-      for (const id of [draft.audioId, draft.retryAudioId]) {
+      const missingAudioIds: string[] = []
+      for (const id of [draft.audioId, draft.retryAudioId].filter(Boolean)) {
         const audio = await database.audio.get(id)
-        if (!audio?.blob.size || audio.kind !== 'recording') throw new Error('录音原件尚未保存，练习仍保留为草稿。')
+        if (!audio?.blob.size || audio.kind !== 'recording') {
+          if (!written || audio && audio.kind !== 'recording') throw new Error('录音原件尚未保存，练习仍保留为草稿。')
+          missingAudioIds.push(id)
+        }
       }
+      const unavailable: Record<string, boolean | string[]> = written && missingAudioIds.length ? { audioAvailable: false, missingAudioIds } : {}
       const date = new Date(now).toLocaleDateString('en-CA'), plan = await database.plans.get(date)
       const task = plan?.tasks.find(task => task.id === draft.taskId)
       // Overnight drafts remain finishable. Charge their original assignment
       // on the actual completion day, without moving it into today's plan.
-      await repository.recordEvent({ id: `${sessionId}:reflection`, type: 'EXTERNAL_LISTEN_REFLECTION', timestamp: now, source: 'self-report', sessionId,
+      await repository.recordEvent({ id: `${sessionId}:reflection`, type: written ? 'JAPANESE_TEXT_PRACTICE' : 'EXTERNAL_LISTEN_REFLECTION', timestamp: now,
+        source: written ? 'text' : 'self-report', sessionId, ...(written ? { prompted: !!draft.helped } : {}),
         data: { materialId: session.materialId, response: draft.response, expression: draft.expression, example: draft.example,
-          audioId: draft.retryAudioId, listened: true, playbackObserved: false, comprehensionVerified: false,
+          ...(!written || draft.retryAudioId ? { audioId: draft.retryAudioId } : {}), listened: draft.listened, playbackObserved: false, comprehensionVerified: false,
+           ...(written ? { practiceMode: draft.practiceMode!, retryText: draft.retryText!, independentTransferVerified: false, speakingVerified: false } : {}), ...unavailable,
           ...(draft.effort ? { effort: draft.effort } : {}),
           ...(assignment?.data ?? {}), ...(firstAttempt ? { firstAttemptEventId: firstAttempt.id } : {}),
           publisherCoverageVerified: false } })
-      await repository.recordEvent({ id: `${sessionId}:retry`, type: 'JAPANESE_COMPARE_RETRY', timestamp: now, source: 'self-report', sessionId,
-        data: { materialId: session.materialId, audioId: draft.audioId, retryAudioId: draft.retryAudioId, comparison: draft.comparison, acousticAssessed: false } })
+      await repository.recordEvent({ id: `${sessionId}:retry`, type: 'JAPANESE_COMPARE_RETRY', timestamp: now, source: written ? 'text' : 'self-report',
+        sessionId, ...(written ? { prompted: !!draft.helped } : {}),
+        data: { materialId: session.materialId, ...(!written || draft.audioId ? { audioId: draft.audioId } : {}),
+          ...(!written || draft.retryAudioId ? { retryAudioId: draft.retryAudioId } : {}), comparison: draft.comparison,
+           ...(written ? { originalText: draft.example, retryText: draft.retryText!, practiceMode: draft.practiceMode!, speakingVerified: false } : {}), ...unavailable, acousticAssessed: false } })
       const material = await database.materials.get(session.materialId)
       // Only the authored reference enters cards automatically. A learner's
       // unverified sentence is preserved as a response, not taught as correct.
@@ -464,7 +513,7 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
         await repository.recordEvent({ id: `${sessionId}:completed`, type: 'TASK_COMPLETED', timestamp: now, source: 'objective', sessionId,
           data: { taskId: draft.taskId, minutes, materialId: session.materialId, carriedOver: !task } })
       }
-      const complete = { ...session, completedAt: now, stage: 'completed' }
+      const complete = { ...session, ...(written ? { draft: { ...draft, audioUnavailable: missingAudioIds.length > 0, missingAudioIds } } : {}), completedAt: now, stage: 'completed' }
       await database.sessions.put(complete)
       const coach = await database.sessions.get(`ja-coach:${sessionId}`)
       if (coach?.kind === 'japanese-coach') await database.sessions.put({ ...coach, completedAt: now, stage: 'completed' })
