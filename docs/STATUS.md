@@ -1,10 +1,12 @@
 # Current status
 
-## October3 document-led teaching redesign — limited-trial rollout, final human acceptance incomplete
+## October3 document-led teaching redesign — limited trial published, final human acceptance incomplete
 
 Owner approved implementation of `D:/chrome下载/Jove_Language_Modification_Spec.docx` after the requirements summary. This is a new scope and is not closed by the earlier remediation or beginner-navigation release.
 
-Retained public runtime, independently read from the network-only manifest on October3: `232b4245a7832bc1cc0c6a46a5c215acc9ee4fbd`, clean build **`232b424-427f2ad19aad`**, built2026-10-03T05:31:14.340Z. This read verifies the published revision only, not new classroom/AI/device acceptance. It supersedes older "current" runtime wording in the historical checkpoints below; this round has not changed production.
+Current public trial: **`64cb1c1-abcbe1736a00`**, clean source **`64cb1c1bfd2e0ad7a5bdae4c9d36ce41d03187a0`**. Publication, actual-public classroom and owner-update evidence are recorded in the "Limited trial" closure below. Human teaching/audio/model-accuracy and physical-device/longitudinal gates remain open; earlier candidate/pending checkpoints are historical, not the current software rollout state.
+
+Before this trial rollout, the network-only manifest independently identified the rollback source `232b4245a7832bc1cc0c6a46a5c215acc9ee4fbd`, clean build **`232b424-427f2ad19aad`**, built2026-10-03T05:31:14.340Z. Preserve that prior identity; it is no longer the current published trial.
 
 - P0: six original entry lessons, teach-before-test single-task classroom, meaningful help branches, scoped AI feedback/local fallback, immutable first attempts and safe versioned recovery.
 - P1: exact demonstration audio/source metadata, delayed new-context use, shared time accounting, mobile/accessibility and preserved cross-device attempts/recordings.
@@ -32,7 +34,7 @@ Before a real rollout, the owner must save work on each device and preserve a la
 
 ### Remaining release gates — stop conditions, not fabricated passes
 
-Owner subsequently approved explicitly labelled limited-trial publication on October3. Main is activating this verified subset and will record the exact public runtime, deployed AI source readback and production learner paths below. Human/model/device/longitudinal gates remain open; trial approval does not turn them into passes.
+Owner subsequently approved explicitly labelled limited-trial publication on October3. The verified subset is now activated with the exact public runtime, deployed AI source readback and production learner paths below. Human/model/device/longitudinal gates remain open; trial approval does not turn them into passes.
 
 ### Limited trial — published, software rollout accepted; human gates still open
 
