@@ -58,6 +58,32 @@ test('English starts by teaching, repairs a real error and preserves the first a
   expect(calls).toEqual([])
 })
 
+test('editing a valid answer returns to one primary check action instead of silently advancing', async ({ page }) => {
+  await blockPaid(page)
+  const lesson = starterLessons[0]!
+  await page.goto('#/course/en')
+  await page.getByRole('button', { name: '开始或接着上次学 · 约 3–5 分钟', exact: true }).click()
+  await teachAndRecognize(page, lesson)
+  const answer = page.getByRole('textbox', { name: '试着用刚教的表达回应', exact: true })
+  await answer.fill(lesson.expression.reference)
+  await page.getByRole('button', { name: '看看这次表达', exact: true }).click()
+  await expect(page.locator('.starter-focus .button.primary')).toHaveCount(1)
+  await expect(page.getByRole('button', { name: '看看这次表达', exact: true })).toHaveCount(0)
+  await answer.fill(lesson.expression.errors[0]!.input)
+  await expect(page.getByRole('button', { name: '保存，结束这个小课', exact: true })).toHaveCount(0)
+  await expect(page.locator('.starter-focus .button.primary')).toHaveCount(1)
+  await expect(page.getByText('下面是上一份已提交回答的反馈。', { exact: false })).toBeVisible()
+  await expect(page.getByText('已保存在本机', { exact: true })).toBeVisible()
+  // The reload must not race the debounced save; read the durable draft first.
+  await expect.poll(async () => (await records(page, 'sessions')).some(session => (session.draft as Record<string, unknown>).response === lesson.expression.errors[0]!.input)).toBe(true)
+  await page.reload()
+  await expect(answer).toHaveValue(lesson.expression.errors[0]!.input)
+  await expect(page.getByRole('button', { name: '保存，结束这个小课', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '看看这次表达', exact: true }).click()
+  await expect(page.getByText(lesson.expression.errors[0]!.feedbackZh, { exact: true })).toBeVisible()
+  expect((await records(page, 'events')).filter(event => event.type === 'TASK_COMPLETED')).toHaveLength(0)
+})
+
 test('Japanese zero learner can listen and finish by supported selection without knowing kana or an input method', async ({ page }) => {
   test.skip(process.env.VITE_JOVE_JAPANESE !== '1', 'Japanese production build gate is off')
   const calls = await blockPaid(page), lesson = starterLessons.find(lesson => lesson.id === 'ja-starter-1')!

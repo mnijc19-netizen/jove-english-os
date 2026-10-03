@@ -293,6 +293,46 @@ describe('starter classroom saved sessions, ownership and concurrency', () => {
     expect(await database.secrets.count()).toBe(0)
   })
 
+  it('does not advance from an earlier valid answer after an unsubmitted edit', async () => {
+    const { classroom, database } = await setup()
+    let state = await expression(classroom, await classroom.start('en-starter-1', 'quick', now))
+    state = await answer(classroom, state, state.lesson.expression.reference, 'text', now + 10)
+    const first = await database.events.get(state.draft.lastAttemptId)
+    state = await classroom.save(state.session.id, state.draft.revision, {
+      response: 'Hi, I Jove.', mode: 'text', audioId: '', romaji: false, activeMs: 2000,
+    })
+    await expect(classroom.advance(state.session.id, state.draft.revision, now + 11)).rejects.toThrow(/已经改过/)
+    expect((await database.sessions.get(state.session.id))?.draft.response).toBe('Hi, I Jove.')
+    expect(await database.events.get(first!.id)).toEqual(first)
+    expect(await database.events.where('type').equals('TASK_COMPLETED').count()).toBe(0)
+    state = await classroom.submit(state.session.id, state.draft.revision, now + 12)
+    expect(state.feedback?.verdict).toBe('invalid')
+    await expect(classroom.advance(state.session.id, state.draft.revision, now + 13)).rejects.toThrow(/修正/)
+    state = await answer(classroom, state, state.lesson.expression.reference, 'text', now + 14)
+    state = await classroom.advance(state.session.id, state.draft.revision, now + 15)
+    expect(state.session.stage).toBe('done')
+    expect(await database.events.where('type').equals('TASK_COMPLETED').count()).toBe(1)
+    expect(await database.events.get(first!.id)).toEqual(first)
+  })
+
+  it('requires a new submission when the practice mode or recording changes after a valid answer', async () => {
+    const { classroom, database } = await setup()
+    let state = await expression(classroom, await classroom.start('en-starter-1', 'quick', now))
+    state = await answer(classroom, state, state.lesson.expression.reference, 'text', now + 10)
+    const recording = rawRecording('new-unsubmitted-recording', 'new original')
+    await database.audio.add(recording)
+    state = await classroom.save(state.session.id, state.draft.revision, {
+      response: state.lesson.expression.reference, mode: 'audio-transcript', audioId: recording.id, romaji: false, activeMs: 2000,
+    })
+    await expect(classroom.advance(state.session.id, state.draft.revision, now + 11)).rejects.toThrow(/已经改过/)
+    expect((await database.sessions.get(state.session.id))?.draft.audioId).toBe(recording.id)
+    expect(await database.events.where('type').equals('TASK_COMPLETED').count()).toBe(0)
+    state = await classroom.submit(state.session.id, state.draft.revision, now + 12)
+    expect(state.attempts.find(attempt => attempt.id === state.draft.lastAttemptId)?.audioId).toBe(recording.id)
+    expect((await classroom.advance(state.session.id, state.draft.revision, now + 13)).session.stage).toBe('done')
+    expect((await database.audio.get(recording.id))?.blob.size).toBe(recording.blob.size)
+  })
+
   it('preserves an original first attempt and a separate corrected retry across edits and reload', async () => {
     const { classroom, database, english } = await setup()
     let state = await expression(classroom, await classroom.start('en-starter-1', 'quick', now))

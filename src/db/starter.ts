@@ -255,6 +255,8 @@ export function createStarterClassroom(database: JoveDatabase, english: JoveData
       if (state.stage !== 'teach') {
         const latest = effectiveStarterFeedback(draft.lastAttemptId, await database.events.where('sessionId').anyOf(await historyIds(state)).toArray(), now)
         const attempt = starterAttemptFromEvent((await database.events.get(draft.lastAttemptId))!)
+        if (attempt && (attempt.response !== draft.response.trim() || attempt.mode !== draft.mode || (attempt.audioId ?? '') !== draft.audioId))
+          throw new Error('这个回答或录音已经改过，请先核对新回答；旧反馈和新草稿都已保留。')
         if (!latest || !attempt || attempt.stage !== state.stage || attempt.contextId !== draft.contextId || ['invalid', 'partial'].includes(latest.verdict))
           throw new Error('先试着修正这一处；不会时用示范或选句继续。')
         if (latest.verdict === 'uncertain') {

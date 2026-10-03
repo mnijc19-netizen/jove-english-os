@@ -42,6 +42,12 @@ const meaning = computed(() => stage.value === 'transfer' ? currentContext.value
 const explanation = computed(() => stage.value === 'transfer' ? currentContext.value?.explanationZh : state.value?.lesson.model.explanationZh)
 const readingAid = computed(() => stage.value === 'transfer' ? currentContext.value?.romaji : state.value?.lesson.model.romaji)
 const hasCurrentAttempt = computed(() => !!state.value?.draft.lastAttemptId)
+const currentAnswerMatches = computed(() => {
+  const attempt = state.value?.attempts.find(item => item.id === state.value?.draft.lastAttemptId)
+  return !!attempt && attempt.response === response.value.trim() && attempt.mode === mode.value && (attempt.audioId ?? '') === audioId.value
+})
+const readyToContinue = computed(() => currentAnswerMatches.value && !!state.value?.feedback
+  && ['valid', 'uncertain'].includes(state.value.feedback.verdict))
 const helpVisible = computed(() => stage.value !== 'transfer' || !!state.value?.draft.helped || hasCurrentAttempt.value)
 const demonstration = computed(() => {
   if (!state.value) return ''
@@ -174,7 +180,7 @@ async function attachRecording(value: { audioId: string }) {
   audioId.value = value.audioId; changed(); await flush(); await refresh()
 }
 async function getAIFeedback(review = false) {
-  if (!consent.value || !state.value || !app.keySet) return
+  if (!consent.value || !state.value || !app.keySet || !currentAnswerMatches.value) return
   await flush()
   const attempt = state.value.attempts.find(item => item.id === state.value?.draft.lastAttemptId)
   const sessionId = state.value.session.id
@@ -297,16 +303,20 @@ onBeforeUnmount(() => {
             <div class="starter-actions"><button type="button" class="text-button" :disabled="busy || aiBusy" @click="act(choosePractice)">不会打字 / 换成选句练习</button><button v-if="mode === 'choice'" type="button" class="text-button" @click="mode = 'text'; response = ''; changed()">我想试着自己写</button></div>
             <details class="recording-option"><summary>也可以开口练习、保存原录音</summary><p>录音先保存在本机。不能说话时继续文字或选句即可，口语保持待验证。</p><Recorder :key="state.session.id + ':' + stage" :label="language === 'ja' ? '录一句日语' : '录一句英语'" :saved-audio-id="audioId" transcription-disabled :workspace="{ database, audio: () => audio, refresh, assertCurrent: learning.assertCurrent, attach: attachRecording }" @active="captureActive = $event" @recorded="attachRecording" /><SavedRecording :audio-id="audioId" :assets="audio" label="这次的原录音" /><button v-if="audioId && consent && app.keySet" type="button" class="button secondary" :disabled="aiBusy || captureActive" @click="transcribe">将当前录音交给 AI 转成文字</button><template v-if="pendingTranscript"><p>请核对识别内容；识别错误不是你的语言错误。</p><textarea v-model="pendingTranscript" rows="2" maxlength="500" aria-label="核对识别结果" /><button type="button" class="button secondary" @click="act(confirmTranscript)">确认识别文字，再用它练习</button></template></details>
           </template>
-          <button type="submit" class="button primary" :disabled="busy || aiBusy || captureActive || !response.trim()">看看这次表达</button>
+          <button v-if="!readyToContinue" type="submit" class="button primary" :disabled="busy || aiBusy || captureActive || !response.trim()">看看这次表达</button>
         </form>
-        <div v-if="state.feedback && hasCurrentAttempt" class="starter-feedback" aria-live="polite"><h3>{{ state.feedback.verdict === 'valid' ? '这次的意思成立' : state.feedback.verdict === 'uncertain' ? '这个回答还需要核对' : '先改这一处就好' }}</h3><p>{{ state.feedback.feedbackZh }}</p><p v-if="state.feedback.correction" :lang="language">可以试：{{ state.feedback.correction }}</p><p class="help-text">{{ state.feedback.source === 'ai' ? 'AI 辅助反馈' : '本课内容规则反馈' }} · 不评价发音与语调。</p><button v-if="state.feedback.verdict === 'valid'" class="button primary" :disabled="busy || aiBusy" @click="act(() => nextStep())">{{ stage === 'transfer' || stage === 'express' && state.draft.pace === 'quick' ? '保存，结束这个小课' : '继续下一小步' }}</button><button v-else-if="state.feedback.verdict === 'uncertain'" class="button secondary" :disabled="busy || aiBusy" @click="act(() => nextStep(true))">保留待核对回答，先继续教学</button><button class="text-button" :disabled="busy || aiBusy" @click="act(disputeCurrent)">我认为这也对</button></div>
+        <div v-if="state.feedback && hasCurrentAttempt" class="starter-feedback" aria-live="polite">
+          <p v-if="!currentAnswerMatches" class="help-text">下面是上一份已提交回答的反馈。你修改后的答案还没核对，请先点“看看这次表达”；新草稿和旧反馈都保留。</p>
+          <h3>{{ state.feedback.verdict === 'valid' ? '这次的意思成立' : state.feedback.verdict === 'uncertain' ? '这个回答还需要核对' : '先改这一处就好' }}</h3><p>{{ state.feedback.feedbackZh }}</p><p v-if="state.feedback.correction" :lang="language">可以试：{{ state.feedback.correction }}</p><p class="help-text">{{ state.feedback.source === 'ai' ? 'AI 辅助反馈' : '本课内容规则反馈' }} · 不评价发音与语调。</p>
+          <button v-if="readyToContinue && state.feedback.verdict === 'valid'" class="button primary" :disabled="busy || aiBusy" @click="act(() => nextStep())">{{ stage === 'transfer' || stage === 'express' && state.draft.pace === 'quick' ? '保存，结束这个小课' : '继续下一小步' }}</button><button v-else-if="readyToContinue && state.feedback.verdict === 'uncertain'" class="button primary" :disabled="busy || aiBusy" @click="act(() => nextStep(true))">保留待核对回答，先继续教学</button><button class="text-button" :disabled="busy || aiBusy" @click="act(disputeCurrent)">我认为这也对</button>
+        </div>
         <p v-if="repeatedDifficulty" class="help-text" role="status">连续尝试还卡住，我们换成示范和选句；这不是你不认真。<button class="button secondary" :disabled="busy" @click="act(choosePractice)">换一个更容易的小动作</button></p>
         <div class="starter-actions"><button v-if="stage !== 'teach'" class="text-button" :disabled="busy || aiBusy" @click="act(help)">给我帮助 / 再看示范</button><button class="text-button" :disabled="busy || captureActive" @click="act(leave)">暂停，下次从这里继续</button></div>
         <details class="ai-option"><summary>需要时请 AI 核对当前回答</summary>
           <p>AI 会收到当前回答、当前课目标和必要的练习内容；转写另需发送当前录音。不会发送全部历史。由已配置的 AI 服务处理；你也可以一直只用本地课程。</p>
           <label><input v-model="consent" type="checkbox">同意本次云端处理</label>
-          <button class="button secondary" :disabled="!consent || !app.keySet || !hasCurrentAttempt || !!firstAI || aiBusy || busy" @click="getAIFeedback(false)">{{ aiBusy ? '正在核对，原回答已经保存…' : firstAI ? '本次 AI 反馈已保存' : '请 AI 只核对这一处' }}</button>
-          <template v-if="disputed && firstAI?.data?.model"><p>异议不会覆盖原判断。可以选择另一个模型独立核对一次，可能额外计费，同样受账号限额保护；判断仍不一致时保持待核对，不强行给分。</p><button class="button secondary" :disabled="!consent || !app.keySet || !!secondAI || aiBusy || busy" @click="getAIFeedback(true)">{{ secondAI ? '独立核对已保存' : '换一个模型独立核对（最多一次）' }}</button></template>
+          <button class="button secondary" :disabled="!consent || !app.keySet || !currentAnswerMatches || !!firstAI || aiBusy || busy" @click="getAIFeedback(false)">{{ aiBusy ? '正在核对，原回答已经保存…' : firstAI ? '本次 AI 反馈已保存' : '请 AI 只核对这一处' }}</button>
+          <template v-if="disputed && firstAI?.data?.model"><p>异议不会覆盖原判断。可以选择另一个模型独立核对一次，可能额外计费，同样受账号限额保护；判断仍不一致时保持待核对，不强行给分。</p><button class="button secondary" :disabled="!consent || !app.keySet || !currentAnswerMatches || !!secondAI || aiBusy || busy" @click="getAIFeedback(true)">{{ secondAI ? '独立核对已保存' : '换一个模型独立核对（最多一次）' }}</button></template>
           <details v-if="firstAI"><summary>保留的反馈版本</summary><p>第一次：{{ firstAI.data?.feedbackZh }} · {{ firstAI.data?.model ?? '来源待确认' }}</p><p v-if="secondAI">独立核对：{{ secondAI.data?.feedbackZh }} · {{ secondAI.data?.model }}</p></details>
           <button v-if="aiBusy" class="text-button" @click="cancel">取消等待，继续本地学习</button><p v-if="!app.keySet" class="help-text">未启用账号 AI；示范、练习和保存仍可使用。</p><p v-if="aiError" role="status">AI 暂未完成，本课备用解释仍可使用。</p><details v-if="aiError"><summary>诊断信息</summary><p>{{ aiError }}</p></details>
         </details>
