@@ -71,9 +71,19 @@ const nav = [
   { label: "Library", zh: "学习材料", description: "查看课程与已保存材料" },
   { label: "Progress", zh: "学习记录", description: "区分已完成练习与已有能力证据" },
 ];
+const japaneseNav = [
+  { path: '/ja', label: '今日安排', icon: 'today', description: '系统安排下一步，不需要自己选课' },
+  { path: '/ja/practice', label: '听说练习', icon: 'listen', description: '继续已安排的真人听力和情境表达' },
+  { path: '/ja/literacy', label: '假名与阅读', icon: 'learn', description: '零基础先认识假名，再逐步阅读' },
+  { path: '/ja/reviews', label: '间隔复习', icon: 'review', description: '查看已安排的复习，继续未完成的回忆' },
+  { path: '/ja/library', label: '学习材料', icon: 'library', description: '了解日语课程和原站资源，不必自己排课' },
+  { path: '/ja/progress', label: '学习进度', icon: 'progress', description: '查看日语真实练习记录，不把完成数当能力' },
+];
 const page = computed(() => route.path.slice(1) || "today");
 const inJapanese = computed(() => route.path === '/ja' || route.path.startsWith('/ja/'));
-const pageLabel = computed(() => inJapanese.value ? "日语学习"
+const japaneseSection = computed(() => ({ '/ja/talk': '/ja/practice', '/ja/read': '/ja/literacy', '/ja/books': '/ja/literacy', '/ja/review': '/ja/reviews' } as Record<string, string>)[route.path] ?? route.path);
+const pageLabel = computed(() => inJapanese.value ? japaneseNav.find(item => item.path === route.path)?.label
+  ?? ({ '/ja/talk': '日语对话', '/ja/read': '假名与阅读', '/ja/books': '原版多读', '/ja/review': '间隔复习' } as Record<string, string>)[route.path] ?? '日语学习'
   : nav.find(item => item.label.toLowerCase() === page.value)?.zh
     ?? ({ onboarding: "了解我的起点", settings: "设置" } as Record<string, string>)[page.value] ?? "学习空间");
 const workspaceStatus = computed(() => inJapanese.value && japanese ? japanese.status : cloud.status);
@@ -202,7 +212,11 @@ function focusPractice() {
           ><span v-if="item.label === 'Today'" class="nav-dot"></span
         ></RouterLink>
       </nav>
-      <nav v-else aria-label="日语导航" lang="zh-CN"><RouterLink to="/ja" class="nav-item"><Icon name="today" />今日任务与复习</RouterLink></nav>
+      <nav v-else aria-label="日语导航" lang="zh-CN">
+        <RouterLink v-for="item in japaneseNav" :key="item.path" :to="item.path" class="nav-item" :class="{ 'router-link-active': japaneseSection === item.path }" :aria-current="japaneseSection === item.path ? 'page' : undefined" :aria-description="item.description">
+          <Icon :name="item.icon" /><span>{{ item.label }}</span><span v-if="item.path === '/ja'" class="nav-dot"></span>
+        </RouterLink>
+      </nav>
       <div class="sidebar-bottom">
         <div class="local-note">
           <Icon name="shield" :size="18" /><span

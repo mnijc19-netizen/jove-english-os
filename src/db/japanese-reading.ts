@@ -41,10 +41,11 @@ export function createJapaneseReading(database: JoveDatabase, checkOwner: () => 
       await transactionFence()
       const id = `ja-reading:${task.id}`, previous = await database.sessions.get(id)
       if (previous) return previous
-      const seen = (await database.sessions.toArray()).some(s => ['japanese-reading', 'japanese-reading-conflict'].includes(s.kind) && s.materialId === reading.id
+      const seen = (await database.sessions.toArray()).some(s => s.stage !== 'teach' && ['japanese-reading', 'japanese-reading-conflict'].includes(s.kind) && s.materialId === reading.id
         && (japaneseReadingDraft.safeParse(s.draft).data?.lockedAt !== undefined || japaneseReadingDraft.safeParse(s.draft).data?.helped === true))
-      const draft: JapaneseReadingDraft = { version: 1, revision: 0, taskId: task.id, minutes: task.minutes, meaning: ['', ''], kana: ['', ''], helped: false, seen, note: '', effort: 'okay' }
-      const session = sessionSchema.parse({ id, kind: 'japanese-reading', materialId: reading.id, startedAt: now, stage: 'read', draft })
+      const teach = !!reading.kana && !seen
+      const draft: JapaneseReadingDraft = { version: 1, revision: 0, taskId: task.id, minutes: task.minutes, meaning: ['', ''], kana: ['', ''], helped: teach, seen, note: '', effort: 'okay' }
+      const session = sessionSchema.parse({ id, kind: 'japanese-reading', materialId: reading.id, startedAt: now, stage: teach ? 'teach' : 'read', draft })
       await database.sessions.add(session)
       await repository.recordEvent({ id: `${id}:started`, type: 'TASK_STARTED', source: 'objective', timestamp: now, sessionId: id,
         data: { taskId: task.id, minutes: task.minutes, materialId: reading.id } })
@@ -61,11 +62,12 @@ export function createJapaneseReading(database: JoveDatabase, checkOwner: () => 
       if (draft.lockedAt === undefined) {
         draft.meaning = value.meaning; draft.kana = value.kana
         if (reading.kana && value.sourcePractice) draft.sourcePractice = value.sourcePractice
-        if (action === 'help') draft.helped = true
+        if (action === 'help') { draft.helped = true; if (session.stage === 'teach') session.stage = 'read' }
         if (action === 'lock') {
+          if (session.stage === 'teach') throw new Error('先看字形与读音教学，再开始选择练习；还没学过不必猜题。')
           if (reading.kana && !draft.sourcePractice) throw new Error('请先听原站示范；若无法播放，可明确选择今天只练字形。')
           if (!Number.isFinite(now) || now < session.startedAt) throw new Error('设备时间异常，请校正后保存。')
-          draft.seen ||= (await database.sessions.toArray()).some(s => s.id !== id && s.materialId === reading.id
+          draft.seen ||= (await database.sessions.toArray()).some(s => s.id !== id && s.stage !== 'teach' && s.materialId === reading.id
             && ['japanese-reading', 'japanese-reading-conflict'].includes(s.kind)
             && (japaneseReadingDraft.safeParse(s.draft).data?.helped === true || japaneseReadingDraft.safeParse(s.draft).data?.lockedAt !== undefined))
           draft.lockedAt = now; session.stage = 'compare'
@@ -80,8 +82,8 @@ export function createJapaneseReading(database: JoveDatabase, checkOwner: () => 
     const prior = await read(id)
     if (prior.session.completedAt) return prior.session
     return change(id, revision, async (draft, session) => {
-      if (draft.lockedAt === undefined || now < draft.lockedAt || !Number.isFinite(now) || !draft.note.trim()) throw new Error('请先保存首答，对照后写一句自己的调整或应用。')
       const reading = japaneseWrittenExercises.find(r => r.id === session.materialId)!, results = japaneseReadingResult(reading, draft)
+      if (draft.lockedAt === undefined || now < draft.lockedAt || !Number.isFinite(now) || !reading.kana && !draft.note.trim()) throw new Error('请先保存首答，对照后写一句自己的调整或应用。')
       draft.dueAt = now + japaneseReadingDelay(reading, draft, await database.sessions.toArray(), now)
       const plan = await database.plans.get(new Date(now).toLocaleDateString('en-CA')), task = plan?.tasks.find(t => t.id === draft.taskId)
       if (plan && task) { task.done = true; await database.plans.put(plan) }

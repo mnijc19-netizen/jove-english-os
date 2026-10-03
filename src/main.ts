@@ -15,6 +15,9 @@ const router = createRouter({
       { path: '/ja/talk', component: () => import('./pages/JapaneseDialogue.vue') },
       { path: '/ja/read', component: () => import('./pages/JapaneseReading.vue') },
       { path: '/ja/books', component: () => import('./pages/JapaneseBooks.vue') },
+      ...(['practice', 'literacy', 'reviews', 'library', 'progress'] as const).map(mode => ({
+        path: `/ja/${mode}`, component: () => import('./pages/JapaneseWorkspace.vue'), props: { mode },
+      })),
     ] : []),
     { path: "/", redirect: "/today" },
     { path: "/today", component: () => import("./pages/Today.vue") },

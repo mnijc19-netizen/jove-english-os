@@ -31,7 +31,7 @@ describe('Japanese usable practice persistence', () => {
   it.each(['input', 'application', 'delayed-transfer', 'legacy'] as const)('enforces the frozen %s move/lock contract without new draft fields', async phase => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(now)
     const { learning, ja } = await setup()
-    await learning.confirmBeginnerStart(now)
+    await learning.saveDiagnostic(skipped, true, now)
     const plan = (await learning.today(now))!, task = plan.tasks.find(task => task.kind === 'listen')!
     let session = await learning.start(task.id, now)
     const assignmentId = `${session.id}:course-assignment`
@@ -80,7 +80,7 @@ describe('Japanese usable practice persistence', () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(now)
     const { en, ja, learning } = await setup()
     await en.profiles.update('main', { dailyMinutes, onboarded: true })
-    await learning.confirmBeginnerStart(now)
+    await learning.saveDiagnostic(skipped, true, now)
     if (dailyMinutes === 15) {
       for (const material of japaneseMaterials().slice(0, 5)) {
         const chunk = await learning.repository.addChunk(material.chunks[0]!, material.id)
@@ -139,7 +139,9 @@ describe('Japanese usable practice persistence', () => {
           }
           await learning.finish(session.id, at + 1000)
         } else if (session.kind === 'japanese-reading') {
-          const state = await learning.reading.read(session.id), draft = japaneseReadingDraft.parse(session.draft)
+          const state = await learning.reading.read(session.id)
+          if (session.stage === 'teach') session = await learning.reading.save(session.id, japaneseReadingDraft.parse(session.draft), 'help', at)
+          const draft = japaneseReadingDraft.parse(session.draft)
           if (!state.reading.kana) kinds.add('reading')
           const saved = await learning.reading.save(session.id, { ...draft,
             meaning: state.reading.questions.map(q => q.answer) as [string, string], kana: state.reading.words.map(w => w.reading) as [string, string],
@@ -184,8 +186,8 @@ describe('Japanese usable practice persistence', () => {
     expect(await ja.assessments.get(learning.diagnosticId)).toBeUndefined()
     expect(await learning.startingPoint(now)).toMatchObject({ basis: 'self-report', conversationProbe: 1, kanaSupport: true, furigana: 'full', scriptCorrect: null })
     const plan = (await learning.today(now))!
-    expect(plan.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-1')
-    expect(plan.tasks.some(task => task.materialId?.startsWith('ja-kana-'))).toBe(true)
+    expect(plan.tasks).toHaveLength(1)
+    expect(plan.tasks[0]).toMatchObject({ kind: 'learn', materialId: 'ja-kana-hiragana-1', minutes: 5 })
     expect(await learning.confirmBeginnerStart(now + 1000)).toEqual(confirmation)
     expect(await ja.assessments.count()).toBe(1)
     expect(await ja.events.count()).toBe(0)
@@ -200,8 +202,8 @@ describe('Japanese usable practice persistence', () => {
     expect(before.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-9')
     await learning.confirmBeginnerStart(now + 1000)
     const after = (await learning.today(now + 1000))!
-    expect(after.tasks.find(task => task.kind === 'listen')?.materialId).toBe('ja-irodori-starter-1')
-    expect(after.tasks.some(task => task.materialId?.startsWith('ja-kana-'))).toBe(true)
+    expect(after.tasks[0]).toMatchObject({ kind: 'learn', materialId: 'ja-kana-hiragana-1' })
+    expect(after.tasks.some(task => task.kind === 'listen')).toBe(false)
     expect(after.minutes).toBeLessThanOrEqual(before.minutes)
     expect(await ja.assessments.get(learning.diagnosticId)).toEqual(original)
     expect(await ja.sessions.count()).toBe(0)
@@ -221,7 +223,9 @@ describe('Japanese usable practice persistence', () => {
     const events = await ja.events.toArray()
     await learning.confirmBeginnerStart(now + 1000)
     const after = (await learning.today(now + 1000))!
-    expect(after.tasks).toEqual(before.tasks)
+    expect(after.tasks.find(task => task.id === before.tasks[0]!.id)).toEqual(before.tasks[0])
+    expect(after.tasks[0]?.materialId).toBe('ja-kana-hiragana-1')
+    expect(after.minutes).toBeLessThanOrEqual(before.minutes)
     expect(await ja.sessions.get(saved.id)).toEqual(saved)
     expect((await ja.audio.get('beginner-original'))?.blob.size).toBeGreaterThan(0)
     expect(await ja.events.toArray()).toEqual(events)

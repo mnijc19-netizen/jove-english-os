@@ -11,7 +11,8 @@ import { createJapaneseReview } from './japanese-review'
 import { createJapaneseDialogue } from './japanese-dialogue'
 import { createJapaneseReading } from './japanese-reading'
 import { japaneseReadingMaterials, japaneseWrittenExercises } from '../content/japanese-reading'
-import { nextJapaneseReading, nextJapaneseKana } from '../domain/japanese-reading'
+import { nextJapaneseReading, nextJapaneseKana, japaneseReadingHistory } from '../domain/japanese-reading'
+import { japaneseKana } from '../content/japanese-kana'
 import { unavailableExternalIds } from '../content/external'
 import { tadokuStarterMaterials } from '../content/tadoku-catalog'
 import { nextJapaneseBook } from '../domain/japanese-extensive'
@@ -99,8 +100,8 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     if (phase !== 'input' && phase !== 'application' && phase !== 'delayed-transfer') return null
     const firstAttempt = await database.events.get(`${sessionId}:independent-attempt`)
     return { phase, contextId: String(assignment!.data!.contextId), contextPrompt: String(assignment!.data!.contextPrompt),
-      independentFirst: phase !== 'input', firstAttemptSaved: !!firstAttempt,
-      goal: japanesePracticePhaseGoal(phase),
+      independentFirst: phase !== 'input' && assignment?.data?.beginnerScaffold !== true, firstAttemptSaved: !!firstAttempt,
+      goal: assignment?.data?.beginnerScaffold === true ? '先听原声与中文解释，再借助已学短句练说；不用自由写日语，这是有提示练习。' : japanesePracticePhaseGoal(phase),
       coverage: '本站 Can-do 多次练习，不代表已学完整课原站内容或已经掌握。' }
   }
   async function freezeFirstAttempt(session: StudySession, draft: JapanesePracticeDraft, now: number) {
@@ -114,13 +115,14 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
     if (session.stage !== 'listen' || !draft.response.trim()) throw new Error('先在查看参考前保存自己的书面首答。')
     const audio = draft.audioId ? await database.audio.get(draft.audioId) : undefined
     const earlyRecording = audio?.kind === 'recording' && audio.blob.size > 0 && audio.createdAt >= session.startedAt
-    if (assignment.data?.coursePhase === 'delayed-transfer' && !earlyRecording)
+    const scaffold = assignment.data?.beginnerScaffold === true
+    if (assignment.data?.coursePhase === 'delayed-transfer' && !scaffold && !earlyRecording)
       throw new Error('先保存这次独立书写与新的首答录音，再看参考。')
     const event = eventSchema.parse({ id, type: 'JAPANESE_COURSE_FIRST_ATTEMPT', source: 'self-report', timestamp: now,
-      sessionId: session.id, contextId: String(assignment.data!.contextId),
+      sessionId: session.id, contextId: String(assignment.data!.contextId), ...(scaffold ? { prompted: true } : {}),
       data: { materialId: session.materialId!, response: draft.response, coursePhase: String(assignment.data!.coursePhase),
         ...(earlyRecording ? { audioId: draft.audioId } : {}), recordingBeforeHelp: !!earlyRecording,
-        contextId: String(assignment.data!.contextId), acousticAssessed: false, masteryAssessed: false } })
+        contextId: String(assignment.data!.contextId), ...(scaffold ? { beginnerScaffold: true } : {}), acousticAssessed: false, masteryAssessed: false } })
     await database.events.add(event)
     return event
   }
@@ -132,16 +134,21 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       if (existing) return existing
       const session = await database.sessions.get(sessionId), assignment = await database.events.get(`${sessionId}:course-assignment`)
       if (!session || session.completedAt || session.kind !== 'japanese-practice'
-        || !['application', 'delayed-transfer'].includes(String(assignment?.data?.coursePhase))) throw new Error('请从本次应用或延迟任务保存首答。')
+        || assignment?.data?.beginnerScaffold === true || !['application', 'delayed-transfer'].includes(String(assignment?.data?.coursePhase))) throw new Error('请从本次应用或延迟任务保存首答。')
       if (session.stage !== 'listen') throw new Error('请在查看参考前锁定独立首答；不能把对照后的回答当作首答。')
       return freezeFirstAttempt(session, japanesePracticeDraft.parse(session.draft), now)
     })
   }
   async function assignCourse(session: StudySession, now: number) {
     const assignment = japaneseCoursePractice(session.materialId!, await database.events.toArray(), now)
+    const placement = japaneseStartingPoint(await database.assessments.get(diagnosticId), await database.assessments.get(japaneseBeginnerStartId), now)
+    const basics = japaneseReadingHistory(await database.sessions.toArray(), now, japaneseKana)
+    const beginnerScaffold = placement?.basis === 'self-report' && new Set(basics.filter(h => h.reading.kana?.script === 'hiragana'
+      && /^ja-kana-hiragana-([1-9]|10)$/u.test(h.reading.id)).map(h => h.reading.id)).size < 10
     await repository.recordEvent({ id: `${session.id}:course-assignment`, type: 'JAPANESE_COURSE_ASSIGNED', source: 'objective',
       timestamp: now, sessionId: session.id, contextId: assignment.contextId,
-      data: { materialId: session.materialId!, coursePhase: assignment.phase, contextId: assignment.contextId, contextPrompt: assignment.contextPrompt } })
+      data: { materialId: session.materialId!, coursePhase: assignment.phase, contextId: assignment.contextId, contextPrompt: assignment.contextPrompt,
+        ...(beginnerScaffold ? { beginnerScaffold: true } : {}) } })
   }
   async function confirmBeginnerStart(now = Date.now()) {
     await checkOwner()
@@ -170,6 +177,31 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const date = new Date(now).toLocaleDateString('en-CA'), savedPlan = await database.plans.get(date)
       const events = await database.events.toArray(), materials = await database.materials.toArray()
       const sessions = await database.sessions.toArray()
+      // A declared beginner gets actual instruction before a course requiring
+      // Japanese script. Repack only untouched assignments, never saved work.
+      const beginner = placement.basis === 'self-report'
+      const foundationHistory = japaneseReadingHistory(sessions, now, japaneseKana)
+      const needsIntroduction = beginner && !foundationHistory.some(h => h.reading.id === 'ja-kana-hiragana-1')
+      const started = (task: DailyPlan['tasks'][number]) => events.some(event => event.type === 'TASK_STARTED' && event.data?.taskId === task.id)
+        || sessions.some(session => session.draft.taskId === task.id)
+      if (needsIntroduction && allowance.allowances.ja.remaining >= 3
+        && !(savedPlan && savedPlan.tasks.every(task => task.done || task.optional))) {
+        const retained = savedPlan?.tasks.filter(task => task.done || task.optional || started(task)) ?? []
+        const ongoingMinutes = retained.filter(task => !task.done && !task.optional).reduce((sum, task) => sum + task.minutes, 0)
+        const available = allowance.allowances.ja.remaining - ongoingMinutes
+        const existing = savedPlan?.tasks.find(task => !task.done && !task.optional && task.materialId === 'ja-kana-hiragana-1')
+        const intro = existing ?? (available >= 3 ? { id: `${date}:ja:kana:ja-kana-hiragana-1`, kind: 'learn' as const,
+          title: '零基础第一步：认识 あ・い・う・え・お', minutes: Math.min(5, available), materialId: 'ja-kana-hiragana-1', done: false,
+          reason: '先教五个字的字形和真人读音，再点选辨认；不写日语句子，不需要日语输入法。' } : undefined)
+        const tasks = [...(intro ? [intro] : []), ...retained.filter(task => task.id !== intro?.id)]
+        if (tasks.length) {
+          const initial = planSchema.parse({ id: date, date, minutes: tasks.reduce((sum, task) => sum + (task.optional ? 0 : task.minutes), 0),
+            focus: 'realWorld', tasks, evidenceFingerprint: `ja:introduction:${placement.confirmedAt}:${events.length}`,
+            createdAt: savedPlan?.createdAt ?? now })
+          await database.plans.put(initial)
+          return initial
+        }
+      }
       // Only replace an untouched initial plan. Started/completed/optional work,
       // drafts and recordings remain bound to their original tasks.
       const replaceInitialPlan = placement.basis === 'self-report' && savedPlan && savedPlan.createdAt < placement.confirmedAt
@@ -181,9 +213,11 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const history = japanesePracticeHistory(events, now)
       const completedIds = new Set(history.map(event => event.data?.materialId))
       const practiced = materials.filter(material => completedIds.has(material.id))
-      const target = Math.max(0.1 + (placement.conversationProbe - 1) * 0.025, ...practiced.map(material => material.difficulty))
-      const probe = materials.find(material => material.id === `ja-irodori-starter-${placement.conversationProbe}`)
-      const next = nextJapaneseLesson(materials, events, target, now)
+      const scriptReady = !beginner || new Set(foundationHistory.filter(h => /^ja-kana-hiragana-([1-9]|10)$/u.test(h.reading.id)).map(h => h.reading.id)).size >= 10
+      const courseMaterials = beginner && !scriptReady ? materials.filter(material => ['ja-irodori-starter-1', 'ja-irodori-starter-2'].includes(material.id)) : materials
+      const target = beginner && !scriptReady ? 0.1 : Math.max(0.1 + (placement.conversationProbe - 1) * 0.025, ...practiced.map(material => material.difficulty))
+      const probe = courseMaterials.find(material => material.id === `ja-irodori-starter-${placement.conversationProbe}`)
+      const next = nextJapaneseLesson(courseMaterials, events, target, now)
       const material = !completedIds.size && probe && nextJapaneseLesson([probe], events, target, now) ? probe : next
       // Keep explicitly resolved/skipped optional rows as history, but never
       // mark them done: completed optional work legitimately consumes time.
@@ -212,20 +246,24 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       // After two complete introductory practices, reserve a brief real-life
       // exchange in the SAME daily allowance. Never add it to an already
       // started/finished day's older plan or double the English/Japanese budget.
-      const selectedReading = nextJapaneseReading(sessions, now)
+      const selectedReading = scriptReady ? nextJapaneseReading(sessions, now) : undefined
       const selectedKana = nextJapaneseKana(sessions, now, placement.kanaSupport)
       // On very short days rotate foundation with integrated work instead of
       // letting a permanent kana backlog crowd out reading/conversation.
-      const foundationDay = history.length < 2 || minutes - reviewMinutes >= 18 || new Date(now).getDate() % 3 === 0
-      const kanaTask = previousKana ?? (!current && foundationDay && selectedKana && minutes - reviewMinutes >= 12 ? {
+      const lastCompleted = sessions.filter(s => s.completedAt && s.completedAt <= now && ['japanese-practice', 'japanese-reading'].includes(s.kind))
+        .sort((a, b) => a.completedAt! - b.completedAt!).at(-1)
+      const shortFoundation = beginner && minutes - reviewMinutes >= 3 && minutes - reviewMinutes < 10
+        && !lastCompleted?.materialId?.startsWith('ja-kana-')
+      const foundationDay = shortFoundation || history.length < 2 || minutes - reviewMinutes >= 18 || new Date(now).getDate() % 3 === 0
+      const kanaTask = previousKana ?? (!current && foundationDay && selectedKana && (shortFoundation || minutes - reviewMinutes >= (beginner ? 10 : 12)) ? {
         id: `${date}:ja:kana:${selectedKana.id}`, kind: 'learn' as const, title: `听读基础：${selectedKana.title}`, minutes: 3,
         reason: '每天只练一小组，与生活对话并行；原站听示范，本站存首答。字形正确不等于已经会发音。', materialId: selectedKana.id, done: false,
       } : undefined)
-      const kanaMinutes = kanaTask ? Math.min(kanaTask.minutes, Math.max(0, minutes - reviewMinutes)) : 0
+      const kanaMinutes = kanaTask ? Math.min(shortFoundation ? 5 : kanaTask.minutes, Math.max(0, minutes - reviewMinutes)) : 0
       const auxiliaryMinutes = Math.max(0, minutes - reviewMinutes - kanaMinutes)
       const lastAuxiliary = sessions.filter(s => s.completedAt && s.completedAt <= now && !s.materialId?.startsWith('ja-kana-') && ['japanese-dialogue', 'japanese-reading', 'japanese-extensive'].includes(s.kind))
         .sort((a, b) => a.completedAt! - b.completedAt!).at(-1)
-      const selectedBook = nextJapaneseBook(materials, events, now)
+      const selectedBook = scriptReady ? nextJapaneseBook(materials, events, now) : undefined
       const lastReading = sessions.filter(s => s.completedAt && s.completedAt <= now && !s.materialId?.startsWith('ja-kana-')
         && ['japanese-reading', 'japanese-extensive'].includes(s.kind)).sort((a, b) => a.completedAt! - b.completedAt!).at(-1)
       const useBook = !!selectedBook && (lastReading?.kind === 'japanese-reading' || !selectedReading)
@@ -234,12 +272,12 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
         .sort((a, b) => a.completedAt! - b.completedAt!).at(-1)
       // Rotate whole activities when two meaningful blocks cannot fit. A
       // completed course practice opens an auxiliary turn, then course resumes.
-      const standaloneAuxiliary = !current && history.length >= 2 && auxiliaryMinutes >= 5 && auxiliaryMinutes < 10
+      const standaloneAuxiliary = !current && scriptReady && history.length >= 2 && auxiliaryMinutes >= 5 && auxiliaryMinutes < 10
         && (!lastAuxiliary || !!lastPractice && lastPractice.completedAt! > lastAuxiliary.completedAt!)
       const mainReserve = material && !standaloneAuxiliary ? 5 : 0
       const integratedFloor = kanaTask ? Math.max(15, mainReserve + 5) : mainReserve + 5
       const bothIntegratedFloor = Math.max(20, integratedFloor + 5)
-      const dialogueTask = previousDialogue ?? (!current && history.length >= 2 && material && auxiliaryMinutes >= integratedFloor
+      const dialogueTask = previousDialogue ?? (!current && scriptReady && history.length >= 2 && material && auxiliaryMinutes >= integratedFloor
         && !(readingTurn && auxiliaryMinutes < bothIntegratedFloor) ? {
         id: `${date}:ja:speak:${material.id}`, kind: 'speak' as const, title: '连续回应三轮，再改一处', minutes: 5,
         reason: '系统沿用今天的话题；录音先保存，AI 不可用时可用标明的离线应答练习。', materialId: material.id, done: false,
@@ -257,14 +295,15 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
           : '先读意思，再试假名读法；理解与读法分别记录，不算听说成绩。', materialId: selectedReading.id, done: false,
       } : undefined)
       const readingMinutes = readingTask ? Math.min(readingTask.minutes, Math.max(0, auxiliaryMinutes - dialogueMinutes)) : 0
-      const lessonMinutes = standaloneAuxiliary ? 0 : Math.max(0, auxiliaryMinutes - dialogueMinutes - readingMinutes)
+      const lessonMinutes = standaloneAuxiliary || shortFoundation ? 0 : Math.max(0, auxiliaryMinutes - dialogueMinutes - readingMinutes)
       // Preserve task identity after starting; do not fill a finished day again.
       const task = previous ?? (!current && !completed.some(task => task.kind === 'listen') && material ? { id: `${date}:ja:listen:${material.id}`, kind: 'listen' as const,
         title: material.title, minutes, reason: history.at(-1)?.data?.effort === 'hard'
           ? '上次觉得吃力，今天先巩固熟悉话题；不急着加难度。'
           : '真人输入 → 回忆意思 → 自己表达 → 对照重说', materialId: material.id, done: false } : undefined)
       const tasks = [...completed, ...(reviewTask && reviewMinutes > 0 ? [{ ...reviewTask, minutes: reviewMinutes }] : []),
-        ...(task && lessonMinutes > 0 ? [{ ...task, minutes: lessonMinutes }] : []), ...(kanaTask && kanaMinutes > 0 ? [{ ...kanaTask, minutes: kanaMinutes }] : []),
+        ...(beginner && kanaTask && kanaMinutes > 0 ? [{ ...kanaTask, minutes: kanaMinutes }] : []),
+        ...(task && lessonMinutes > 0 ? [{ ...task, minutes: lessonMinutes }] : []), ...(!beginner && kanaTask && kanaMinutes > 0 ? [{ ...kanaTask, minutes: kanaMinutes }] : []),
         ...(readingTask && readingMinutes > 0 ? [{ ...readingTask, minutes: readingMinutes }] : []),
         ...(dialogueTask && dialogueMinutes > 0 ? [{ ...dialogueTask, minutes: dialogueMinutes }] : [])]
       if (!tasks.length) return null
@@ -312,10 +351,10 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       const stored = japanesePracticeDraft.parse(session.draft)
       if (stored.taskId !== draft.taskId || stored.revision !== draft.revision) throw new Error('这份练习已在其他页面更新，请重新打开；当前输入未覆盖已保存内容。')
       const assignment = await database.events.get(`${sessionId}:course-assignment`)
-      const independentFirst = ['application', 'delayed-transfer'].includes(String(assignment?.data?.coursePhase))
+      const independentFirst = assignment?.data?.beginnerScaffold !== true && ['application', 'delayed-transfer'].includes(String(assignment?.data?.coursePhase))
       if (step !== 'listen' && !independentFirst && !draft.listened) throw new Error('先听一段原声，再写下听懂的意思；没听懂也可以如实写下。')
       const firstAttempt = await database.events.get(`${sessionId}:independent-attempt`)
-      if (step !== 'listen' && assignment?.data?.coursePhase === 'delayed-transfer' && !firstAttempt)
+      if (step !== 'listen' && independentFirst && assignment?.data?.coursePhase === 'delayed-transfer' && !firstAttempt)
         throw new Error('先保存独立书写与录音首答，再展开参考和进入对照。')
       if ((step !== 'listen' && assignment) || firstAttempt)
         await freezeFirstAttempt(session, draft, Date.now())
@@ -356,7 +395,9 @@ export function createJapaneseWorkspace(database: JoveDatabase, english: JoveDat
       }
       // After two distinct failures from one publisher, stop rotating through
       // its entire library. Use other saved practice without claiming listening.
+      const courseAssignment = await database.events.get(`${sessionId}:course-assignment`)
       const alternative = nextJapaneseLesson(materials.filter(material => material.id !== session.materialId
+        && (courseAssignment?.data?.beginnerScaffold !== true || ['ja-irodori-starter-1', 'ja-irodori-starter-2'].includes(material.id))
         && (publisherFailures.get(material.externalStudy?.publisher ?? '') ?? 0) < 2), history, currentMaterial.difficulty, now)
       const replacement = alternative ? { ...assigned, id: `${date}:ja:listen:${alternative.id}`, title: alternative.title,
         materialId: alternative.id, reason: '原站暂时打不开，换一课难度相近的真人练习；原来的草稿和录音仍保留。' } : null

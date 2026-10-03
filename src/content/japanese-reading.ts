@@ -6,7 +6,8 @@ export interface JapaneseReading {
   questions: { prompt: string; choices: string[]; answer: string; why: string }[]
   words: { text: string; reading: string; meaning: string; choices?: string[] }[]
   transfer: string
-  kana?: { script: 'hiragana' | 'katakana' | 'rhythm'; targets: string[]; sourceUrl: string; drillUrl: string; guidance: string }
+  kana?: { script: 'hiragana' | 'katakana' | 'rhythm'; targets: string[]; sourceUrl: string; drillUrl: string; guidance: string
+    letters?: { glyph: string; label: string; cue: string }[] }
 }
 // Original micro-readings, not translations or derivatives of publisher books.
 // Editorial bands describe these texts, never a learner's JLPT/CEFR level.

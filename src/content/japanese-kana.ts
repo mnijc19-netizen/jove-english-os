@@ -37,6 +37,7 @@ const rows: Row[] = [
 ]
 const katakana = (text: string) => text.replace(/[ぁ-ゖ]/gu, c => String.fromCharCode(c.charCodeAt(0) + 0x60))
 const rotate = (values: string[], index: number) => { const offset = index % values.length; return [...values.slice(offset), ...values.slice(0, offset)] }
+const vowelCues = ['张口、短而清楚地发音。以原站真人示范为准。', '嘴角稍向两侧，声音不要拉长。', '嘴唇不要像汉语“乌”那样明显前伸；听原声模仿。', '留意嘴的开合，别额外加一个尾音。', '圆唇，听一个短音；不要拖成两个音。']
 export const japaneseKana: JapaneseReading[] = (['hiragana', 'katakana'] as const).flatMap(script => rows.map((row, index) => {
   const convert = script === 'katakana' ? katakana : (s: string) => s
   const letters = row[0].split(' ').map(convert), labels = row[1].split(' '), first = row[2], second = row[3]
@@ -53,6 +54,9 @@ export const japaneseKana: JapaneseReading[] = (['hiragana', 'katakana'] as cons
       choices: rotate([...new Set([labels[i]!, labels[(i + 1) % labels.length]!, labels[(i + 2) % labels.length]!])], index + q), answer: labels[i]!, why: note })),
     words, transfer: `写下今天最容易混淆的一对字，或一个准备再听的词。不需要先背完字表；接着做生活对话。`,
     kana: { script, targets: letters, sourceUrl: kanaSource[script], drillUrl: script === 'hiragana' ? kanaSource.hiraganaDrill : kanaSource.katakanaDrill,
+      letters: letters.map((glyph, i) => ({ glyph, label: labels[i]!, cue: index === 0 ? vowelCues[i]!
+        : index >= 15 ? '两个字形合成一拍；对照真人原声，不要拆成两个长音。'
+          : '在原站找到同一个字，听声音，再回来看字形；这是罗马字路标，不是英语读音。' })),
       guidance: `在原站找到「${letters.join(' ')}」，逐个点击原声：先听、跟读，再看字形。已有基础时可遮住罗马字。${note}` },
   }
 }))

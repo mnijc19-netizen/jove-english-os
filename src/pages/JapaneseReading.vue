@@ -12,6 +12,7 @@ const route = useRoute(), space = useJapaneseSpace(), database = createLanguageD
 const state = shallowRef<Awaited<ReturnType<typeof learning.reading.read>>>(), draft = ref<JapaneseReadingDraft>()
 const busy = ref(false), dirty = ref(false), error = ref(''), notice = ref(''), retained = ref('')
 const reading = computed(() => state.value?.reading), locked = computed(() => draft.value?.lockedAt !== undefined)
+const teaching = computed(() => !!reading.value?.kana && !locked.value && (state.value?.session.stage === 'teach' || !draft.value?.seen && !draft.value?.helped))
 const results = computed(() => reading.value && draft.value ? japaneseReadingResult(reading.value, draft.value) : undefined)
 let timer: ReturnType<typeof setTimeout> | undefined, disposed = false, generation = 0, saves: Promise<void> = Promise.resolve()
 function restore(saved: StudySession) {
@@ -101,6 +102,16 @@ onBeforeUnmount(() => {
       <p v-if="!reading.kana" class="help-text">这是材料分档，不是你的语言等级。系统也会安排新难度的短篇试读；觉得吃力可反馈，下次会减轻难度。</p>
       <h2>{{ reading.title }}</h2>
       <p class="passage" lang="ja">{{ reading.passage }}</p>
+      <section v-if="teaching && reading.kana" class="support" data-testid="kana-teaching">
+        <h3>先认识，不用猜，也不用写日语</h3>
+        <p>假名是记录日语声音的字。平假名和片假名是两套字形；现在只学这一小组，不必一次背完“五十音”。日语按拍组织节奏，初学先跟着一个短音一个短音听。</p>
+        <p>下面的 a、i 等只是找到原站声音的临时路标，不按英语字母名读，也不用中文谐音记发音。</p>
+        <div v-if="reading.kana.letters" class="kana-cards"><article v-for="letter in reading.kana.letters" :key="letter.glyph" class="kana-card"><span class="glyph" lang="ja">{{ letter.glyph }}</span><strong>{{ letter.label }}</strong><p>{{ letter.cue }}</p></article></div>
+        <p v-else>{{ reading.meaningZh }}</p>
+        <h3>刚学的字，可以组成短词</h3>
+        <p v-for="word in reading.words" :key="word.text"><span lang="ja">{{ word.reading }}</span> · {{ word.text }} · {{ word.meaning }}。先对照着认，不要求会拼写。</p>
+        <p>接着打开下方真人示范，找到这一组（例如第一组 a、i、u、e、o），逐个听、轻轻跟读，再回来看同一个字。选“暂时无法播放”也能先学字形，声音留到能播放时补上。</p>
+      </section>
       <template v-if="!state.session.completedAt">
         <p v-if="draft.seen" class="help-text">这是一次间隔后的重读，重复答对不会冒充新材料上的独立理解。</p>
         <template v-if="!locked">
@@ -111,7 +122,9 @@ onBeforeUnmount(() => {
             <fieldset :disabled="busy"><legend>这次原声练习</legend><label class="choice"><input v-model="draft.sourcePractice" type="radio" name="source-practice" value="heard" @change="changed">我实际听过示范，并尝试跟读或听音选字</label><label class="choice"><input v-model="draft.sourcePractice" type="radio" name="source-practice" value="unavailable" @change="changed">现在无法播放，先做字形练习</label></fieldset>
             <p class="help-text">这是你的自报，不是平台测得的听力或发音成绩。原站在部分手机上可能显示不便，可稍后在电脑听；不必反复刷新或等待 AI。</p>
           </div>
-          <p class="help-text">{{ reading.kana ? '初学时先看帮助联系声音与字形，之后隔天再回忆。选择题不用安装日语输入法。' : '先抓大意，不必逐字翻译。不会的题可以留空再对照。' }}</p>
+          <button v-if="teaching" class="button primary" :disabled="busy || !draft.sourcePractice" @click="act(() => transition('help'))">我已看过教学，开始点选练习</button>
+          <template v-if="!teaching">
+          <p class="help-text">{{ reading.kana ? '初次是有教学帮助的练习，不是考试。先认字形，之后隔天再回忆。选择题不用安装日语输入法。' : '先抓大意，不必逐字翻译。不会的题可以留空再对照。' }}</p>
           <button v-if="!draft.helped" class="text-button" :disabled="busy" @click="act(() => transition('help'))">需要帮助：展开中文与假名</button>
           <div v-if="draft.helped" class="support"><p>{{ reading.meaningZh }}</p><p v-for="word in reading.words" :key="word.text"><span lang="ja">{{ word.text }}（{{ word.reading }}）</span> · {{ word.meaning }}</p><p class="help-text">借助提示学习很正常；这次不会记录为独立答对。</p></div>
           <fieldset v-for="(q, index) in reading.questions" :key="q.prompt" :disabled="busy"><legend>{{ index + 1 }}. {{ q.prompt }}</legend><label v-for="choice in q.choices" :key="choice" class="choice"><input v-model="draft.meaning[index]" type="radio" :name="`meaning-${index}`" :value="choice" @change="changed">{{ choice }}</label></fieldset>
@@ -119,6 +132,7 @@ onBeforeUnmount(() => {
           <p class="help-text">{{ reading.kana ? '下面只练字形辨认，不把选对当作会说。片假名转换是字形练习，词语日常怎样书写还要结合生活文本。' : '写出这两个词在文中的假名读法，可用平假名或片假名。想不起来可以留空，不要求罗马字。' }}</p>
           <template v-for="(word, index) in reading.words" :key="word.text"><fieldset v-if="reading.kana && word.choices" :disabled="busy"><legend>{{ word.text }} 对应哪种假名写法？</legend><label v-for="choice in word.choices" :key="choice" class="choice"><input v-model="draft.kana[index]" type="radio" :name="`kana-word-${index}`" :value="choice" @change="changed"><span lang="ja">{{ choice }}</span></label></fieldset><label v-else class="word-label"><span lang="ja">{{ word.text }} 的假名读法</span><input v-model="draft.kana[index]" lang="ja" maxlength="200" :disabled="busy" autocomplete="off" @input="changed"></label></template>
           <button class="button primary" :disabled="busy || !!reading.kana && !draft.sourcePractice" @click="act(() => transition('lock'))">保存首答，再看解析</button>
+          </template>
         </template>
         <template v-else-if="results">
           <h3>{{ reading.kana ? '字形结果不等于发音成绩' : '理解和读法分开看' }}</h3>
@@ -128,10 +142,10 @@ onBeforeUnmount(() => {
           <p v-for="(q, index) in reading.questions" :key="q.prompt">{{ q.prompt }}<br>首答：{{ draft.meaning[index] || '暂时跳过' }} · 参考：{{ q.answer }}</p>
           <p v-for="(word, index) in reading.words" :key="word.text"><span lang="ja">{{ word.text }} → {{ word.reading }}</span> · {{ word.meaning }}<br>首答：{{ draft.kana[index] || '暂时跳过' }}{{ results.kana[index] ? '（匹配一种参考读法）' : '（未匹配参考，请对照）' }}</p>
           <p v-if="!reading.kana" class="help-text">同一个汉字可能有不同读法；这里只对照当前词语的书面读法，不判断声调或发音。</p>
-          <label class="word-label">换一个情境用一用（也可先用中文记下调整）<textarea v-model="draft.note" rows="3" maxlength="2000" :disabled="busy" @input="changed" /></label>
+          <label class="word-label">{{ reading.kana ? '可选：用中文记下想再练的字（不填也可以）' : '换一个情境用一用（也可先用中文记下调整）' }}<textarea v-model="draft.note" rows="3" maxlength="2000" :disabled="busy" @input="changed" /></label>
           <p>{{ reading.transfer }}</p>
           <label class="word-label">{{ reading.kana ? '这一组练起来怎么样？' : '这篇读起来怎么样？' }}<select v-model="draft.effort" :disabled="busy" @change="changed"><option value="hard">有些吃力，下次轻一点</option><option value="okay">难度合适</option><option value="easy">比较轻松</option></select></label>
-          <button class="button primary" :disabled="busy || !draft.note.trim()" @click="act(() => transition('finish'))">{{ reading.kana ? '保存基础练习，安排下次回顾' : '保存阅读，安排下次回顾' }}</button>
+          <button class="button primary" :disabled="busy || !reading.kana && !draft.note.trim()" @click="act(() => transition('finish'))">{{ reading.kana ? '保存基础练习，安排下次回顾' : '保存阅读，安排下次回顾' }}</button>
         </template>
       </template>
       <template v-else><h3>{{ reading.kana ? '这次基础练习已保存' : '这次阅读已保存' }}</h3><p>下次回顾不早于 {{ new Date(draft.dueAt!).toLocaleDateString() }}，会结合当天总时间安排，不会把复习堆成欠债。</p><RouterLink to="/ja" class="button primary">继续今日安排</RouterLink></template>
@@ -151,6 +165,9 @@ fieldset { border: 1px solid var(--border); border-radius: 12px; padding: 16px; 
 input[type=radio] { width: auto; }
 .word-label { display: grid; gap: 8px; margin: 20px 0; }
 .support { border-left: 3px solid var(--border); padding-left: 16px; }
+.kana-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin: 20px 0; }
+.kana-card { padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
+.kana-card .glyph { display: block; font-size: 3rem; line-height: 1.4; }
 textarea { resize: vertical; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 </style>

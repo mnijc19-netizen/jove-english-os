@@ -136,9 +136,9 @@ export function japaneseCoursePractice(materialId: string, events: StudyEvent[],
   const application = input && history.find(event => event.timestamp > input.timestamp && event.data?.coursePhase === 'application'
     && event.data.contextId === contexts[1]?.id)
   const transfer = application && history.find(event => event.timestamp >= application.timestamp + day
-    && event.data?.coursePhase === 'delayed-transfer' && event.data.contextId === contexts[2]?.id
+    && event.data?.coursePhase === 'delayed-transfer' && event.data.beginnerScaffold !== true && event.data.contextId === contexts[2]?.id
     && events.some(first => first.id === event.data?.firstAttemptEventId && first.type === 'JAPANESE_COURSE_FIRST_ATTEMPT'
-      && first.source === 'self-report' && first.sessionId === event.sessionId && first.timestamp <= event.timestamp
+      && first.source === 'self-report' && !first.prompted && first.sessionId === event.sessionId && first.timestamp <= event.timestamp
       && first.timestamp >= application.timestamp + day && first.data?.contextId === event.data.contextId
       && typeof first.data.response === 'string' && first.data.response.trim() && typeof first.data.audioId === 'string' && first.data.audioId))
   const phase: JapaneseCoursePhase = !input ? 'input' : !application ? 'application' : 'delayed-transfer'

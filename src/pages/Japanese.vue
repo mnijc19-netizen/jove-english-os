@@ -38,8 +38,8 @@ const placement = shallowRef<ReturnType<typeof japaneseStartingPoint>>()
 const confirmBeginner = ref(false)
 const task = computed(() => plan.value?.tasks.find(task => !task.done && !task.optional))
 const nextLesson = computed(() => japaneseLessons.find(item => item.id === task.value?.materialId))
-const delayedPractice = computed(() => guide.value?.phase === 'delayed-transfer')
-const applicationPractice = computed(() => !!guide.value && guide.value.phase !== 'input')
+const delayedPractice = computed(() => !!guide.value?.independentFirst && guide.value.phase === 'delayed-transfer')
+const applicationPractice = computed(() => !!guide.value?.independentFirst)
 const supportedReplacement = computed(() => delayedPractice.value && independentLocked.value && !!draft.audioUnavailable
   && !audio.value.some(asset => asset.id === draft.audioId && asset.blob.size > 0))
 const practiceContext = computed(() => guide.value?.contextPrompt || lesson.value?.transferZh || '')
@@ -240,11 +240,11 @@ onBeforeUnmount(() => {
     <template v-else>
       <p class="help-text" role="status">{{ notice }}</p>
       <div v-if="!session" class="section">
-        <p v-if="placement?.basis === 'self-report'" class="help-text" data-testid="japanese-starting-point">起点：本人确认零基础。先练一小组假名与生活对话，读法提示默认保留；旧诊断不再决定起点，听说能力仍待真实练习观察。</p>
+        <p v-if="placement?.basis === 'self-report'" class="help-text" data-testid="japanese-starting-point">起点：本人确认零基础。先从五个基础假名的字形与声音教学开始，不要求先读懂或写出日语。之后把少量假名学习和有提示的生活表达穿插起来；旧诊断不决定起点，听说能力仍待实际观察。</p>
         <template v-else>
           <button class="text-button" :disabled="busy || navigating" @click="confirmBeginner = !confirmBeginner">{{ placement ? '起点填错了？按零基础重新起步' : '我是零基础，不猜题直接起步' }}</button>
           <div v-if="confirmBeginner" class="panel">
-            <p>确认自己是零基础后，从基础生活对话和假名开始。原诊断、已开始的练习和录音都保留；只调整尚未开始的初始安排，不清空进度，也不生成测验分数。</p>
+            <p>确认零基础后，先教你认识五个假名，点选练习不需要日语输入法。原诊断、已开始的练习和录音都保留；未开始的安排会优先调整为基础教学，不清空进度，也不生成测验分数。</p>
             <button class="button primary" :disabled="busy || navigating" @click="act(beginFromZero)">确认零基础起点</button>
             <button class="text-button" :disabled="busy || navigating" @click="confirmBeginner = false">取消</button>
           </div>
@@ -271,7 +271,7 @@ onBeforeUnmount(() => {
           <button v-if="task" class="button primary" :disabled="busy || navigating" @click="act(start)">开始学习 · 约 {{ task.minutes }} 分钟</button>
           <p v-if="task?.kind === 'review'">先做一小组到期复习：独立回答 → 对照参考 → 安排下次。之后再进行今日新情境练习。</p>
           <p v-else-if="task?.kind === 'speak'">围绕今天的情境连续回应三轮；先保持交流，结束后挑一处改进并完整重说。</p>
-          <p v-else-if="task?.kind === 'learn'">{{ task.materialId?.startsWith('ja-kana-') ? '① 听原站示范 → ② 联系字形 → ③ 保存首答 → ④ 对照后再练' : task.materialId?.startsWith('ja-tadoku-') ? '① 打开已选原版 → ② 轻松读大意 → ③ 保存书签和读感 → ④ 下次自动接续' : '① 阅读短篇 → ② 理解与读法分开答 → ③ 对照 → ④ 安排回顾' }}</p>
+          <p v-else-if="task?.kind === 'learn'">{{ task.materialId?.startsWith('ja-kana-') ? '① 中文讲解，认识几个字 → ② 听对应真人读音 → ③ 点选辨认，不用书写 → ④ 对照与隔天回顾' : task.materialId?.startsWith('ja-tadoku-') ? '① 打开已选原版 → ② 轻松读大意 → ③ 保存书签和读感 → ④ 下次自动接续' : '① 阅读短篇 → ② 理解与读法分开答 → ③ 对照 → ④ 安排回顾' }}</p>
           <p v-else-if="task">① 听一段真人对话 → ② 回忆意思 → ③ 用自己的话回应 → ④ 对照后重说</p>
           <p v-if="task" class="help-text">{{ task.reason }}</p>
           <p v-else>系统不会为了填满时间强塞任务。已有草稿仍然保留；原站打不开或暂无合适材料，不会记为已经学会。</p>
@@ -331,6 +331,7 @@ onBeforeUnmount(() => {
             <p v-if="readingSupport" class="help-text">{{ readingSupport.reason }}</p>
             <p>{{ lesson.grammarZh }}</p><p class="help-text">{{ lesson.soundZh }}</p>
             <p v-if="guide" class="help-text">今天的表达已由系统推荐；你只需把它用于自己的情况，也可以按真实意思修改，不必自己挑学习内容。上方例句不会自动变成你的回答。</p>
+            <template v-if="placement?.kanaSupport && !applicationPractice"><p>还不会写日语很正常。可以先把已解释的短句作为跟读提示，听原声后尝试说出来；这是有帮助的模仿，不算独立书写或已经会说。</p><button type="button" class="button secondary" @click="draft.example = lesson.phrase; changed()">先用示例练说，不要求自己打日语</button></template>
             <label>选一个想用的日语表达<input v-model="draft.expression" lang="ja" maxlength="10000" @input="changed"></label>
             <label>换成自己的情况，说或写一句<textarea v-model="draft.example" lang="ja" maxlength="10000" rows="3" @input="changed" /></label>
           </template>
