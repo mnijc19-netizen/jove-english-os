@@ -18,6 +18,7 @@ import * as aiSchemas from '../src/ai/schemas'
 import { defaultProfile, defaultSettings, type StudyEvent, type StudySession, type Conversation, type Material } from '../src/domain/types'
 import { demoMaterials, missions } from '../src/content/materials'
 import * as externalStudy from '../src/content/external'
+import { canonical } from '../src/sync/protocol'
 import { useRecordingUrl } from '../src/composables/useRecordingUrl'
 
 const identitySource = vi.hoisted(() => ({ auth: undefined as unknown }))
@@ -125,6 +126,7 @@ function mountPage(name: 'Listen' | 'Speak', evaluate: Record<string, unknown> =
     '../composables/useRequest': { useRequest: () => ({ busy: Vue.ref(false), error: Vue.ref(''), cancel: vi.fn(), run: async (fn: (s: AbortSignal) => Promise<unknown>) => fn(new AbortController().signal) }) },
     '../content/materials': { demoMaterials, missions }, '../content/external': externalStudy, '../domain/longitudinal': longitudinal,
     '../domain/engine': engine, '../ai/schemas': aiSchemas,
+    '../sync/protocol': { canonical },
     // Keep historical recovery coverage of the retained optional adapter. Normal
     // production routes disable it; a separate default-mode assertion is below.
     '../speech/practice': { usePronunciationSession: (scope: Vue.Ref<string>, id?: Vue.Ref<string>, enabled?: boolean) =>
