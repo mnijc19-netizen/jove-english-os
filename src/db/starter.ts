@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import Dexie from 'dexie'
 import { starterLesson, starterLessons, type StarterLesson } from '../content/starter-courses'
-import { effectiveStarterFeedback, localStarterFeedback, nextStarterLesson, starterAttemptFromEvent, starterDelay, starterStages, validateStarterFeedback, type StarterAttempt, type StarterStage } from '../domain/starter'
+import { effectiveStarterFeedback, localStarterFeedback, nextStarterLesson, starterAttemptFromEvent, starterDelay, starterStages, starterRemainingMinutes, validateStarterFeedback, type StarterAttempt, type StarterStage } from '../domain/starter'
 import type { StarterFeedback } from '../ai/starter-schema'
 import type { Material, StudyEvent, StudySession } from '../domain/types'
 import type { JoveDatabase } from './db'
@@ -50,7 +50,7 @@ export function starterMaterials(language: 'en' | 'ja'): Material[] {
     id: lesson.id, language, title: lesson.titleZh, topic: lesson.goalZh, difficulty: 0.05 + lesson.position * 0.01,
     duration: lesson.minutes.standard * 60, transcript: lesson.model.text, translation: lesson.model.meaningZh,
     sentences: [lesson.model.text], ...(lesson.sound.audioPath ? { audioPath: lesson.sound.audioPath } : {}),
-    sourceKind: 'curated', sourceLabel: lesson.sound.sourceLabel, synthetic: true, approved: true,
+    sourceKind: 'curated', sourceLabel: lesson.sound.sourceLabel, synthetic: !!lesson.sound.audioPath, approved: true,
     license: 'Original in-site teaching examples; synthetic demonstration is labelled separately from publisher human speech.',
     question: lesson.recognition.promptZh, answer: lesson.recognition.answerId, keywords: [], chunks: [], createdAt: Date.UTC(2026, 9, 3),
   }))
@@ -116,7 +116,8 @@ export function createStarterClassroom(database: JoveDatabase, english: JoveData
   }
   async function next(now = Date.now()) {
     await assertCurrent()
-    const selected = nextStarterLesson(database.language, await database.sessions.toArray(), await database.events.toArray(), now)
+    const available = await remainingAllowance(now, database.language === 'ja')
+    const selected = nextStarterLesson(database.language, await database.sessions.toArray(), await database.events.toArray(), now, available)
     await assertCurrent()
     return selected
   }
@@ -125,16 +126,7 @@ export function createStarterClassroom(database: JoveDatabase, english: JoveData
     const day = await readLanguageDay(english, now, database.language === 'ja' ? database : undefined, { admitJapanese })
     if (day) return Math.max(0, day.allowances[database.language].remaining - day.allowances[database.language].reserved)
     const profile = await english.profiles.get('main'), events = await english.events.toArray()
-    const receipts = new Map<string, number>()
-    for (const event of events) if (event.type === 'TASK_COMPLETED' && event.timestamp <= now
-      && new Date(event.timestamp).toLocaleDateString('en-CA') === new Date(now).toLocaleDateString('en-CA')
-      && typeof event.data?.taskId === 'string' && typeof event.data.minutes === 'number') receipts.set(event.data.taskId, event.data.minutes)
-    const started = new Map<string, number>()
-    for (const event of events) if (event.type === 'TASK_STARTED' && event.source === 'objective' && event.timestamp <= now
-      && new Date(event.timestamp).toLocaleDateString('en-CA') === new Date(now).toLocaleDateString('en-CA')
-      && event.data?.kind === 'starter-classroom' && typeof event.data.taskId === 'string' && typeof event.data.minutes === 'number'
-      && !receipts.has(event.data.taskId)) started.set(event.data.taskId, event.data.minutes)
-    return Math.max(0, (profile?.dailyMinutes ?? 45) - [...receipts.values(), ...started.values()].reduce((sum, minutes) => sum + minutes, 0))
+    return starterRemainingMinutes(profile?.dailyMinutes ?? 45, events, now)
   }
   async function start(lessonId: string, pace: 'quick' | 'standard' = 'standard', now = Date.now(), review = false): Promise<StarterState> {
     return withStarterAdmission(english, () => startAdmitted(lessonId, pace, now, review))
@@ -216,6 +208,18 @@ export function createStarterClassroom(database: JoveDatabase, english: JoveData
   }
   async function help(id: string, revision: number) {
     return write(id, revision, (_state, draft) => { draft.helped = true; draft.helpCount = Math.min(100, draft.helpCount + 1) })
+  }
+  async function foundation(id: string, revision: number, choiceId: string, now = Date.now()) {
+    const choice = z.string().min(1).max(100).parse(choiceId)
+    return write(id, revision, async (session, draft) => {
+      const lesson = starterLesson(session.materialId ?? ''), check = lesson?.foundation?.check
+      if (session.stage !== 'teach' || draft.lessonVersion !== lesson?.version || !check || !check.choices.some(item => item.id === choice))
+        throw new Error('请先看本课的基础讲解，再选一个已教过的小选项。')
+      await database.events.add(eventSchema.parse({ id: `${id}:foundation:${revision}`, type: 'STARTER_FOUNDATION_ATTEMPT',
+        timestamp: now, sessionId: id, source: 'objective', prompted: true,
+        data: { lessonId: lesson!.id, lessonVersion: lesson!.version, revision, choiceId: choice,
+          correct: choice === check.answerId, ability: 'supported-script-recognition', acousticAssessed: false } }))
+    })
   }
   async function recover(copyId: string, now = Date.now()) {
     await assertCurrent()
@@ -366,5 +370,5 @@ export function createStarterClassroom(database: JoveDatabase, english: JoveData
       return id
     })
   }
-  return { open, assertCurrent, next, load, start, save, help, recover, submit, advance, saveAIFeedback, dispute, allowance, recordTranscription }
+  return { open, assertCurrent, next, load, start, save, help, foundation, recover, submit, advance, saveAIFeedback, dispute, allowance, recordTranscription }
 }

@@ -7,6 +7,7 @@ import { CloudProvider } from '../src/ai/cloud-provider'
 import { db, JoveDatabase } from '../src/db/db'
 import { defaultSettings, type StudyEvent } from '../src/domain/types'
 import type { StarterAttempt } from '../src/domain/starter'
+import { starterLesson } from '../src/content/starter-courses'
 
 const auth = vi.hoisted(() => ({ owner: '00000000-0000-4000-8000-000000000001',
   listeners: new Set<(event: string, session: { user: { id: string } } | null) => void>() }))
@@ -130,6 +131,21 @@ beforeEach(async () => {
 afterEach(async () => { vi.unstubAllGlobals(); vi.restoreAllMocks(); await db.delete(); expect(auth.listeners.size).toBe(0) })
 
 describe('trusted starter feedback handler', () => {
+  it.each(['en-starter-4', 'en-starter-24', 'ja-starter-4', 'ja-starter-24'])('uses trusted expanded %s context and language partition without client teaching data', async id => {
+    const lesson = starterLesson(id)!, value = attempt({ lessonId: id, contextId: `${id}:introduced`, response: lesson.expression.reference })
+    operations = [operation(value, owner, lesson.language)]
+    paid.mockImplementation(async () => json({ model: 'fixture/actual', choices: [{ finish_reason: 'stop', message: {
+      content: JSON.stringify({ ...output(value.response), feedbackZh: '当前这一课的表达符合情境。' }) } }] }))
+    const response = await handler()(request(body({ learningLanguage: lesson.language })))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ value: { evidence: value.response, verdict: 'valid', source: 'ai' } })
+    const sent = JSON.parse(String(paid.mock.calls[0]![1].body))
+    expect(sent.messages[1].content).toContain(lesson.goalZh)
+    expect(sent.messages[1].content).toContain(lesson.expression.reference)
+    expect(reads[0]!.table).toBe(lesson.language === 'en' ? 'sync_operations' : 'language_sync_operations')
+    expect(paid).toHaveBeenCalledTimes(1)
+    expect(sent.messages[1].content).not.toContain('saved-attempt')
+  })
   it('resolves RLS-owned saved text and uses the bounded curriculum, not browser prompts', async () => {
     const response = await handler()(request(body()))
     expect(response.status).toBe(200)

@@ -38,6 +38,40 @@ async function setup(language: 'en' | 'ja' = 'en', active: () => boolean = () =>
 }
 type Classroom = ReturnType<typeof createStarterClassroom>
 
+describe('progressive foundation teaching without invented mastery', () => {
+  it.each(['en', 'ja'] as const)('%s preserves wrong/right scaffolded checks and resumes without oral credit', async language => {
+    const { classroom, database } = await setup(language)
+    const lesson = starterLesson(`${language}-starter-4`)!
+    await database.sessions.put({ id: 'foundation-prerequisite', kind: 'starter-classroom', materialId: lesson.prerequisites[0],
+      startedAt: now - 100, completedAt: now - 10, stage: 'done', draft: { purpose: 'lesson' } })
+    let state = await classroom.start(lesson.id, 'quick', now)
+    const check = lesson.foundation!.check, wrong = check.choices.find(choice => choice.id !== check.answerId)!
+    state = await classroom.foundation(state.session.id, state.draft.revision, wrong.id, now + 1)
+    await expect(classroom.foundation(state.session.id, state.draft.revision - 1, check.answerId, now + 2)).rejects.toThrow('另一处')
+    state = await classroom.foundation(state.session.id, state.draft.revision, check.answerId, now + 3)
+    const saved = await database.events.where('type').equals('STARTER_FOUNDATION_ATTEMPT').toArray()
+    expect(saved.map(event => event.data?.choiceId)).toEqual([wrong.id, check.answerId])
+    expect(saved.every(event => event.prompted && event.data?.acousticAssessed === false)).toBe(true)
+    expect(await classroom.load(state.session.id)).toMatchObject({ session: { stage: 'teach' }, attempts: [] })
+    expect(starterGoalEvidence(lesson, saved, now + 4)).toMatchObject({ attempts: 0, independentUse: false, retainedUse: false, speakingVerified: false })
+    await expect(classroom.foundation(state.session.id, state.draft.revision, 'forged-choice', now + 4)).rejects.toThrow('已教过')
+    state = await classroom.advance(state.session.id, state.draft.revision, now + 5)
+    await expect(classroom.foundation(state.session.id, state.draft.revision, check.answerId, now + 6)).rejects.toThrow('已教过')
+    expect(await database.events.where('type').equals('STARTER_FOUNDATION_ATTEMPT').count()).toBe(2)
+  })
+
+  it('fences foundation recording against an account change', async () => {
+    const { classroom, database, english } = await setup()
+    const lesson = starterLesson('en-starter-4')!
+    await database.sessions.put({ id: 'prior', kind: 'starter-classroom', materialId: 'en-starter-3',
+      startedAt: now - 100, completedAt: now - 10, stage: 'done', draft: { purpose: 'lesson' } })
+    const state = await classroom.start(lesson.id, 'quick', now)
+    await english.syncMeta.put({ id: 'owner', value: otherOwner })
+    await expect(classroom.foundation(state.session.id, state.draft.revision, lesson.foundation!.check.answerId)).rejects.toThrow()
+    expect(await database.events.where('type').equals('STARTER_FOUNDATION_ATTEMPT').count()).toBe(0)
+  })
+})
+
 async function answer(classroom: Classroom, state: StarterState, response: string, mode = state.draft.mode, timestamp = now + 10) {
   const saved = await classroom.save(state.session.id, state.draft.revision, {
     response, mode, audioId: state.draft.audioId, romaji: state.draft.romaji, activeMs: state.draft.activeMs + 1000,
@@ -289,8 +323,8 @@ describe('starter classroom saved sessions, ownership and concurrency', () => {
     expect(await english.sessions.toArray()).toEqual(before.sessions)
     expect(await english.events.toArray()).toEqual(before.events)
     expect(await english.materials.toArray()).toEqual(before.materials)
-    expect((await database.materials.toArray()).map(material => material.language)).toEqual(['ja', 'ja', 'ja'])
-    expect(starterMaterials('en').map(material => material.language)).toEqual(['en', 'en', 'en'])
+    expect((await database.materials.toArray()).map(material => material.language)).toEqual(Array.from({ length: 24 }, () => 'ja'))
+    expect(starterMaterials('en').map(material => material.language)).toEqual(Array.from({ length: 24 }, () => 'en'))
     expect(JSON.stringify([state, await database.events.toArray(), await database.materials.toArray()])).not.toContain(fixtureSecret)
     expect(await database.secrets.count()).toBe(0)
   })

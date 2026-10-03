@@ -6,7 +6,7 @@ $modulePath = [IO.Path]::GetFullPath((Join-Path $starterRoot $ContentModule))
 if (-not $modulePath.StartsWith($starterRoot + [IO.Path]::DirectorySeparatorChar)) { throw 'Content module must be in this repository.' }
 $moduleUri = ([Uri]$modulePath).AbsoluteUri
 $moduleLiteral = $moduleUri | ConvertTo-Json -Compress
-$planSource = "import($moduleLiteral).then(({starterLessons}) => process.stdout.write(JSON.stringify(starterLessons.map(lesson => ({ id:lesson.id, language:lesson.language, version:lesson.version, texts:[...new Set([lesson.model.text,lesson.scaffold.answer,lesson.expression.reference,...lesson.transfer.map(item=>item.reference)])] })))));"
+$planSource = "import($moduleLiteral).then(({starterLessons}) => process.stdout.write(JSON.stringify(starterLessons.filter(lesson => lesson.sound.audioPath).map(lesson => ({ id:lesson.id, language:lesson.language, version:lesson.version, texts:[...new Set([lesson.model.text,lesson.scaffold.answer,lesson.expression.reference,...lesson.transfer.map(item=>item.reference)])] })))));"
 $plan = (& node --input-type=module -e $planSource) | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $plan.Count -ne 6) { throw 'Expected exactly six original starter lesson packages.' }
 $starterAudioRoot = [IO.Path]::GetFullPath((Join-Path $starterRoot 'public\audio\starter'))

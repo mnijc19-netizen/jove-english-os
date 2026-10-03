@@ -26,6 +26,7 @@ const learning = createStarterClassroom(database, english, () => !disposed && (!
   || !fence!.signal.aborted && (boundOwner ? fence!.isCurrent() : !account.userId)))
 const state = shallowRef<StarterState>(), sessions = shallowRef<StudySession[]>([]), events = shallowRef<StudyEvent[]>([]), audio = shallowRef<AudioAsset[]>([])
 const ready = ref(false), busy = ref(false), error = ref(''), saveStatus = ref(''), dirty = ref(false), captureActive = ref(false)
+const availableMinutes = ref<number>()
 const response = ref(''), mode = ref<StarterDraft['mode']>('text'), audioId = ref(''), romaji = ref(false), activeMs = ref(0)
 const pieces = ref<number[]>([]), playbackRate = ref(1), audioError = ref(false), consent = ref(false), pendingTranscript = ref('')
 const audioSource = ref(''), audioLoading = ref(false), audioRetry = ref(0)
@@ -33,11 +34,23 @@ const directAudioFallback = ref(false)
 const { busy: aiBusy, error: aiError, run, cancel } = useRequest()
 const provider = language === 'en' ? app.provider : japaneseProvider({ database, english, settings: () => app.settings,
   useAccount: () => account.configured && app.providerMode !== 'byok', assertCurrent: learning.assertCurrent })
-const courseList = computed(() => starterLessons.filter(lesson => lesson.language === language))
+const courseList = computed(() => starterLessons.filter(lesson => lesson.language === language).sort((a, b) => a.position - b.position))
+const foundationAnswer = computed(() => events.value.filter(event => event.type === 'STARTER_FOUNDATION_ATTEMPT'
+  && event.sessionId === state.value?.session.id).sort((a, b) => b.timestamp - a.timestamp
+    || Number(b.data?.revision ?? 0) - Number(a.data?.revision ?? 0))[0])
+const humanReference = computed(() => state.value?.lesson.sound.sourceUrl ?? (language === 'en'
+  ? 'https://learningenglish.voanews.com/a/lets-learn-english-lesson-one/3111026.html'
+  : 'https://a1.marugotoweb.jp/en/introduction.php'))
+function prerequisitesReady(lesson: typeof starterLessons[number]) {
+  if (sessions.value.some(saved => saved.kind === 'starter-classroom' && saved.materialId === lesson.id
+    && !saved.completedAt && !saved.id.startsWith('reading-conflict:'))) return true
+  return lesson.prerequisites.every(id => sessions.value.some(saved => saved.kind === 'starter-classroom'
+    && saved.materialId === id && !!saved.completedAt && saved.draft.purpose !== 'review'))
+}
 const selected = computed(() => courseList.value.find(lesson => lesson.id === route.query.lesson))
 const home = language === 'ja' ? '/ja' : '/today'
 const continuation = language === 'ja' ? { path: '/ja/literacy' } : { path: '/today', query: { practice: '1' } }
-const nextLesson = computed(() => nextStarterLesson(language, sessions.value, events.value, app.clock))
+const nextLesson = computed(() => nextStarterLesson(language, sessions.value, events.value, app.clock, availableMinutes.value))
 const stage = computed(() => state.value?.session.stage as StarterStage | undefined)
 const currentContext = computed(() => state.value?.lesson.transfer.find(context => context.id === state.value?.draft.contextId))
 const meaning = computed(() => stage.value === 'transfer' ? currentContext.value?.meaningZh : state.value?.lesson.model.meaningZh)
@@ -65,7 +78,7 @@ const repeatedDifficulty = computed(() => {
   return current.attempts.filter(attempt => attempt.stage === stage.value && events.value.some(event => event.type === 'STARTER_FEEDBACK'
     && event.data?.attemptId === attempt.id && ['invalid', 'partial'].includes(String(event.data.verdict)))).length >= 2
 })
-const stageName = computed(() => ({ teach: '先听示范', recognize: '听懂意思', assemble: '跟着组合', express: '试着表达', transfer: '换个场景', done: '这次学到什么' }[stage.value ?? 'teach']))
+const stageName = computed(() => ({ teach: '先看讲解与声音参考', recognize: '辨认意思', assemble: '跟着组合', express: '试着表达', transfer: '换个场景', done: '这次学到什么' }[stage.value ?? 'teach']))
 const recoveryCopies = computed(() => sessions.value.filter(row => row.kind === 'starter-classroom' && row.id.startsWith('reading-conflict:')
   && (!state.value || (row.draft.syncRecovery as Record<string, unknown> | undefined)?.rootSessionId === (state.value.draft.syncRecovery?.rootSessionId ?? state.value.session.id))))
 watch([demonstration, helpVisible, computed(() => stage.value === 'done'), audioRetry], async ([path, visible, finished], _previous, cleanup) => {
@@ -117,6 +130,7 @@ async function refresh() {
   const records = await Promise.all([database.sessions.toArray(), database.events.toArray(), database.audio.toArray()])
   await learning.assertCurrent()
   ;[sessions.value, events.value, audio.value] = records
+  availableMinutes.value = await learning.allowance()
   await app.refresh()
 }
 async function act(action: () => Promise<void>) {
@@ -167,6 +181,10 @@ async function nextStep(unverified = false) {
 async function help() {
   await flush()
   if (state.value) restore(await learning.help(state.value.session.id, state.value.draft.revision))
+}
+async function checkFoundation(choiceId: string) {
+  await flush()
+  if (state.value) restore(await learning.foundation(state.value.session.id, state.value.draft.revision, choiceId))
 }
 async function choosePractice() {
   await help()
@@ -292,8 +310,8 @@ onBeforeUnmount(() => {
     <p v-if="!ready && !error" role="status">正在接续你的课堂…</p>
     <details v-if="recoveryCopies.length" class="panel" aria-label="恢复另一台设备的课堂草稿"><summary>另一台设备也保存了草稿，两份原件都保留</summary><p>选择一份接续，会建立新草稿；不会把不同答案、提示或录音拼在一起，也不会重复记为掌握。</p><div v-for="copy in recoveryCopies" :key="copy.id"><p>{{ starterLessons.find(lesson => lesson.id === copy.materialId)?.titleZh }} · {{ copy.completedAt ? '已完成原件' : '未完成草稿' }}</p><p :lang="language">{{ copy.draft.response || '还没有填写回应' }}</p><p class="help-text">{{ copy.draft.helped ? '已用帮助' : '尚未用帮助' }} · {{ copy.draft.audioId ? '保留了录音引用' : '没有关联录音' }}</p><RouterLink v-if="copy.completedAt" :to="{ path: route.path, query: { session: copy.id } }">回看已完成原件</RouterLink><button v-else class="button secondary" :disabled="busy" @click="act(() => recoverBranch(copy.id))">接着这份草稿学</button></div></details>
     <template v-if="ready && !state">
-      <section class="panel starter-focus"><h2>先示范，再练习；完全不会也可以。</h2><p v-if="selected">你正在查看“{{ selected.titleZh }}”。如果还没学过前面的基础，系统会先接续起步课。</p><p>不需要先测验、看完整视频或填写感想。每次只学一个小目标，不会就用中文帮助。</p><button v-if="nextLesson" class="button primary" :disabled="busy" @click="act(continueNext)">开始或接着上次学 · 约 3–5 分钟</button><template v-else><p>三节入口课已经练过，延迟回顾还没到时间。不重复开课填满今天；下面可以回看，也可以接着已有基础与分级练习。</p><RouterLink :to="continuation" class="button primary">接续系统安排</RouterLink></template></section>
-      <ol class="course-list"><li v-for="lesson in courseList" :key="lesson.id"><h3>第 {{ lesson.position }} 课 · {{ lesson.titleZh }}</h3><p>{{ lesson.goalZh }}</p><p class="help-text">{{ starterGoalEvidence(lesson, events).retainedUse ? '已有后续时段换情境使用的证据' : starterGoalEvidence(lesson, events).independentUse ? '出现独立表达，下次再确认是否记住' : sessions.some(saved => saved.materialId === lesson.id && saved.completedAt) ? '已学习，独立使用仍待验证' : '从示范开始' }}</p><button class="button secondary" :disabled="busy" @click="act(() => begin(lesson.id, 'standard'))">{{ sessions.some(saved => saved.materialId === lesson.id && !saved.completedAt) ? '继续这节课' : '标准小课' }} · {{ lesson.minutes.standard }} 分钟</button></li></ol>
+      <section class="panel starter-focus"><h2>先示范，再练习；完全不会也可以。</h2><p v-if="selected">你正在查看“{{ selected.titleZh }}”。如果还没学过前面的基础，系统会先接续起步课。</p><p>不需要先测验、看完整视频或填写感想。每次只学一个小目标，不会就用中文帮助。</p><button v-if="nextLesson" class="button primary" :disabled="busy" @click="act(continueNext)">开始或接着上次学 · 约 3–5 分钟</button><template v-else><p>这一组基础小课已经练过，延迟回顾还没到时间。不重复开课填满今天；下面可以回看，也可以接着分级输入、阅读与表达练习。</p><RouterLink :to="continuation" class="button primary">接续系统安排</RouterLink></template></section>
+      <details class="panel"><summary>查看 {{ courseList.length }} 节基础小课的顺序与讲解</summary><ol class="course-list"><li v-for="lesson in courseList" :key="lesson.id"><h3>第 {{ lesson.position }} 课 · {{ lesson.titleZh }}</h3><p>{{ lesson.goalZh }}</p><p class="help-text">{{ starterGoalEvidence(lesson, events).retainedUse ? '已有后续时段换情境使用的证据' : starterGoalEvidence(lesson, events).independentUse ? '出现独立表达，下次再确认是否记住' : sessions.some(saved => saved.materialId === lesson.id && saved.completedAt) ? '已学习，独立使用仍待验证' : '从示范开始' }}</p><details><summary>先看看这课教什么（不改变学习状态）</summary><p :lang="language">{{ lesson.model.text }}</p><p>{{ lesson.model.meaningZh }}</p><p>{{ lesson.model.explanationZh }}</p><p v-if="lesson.foundation">基础小步：{{ lesson.foundation.titleZh }}</p></details><button class="button secondary" :disabled="busy || !prerequisitesReady(lesson)" @click="act(() => begin(lesson.id, 'standard'))">{{ !prerequisitesReady(lesson) ? '先接续前面的基础' : sessions.some(saved => saved.materialId === lesson.id && !saved.completedAt) ? '继续这节课' : '标准小课' }} · {{ lesson.minutes.standard }} 分钟</button></li></ol><p>课数是内容范围，不是 CEFR / JLPT 等级或流利度证明。后续继续由已有分级课程、阅读与间隔复习供给。</p></details>
       <p v-if="language === 'ja'"><RouterLink to="/ja/literacy">另外每天认识几个假名，不要求先背完五十音。</RouterLink></p>
     </template>
     <section v-else-if="state" class="panel starter-focus" :aria-busy="busy || aiBusy">
@@ -303,7 +321,8 @@ onBeforeUnmount(() => {
       <template v-else>
         <div v-if="helpVisible" class="starter-example">
           <p class="target-language" :lang="language">{{ stage === 'transfer' ? example : state.lesson.model.text }}</p><p>{{ meaning }}</p>
-          <p class="help-text">补充合成示范{{ state.lesson.sound.status === 'pending-review' ? ' · 音质与自然度待人工试听核对' : '' }}；不是真人原声或发音评分。</p>
+          <a :href="humanReference" target="_blank" rel="noopener noreferrer" class="human-reference">可选：到官方原站听真人声音参考</a><p class="help-text">原站参考与本站原创例句分开；不是这句话的逐字音频。打开链接不代表听过或听懂，外站不可用时仍能继续文字练习。</p>
+          <p v-if="state.lesson.sound.audioPath" class="help-text">补充合成示范{{ state.lesson.sound.status === 'pending-review' ? ' · 音质与自然度待人工试听核对' : '' }}；不是真人原声或发音评分。</p>
           <p v-if="audioLoading" class="help-text" role="status">正在接续这句的声音…</p>
           <audio v-if="audioSource && !audioError" :key="audioSource" controls preload="metadata" :src="audioSource" :playback-rate="playbackRate" :aria-label="language === 'ja' ? '日语短句合成示范' : '英语短句合成示范'" @error="demonstrationError" @play="($event.target as HTMLAudioElement).playbackRate = playbackRate" />
           <p v-if="audioError" class="help-text" role="status">示范暂未播放出来。可以先用中文讲解和选句继续，声音理解保持待验证。<button class="text-button" @click="audioRetry++">重试播放</button></p>
@@ -312,7 +331,10 @@ onBeforeUnmount(() => {
           <details :open="stage === 'teach'"><summary>中文讲解：这句话怎么组成、什么时候用</summary><p>{{ explanation }}</p></details>
           <details><summary>声音来源与使用说明</summary><p>{{ state.lesson.sound.sourceLabel }}。{{ state.lesson.sound.notesZh }}</p><a v-if="state.lesson.sound.sourceUrl" :href="state.lesson.sound.sourceUrl" target="_blank" rel="noopener noreferrer">可选：查看真人原站示范</a></details>
         </div>
-        <template v-if="stage === 'teach'"><p>先听一次，看懂中文意思；不需要已经会读这些字。接下来只做一个简单选择。</p><button class="button primary" :disabled="busy" @click="act(() => nextStep())">我看过示范了，试一个小问题</button></template>
+        <template v-if="stage === 'teach'">
+          <details v-if="state.lesson.foundation" class="foundation-step" data-testid="classroom-foundation"><summary>顺手学一个基础：{{ state.lesson.foundation.titleZh }}</summary><p>{{ state.lesson.foundation.explanationZh }}</p><ul><li v-for="item in state.lesson.foundation.examples" :key="item.text"><span :lang="language">{{ item.text }}</span> — {{ item.meaningZh }}</li></ul><a :href="state.lesson.foundation.sourceUrl" target="_blank" rel="noopener noreferrer">官方声音参考</a><p class="help-text">{{ state.lesson.foundation.sourceInstructionZh }}</p><fieldset :disabled="busy"><legend>{{ state.lesson.foundation.check.promptZh }}</legend><button v-for="choice in state.lesson.foundation.check.choices" :key="choice.id" class="button secondary" :aria-pressed="foundationAnswer?.data?.choiceId === choice.id" @click="act(() => checkFoundation(choice.id))">{{ choice.textZh }}</button></fieldset><p v-if="foundationAnswer" role="status">{{ foundationAnswer.data?.correct ? '这次在讲解支持下辨认出来了。' : '先回看上面的示范，再选一次也可以。' }} {{ state.lesson.foundation.check.explanationZh }} 原答案保留；不据此判断听力、发音或独立掌握。</p><p class="help-text">这个基础小步可跳过，不占额外课时，也不要求先背完整字表。</p></details>
+          <p>先看懂中文意思，声音可按需参考；不需要已经会读这些字。接下来只做一个简单选择。</p><button class="button primary teaching-continue" :disabled="busy" @click="act(() => nextStep())">我看过示范了，试一个小问题</button>
+        </template>
         <form v-else @submit.prevent="act(submit)">
           <h2>{{ prompt }}</h2>
           <fieldset v-if="stage === 'recognize'" :disabled="busy || aiBusy"><legend class="sr-only">选择意思</legend><label v-for="choice in state.lesson.recognition.choices" :key="choice.id" class="starter-choice"><input v-model="response" type="radio" :value="choice.id" @change="mode = 'choice'; changed()">{{ choice.textZh }}</label></fieldset>
@@ -346,5 +368,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* Override only the global coarse-pointer 44px !important touch floor. */
+@media(max-width:600px){.starter-page{padding-bottom:calc(80px + env(safe-area-inset-bottom))}.starter-focus>.button.primary.teaching-continue{position:fixed;bottom:calc(12px + env(safe-area-inset-bottom));left:18px;right:18px;width:calc(100% - 36px);min-height:52px!important;z-index:17;box-shadow:0 4px 20px #0003}}
+.foundation-step{margin:18px 0;padding:16px;border:1px solid var(--line);border-radius:12px}.foundation-step fieldset{margin-top:16px}.foundation-step button{margin:8px 8px 0 0;white-space:normal;min-height:48px}.foundation-step button[aria-pressed="true"]{outline:2px solid var(--muted);outline-offset:2px}.human-reference{display:inline-block;min-height:44px;padding:10px 0}.foundation-step li{overflow-wrap:anywhere}
 .starter-page{max-width:850px}.starter-focus{padding:clamp(20px,4vw,36px);margin-bottom:24px}.starter-focus h2{font-size:1.25rem;line-height:1.6}.target-language{font-size:clamp(24px,4vw,34px);font-weight:600;line-height:1.5;overflow-wrap:anywhere}.starter-example audio{width:100%;display:block;margin:12px 0}.starter-example details,.recording-option,.ai-option{margin-top:14px}.romaji{display:block;color:var(--muted);margin:8px 0}.starter-choice{display:flex;gap:12px;align-items:center;min-height:52px;padding:10px;border:1px solid var(--line);border-radius:10px;margin:8px 0}.starter-answer{display:block}.starter-answer textarea{display:block;width:100%;margin:10px 0}.starter-actions,.starter-pieces{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.starter-pieces p{width:100%;min-height:36px}.starter-feedback{border-top:1px solid var(--line);padding-top:18px;margin-top:24px}.course-list{padding-left:24px}.course-list li{padding:12px 0 22px}.starter-focus>.button.primary,form>.button.primary{width:100%;margin-top:16px}fieldset{border:0;padding:0}button{min-height:44px}.ai-option .button{margin:12px 0;display:block}@media(max-width:600px){.starter-page .page-heading{display:block}.starter-focus{padding:18px}.starter-focus .learning-goal{font-size:1rem}.starter-actions{gap:4px}}
 </style>

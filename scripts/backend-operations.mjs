@@ -13,7 +13,7 @@ function run(file, args = [], projectRef) {
 const cli = (args, target) => run('node_modules/supabase/dist/supabase.js', [...args, '--workdir', root], target)
 try {
   const [mode, flag, target, ...rest] = process.argv.slice(2)
-  if (!['inspect', 'migrate', 'migrations', 'deploy-functions'].includes(mode) || flag !== '--project-ref'
+  if (!['inspect', 'migrate', 'migrations', 'deploy-functions', 'deploy-ai'].includes(mode) || flag !== '--project-ref'
     || !/^[a-z0-9]{20}$/u.test(target ?? '') || rest.length) throw new Error('arguments')
   if (process.env.SUPABASE_PROJECT_ID && process.env.SUPABASE_PROJECT_ID !== target) throw new Error('conflicting target environment')
   // Presence-only checks: do not read or expose possible connection credentials.
@@ -57,11 +57,12 @@ try {
     if (!expected.length || JSON.stringify(expected) !== JSON.stringify(local) || JSON.stringify(expected) !== JSON.stringify(remote)) throw new Error('migration readback')
     process.stdout.write(`Current local and remote migration versions match (${expected.length}); RLS and owner journeys remain separate checks.\n`)
   }
-  if (mode === 'deploy-functions') {
+  if (mode === 'deploy-functions' || mode === 'deploy-ai') {
     run('scripts/build-functions.mjs')
-    for (const name of ['ai', 'content', 'speech-assess']) cli(['functions', 'deploy', name, '--project-ref', target], target)
+    const functions = mode === 'deploy-ai' ? ['ai'] : ['ai', 'content', 'speech-assess']
+    for (const name of functions) cli(['functions', 'deploy', name, '--project-ref', target], target)
     const deployed = JSON.parse(cli(['functions', 'list', '--project-ref', target, '--output', 'json'], target))
-    if (!Array.isArray(deployed) || !['ai', 'content', 'speech-assess'].every(name => deployed.some(fn => fn.slug === name && fn.status === 'ACTIVE'))) throw new Error('function readback')
+    if (!Array.isArray(deployed) || !functions.every(name => deployed.some(fn => fn.slug === name && fn.status === 'ACTIVE'))) throw new Error('function readback')
   }
   process.stdout.write(`Dedicated Jove ${mode} command completed for ${target}. Owner/Auth, exact migration/RLS readback, provider quality, scheduler and production journeys are still separate gates.\n`)
 } catch {

@@ -13,6 +13,7 @@ import {
   starterContentPolicy,
   starterFeedbackFixtures,
   starterLesson,
+  starterEntryLessons,
   starterLessons,
   type StarterLesson,
 } from '../src/content/starter-courses'
@@ -74,6 +75,17 @@ function expectReviewBoundary(lesson: StarterLesson, history: ReturnType<typeof 
 }
 
 describe('starter long-term retrieval scheduling', () => {
+  it.each(['en', 'ja'] as const)('%s admits new teaching rather than starving it behind a five-minute review backlog', language => {
+    const first = starterLesson(`${language}-starter-1`)!, at = reviewEpoch + 3 * starterDelay
+    const sessions: StudySession[] = [{ id: 'old-taught', kind: 'starter-classroom', materialId: first.id,
+      startedAt: reviewEpoch, completedAt: reviewEpoch + 1, stage: 'done', draft: { purpose: 'lesson' } }]
+    expect(nextStarterLesson(language, sessions, [], at, 5)).toMatchObject({ lesson: { id: `${language}-starter-2` }, review: false })
+    expect(nextStarterLesson(language, sessions, [], at, 8)).toMatchObject({ lesson: { id: first.id }, review: true })
+    sessions.push({ id: 'today-retrieval', kind: 'starter-classroom', materialId: first.id,
+      startedAt: at - 200, completedAt: at - 100, stage: 'done', draft: { purpose: 'review' } })
+    expect(nextStarterLesson(language, sessions, [], at, 45)).toMatchObject({ lesson: { id: `${language}-starter-2` }, review: false })
+    expect(sessions[0]!.completedAt).toBe(reviewEpoch + 1)
+  })
   it.each(['en', 'ja'] as const)('%s keeps all three historically retained goals in later review', language => {
     const histories = starterLessons.filter(lesson => lesson.language === language).map(retainedHistory)
     const sessions = histories.flatMap(history => history.sessions), events = histories.flatMap(history => history.events)
@@ -169,7 +181,7 @@ describe('starter long-term retrieval scheduling', () => {
 
 describe('original Chinese-native absolute-beginner starter content', () => {
   it('exports the exact six stable version-one lesson contracts and safe ID lookup', () => {
-    const contract: readonly StarterLesson[] = starterLessons
+    const contract: readonly StarterLesson[] = starterEntryLessons
     expect(contract).toHaveLength(6)
     expect(contract.map(lesson => lesson.id)).toEqual([...languageIds('en'), ...languageIds('ja')])
     expect(new Set(contract.map(lesson => lesson.id)).size).toBe(6)
@@ -190,14 +202,15 @@ describe('original Chinese-native absolute-beginner starter content', () => {
     }
     expect(starterLesson('unknown')).toBeUndefined()
     expect(starterLesson('EN-starter-1')).toBeUndefined()
-    expect(starterLesson('en-starter-4')).toBeUndefined()
-    expect(starterLesson('ja-starter-4')).toBeUndefined()
+    expect(starterLesson('en-starter-25')).toBeUndefined()
+    expect(starterLesson('ja-starter-25')).toBeUndefined()
   })
 
   it('keeps prerequisites taught earlier in the same language, with no script entry gate', () => {
     for (const language of ['en', 'ja'] as const) {
       const lessons = starterLessons.filter(lesson => lesson.language === language)
-      expect(lessons.map(lesson => lesson.position)).toEqual([1, 2, 3])
+      const ordered = [...lessons].sort((a, b) => a.position - b.position)
+      expect(ordered.map(lesson => lesson.position)).toEqual(Array.from({ length: 24 }, (_, index) => index + 1))
       expect(lessons[0]!.prerequisites).toEqual([])
       expect(lessons[1]!.prerequisites).toEqual([lessons[0]!.id])
       expect(lessons[2]!.prerequisites).toEqual([lessons[1]!.id])
@@ -274,7 +287,7 @@ describe('original Chinese-native absolute-beginner starter content', () => {
       'en-starter-3-work': '我需要水，麻烦你。',
       'en-starter-3-home': '我需要一点水，麻烦你。',
     }
-    const contexts = starterLessons.filter(lesson => lesson.language === 'en').flatMap(lesson => lesson.transfer)
+    const contexts = starterEntryLessons.filter(lesson => lesson.language === 'en').flatMap(lesson => lesson.transfer)
     expect(contexts).toHaveLength(Object.keys(meanings).length)
     for (const context of contexts) expect(context.meaningZh).toBe(meanings[context.id])
     const partner = starterLesson('en-starter-1')!.transfer.find(context => context.id.endsWith('-partner'))!
@@ -296,7 +309,7 @@ describe('original Chinese-native absolute-beginner starter content', () => {
       'ja-starter-3-friend': ['谢谢。（熟人之间的轻松说法）', 'arigatō'],
       'ja-starter-3-reply': ['不用谢。', 'dō itashimashite'],
     }
-    const contexts = starterLessons.filter(lesson => lesson.language === 'ja').flatMap(lesson => lesson.transfer)
+    const contexts = starterEntryLessons.filter(lesson => lesson.language === 'ja').flatMap(lesson => lesson.transfer)
     expect(contexts).toHaveLength(Object.keys(expected).length)
     for (const context of contexts) expect([context.meaningZh, context.romaji]).toEqual(expected[context.id])
     for (const id of ['ja-starter-1-friend', 'ja-starter-3-friend']) {
@@ -332,7 +345,7 @@ describe('original Chinese-native absolute-beginner starter content', () => {
   })
 
   it('teaches Japanese omissions, register and temporary romanization without requiring an input method', () => {
-    for (const lesson of starterLessons.filter(value => value.language === 'ja')) {
+    for (const lesson of starterEntryLessons.filter(value => value.language === 'ja')) {
       expect(lesson.model.reading).toBeDefined()
       expect(lesson.model.romaji).toBeDefined()
       expect(lesson.model.explanationZh).toMatch(/罗马字/)
@@ -352,7 +365,7 @@ describe('original Chinese-native absolute-beginner starter content', () => {
   })
 
   it('references only original supplemental synthetic assets, never copied or falsely approved audio', () => {
-    for (const lesson of starterLessons) {
+    for (const lesson of starterEntryLessons) {
       expect(lesson.sound.status).toBe('pending-review')
       expect(lesson.sound.sourceLabel).toMatch(/原创合成语音：Windows System\.Speech/)
       expect(lesson.sound.sourceLabel).toContain(lesson.language === 'en' ? 'Microsoft Zira Desktop (en-US)' : 'Microsoft Haruka Desktop (ja-JP)')
@@ -369,7 +382,7 @@ describe('original Chinese-native absolute-beginner starter content', () => {
   })
 
   it('matches fourteen ordered synthetic demonstration assets and their file/text hashes without claiming listening quality', () => {
-    const expected = starterLessons.flatMap(lesson => {
+    const expected = starterEntryLessons.flatMap(lesson => {
       const texts = starterDemonstrationTexts(lesson)
       expect(texts).toEqual([...new Set([lesson.model.text, lesson.scaffold.answer, lesson.expression.reference, ...lesson.transfer.map(context => context.reference)])])
       return texts.map((text, index) => {

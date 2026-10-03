@@ -7,11 +7,24 @@ import type { StudyEvent, StudySession } from './types'
 export const starterStages = ['teach', 'recognize', 'assemble', 'express', 'transfer', 'done'] as const
 export type StarterStage = typeof starterStages[number]
 export const starterDelay = 24 * 60 * 60_000
+/** Single-language cold-start fallback shared by the entry and admission. */
+export function starterRemainingMinutes(dailyMinutes: number, events: StudyEvent[], now: number) {
+  const day = new Date(now).toLocaleDateString('en-CA'), receipts = new Map<string, number>(), started = new Map<string, number>()
+  const today = events.filter(event => event.timestamp <= now && new Date(event.timestamp).toLocaleDateString('en-CA') === day)
+  for (const event of today) if (event.type === 'TASK_COMPLETED' && typeof event.data?.taskId === 'string'
+    && typeof event.data.minutes === 'number') receipts.set(event.data.taskId, event.data.minutes)
+  for (const event of today) if (event.type === 'TASK_STARTED' && event.source === 'objective'
+    && event.data?.kind === 'starter-classroom' && typeof event.data.taskId === 'string'
+    && typeof event.data.minutes === 'number' && !receipts.has(event.data.taskId)) started.set(event.data.taskId, event.data.minutes)
+  return Math.max(0, dailyMinutes - [...receipts.values(), ...started.values()].reduce((sum, minutes) => sum + minutes, 0))
+}
 /** Same ordered original texts as the offline audio builder; no publisher media. */
 export function starterDemonstrationTexts(lesson: StarterLesson): string[] {
   return [...new Set([lesson.model.text, lesson.scaffold.answer, lesson.expression.reference, ...lesson.transfer.map(context => context.reference)])]
 }
 export function starterDemonstrationPath(lesson: StarterLesson, text: string): string | undefined {
+  // Linked publisher references do not imply an owned/cached sound file.
+  if (!lesson.sound.audioPath) return undefined
   const index = starterDemonstrationTexts(lesson).indexOf(text)
   return index < 0 ? undefined : `audio/starter/${lesson.id}${index ? `-${index}` : ''}.wav`
 }
@@ -43,8 +56,9 @@ export function localStarterFeedback(lesson: StarterLesson, attempt: StarterAtte
   const accepted = attempt.stage === 'assemble' ? [lesson.scaffold.answer]
     : attempt.stage === 'transfer' ? context?.accepted ?? [] : lesson.expression.accepted
   if (accepted.some(answer => normalizeStarterAnswer(answer, lesson.language) === normalized))
-    return feedback('valid', attempt.prompted ? '这次借助帮助，已经表达出本课的意思。下次再试着少看一点提示。'
-      : '这次的表达符合当前情境。之后换个场景、隔天再用，才能知道是否保留住了。', null, 'continue')
+    return feedback('valid', attempt.stage === 'assemble' ? lesson.scaffold.explanationZh
+      : attempt.prompted ? `借助帮助，你已经表达出“${context?.meaningZh ?? lesson.model.meaningZh}”。下次试着少看一点提示。`
+        : `你这次表达出“${context?.meaningZh ?? lesson.model.meaningZh}”。这符合当前情境；隔天换个场景再用，才能判断是否保留住了。`, null, 'continue')
   if (attempt.contextId === 'ja-starter-3-reply' && lesson.expression.accepted.some(answer => normalizeStarterAnswer(answer, lesson.language) === normalized))
     return feedback('invalid', '这次是对方在感谢你，你可以回应“不用谢”，不用再向对方说谢谢。只换这一句话再试。', context!.reference, 'retry')
   // A reply-to-thanks task is a different communicative role from giving thanks.
@@ -172,8 +186,8 @@ function starterReviewDue(lesson: StarterLesson, events: StudyEvent[], now: numb
   return due
 }
 
-export function nextStarterLesson(language: LearningLanguage, sessions: StudySession[], events: StudyEvent[], now = Date.now()) {
-  const courses = starterLessons.filter(lesson => lesson.language === language)
+export function nextStarterLesson(language: LearningLanguage, sessions: StudySession[], events: StudyEvent[], now = Date.now(), availableMinutes?: number) {
+  const courses = starterLessons.filter(lesson => lesson.language === language).sort((a, b) => a.position - b.position)
   const drafts = sessions.filter(session => session.kind === 'starter-classroom' && !session.id.startsWith('reading-conflict:') && !session.completedAt
     && courses.some(lesson => lesson.id === session.materialId)).sort((a, b) => a.startedAt - b.startedAt)
   if (drafts[0]) return { lesson: starterLesson(drafts[0].materialId!)!, session: drafts[0], review: drafts[0].draft.purpose === 'review' }
@@ -185,8 +199,15 @@ export function nextStarterLesson(language: LearningLanguage, sessions: StudySes
       starterGoalEvidence(lesson, events, now).retainedUse ? starterReviewDue(lesson, events, now) : 0)
     return due <= now ? [{ lesson, review: true, due }] : []
   }).sort((a, b) => a.due - b.due || a.lesson.position - b.lesson.position)
-  if (reviews[0]) return { lesson: reviews[0].lesson, review: true }
   const next = courses.find(lesson => !sessions.some(session => session.kind === 'starter-classroom'
     && session.materialId === lesson.id && session.draft.purpose !== 'review' && !!session.completedAt))
+  const day = new Date(now).toLocaleDateString('en-CA')
+  const reviewedToday = sessions.some(session => session.kind === 'starter-classroom' && session.draft.purpose === 'review'
+    && !!session.completedAt && session.completedAt <= now && courses.some(lesson => lesson.id === session.materialId)
+    && new Date(session.completedAt).toLocaleDateString('en-CA') === day)
+  // One short retrieval warm-up, then new teaching. Supported learners must not
+  // spend every short day clearing the same backlog and never reach new content.
+  const roomForBoth = availableMinutes === undefined || availableMinutes >= 3 + (next?.minutes.quick ?? 0)
+  if (reviews[0] && (!next || !reviewedToday && roomForBoth)) return { lesson: reviews[0].lesson, review: true }
   return next ? { lesson: next, review: false } : null
 }

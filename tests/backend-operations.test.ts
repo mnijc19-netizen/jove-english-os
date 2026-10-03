@@ -60,6 +60,22 @@ describe('explicit dedicated-backend operation fence', () => {
     expect(deploys).toHaveLength(3)
     for (const args of deploys) expect(args.slice(args.indexOf('--project-ref'), args.indexOf('--project-ref') + 2)).toEqual(['--project-ref', ref])
   })
+  it('updates only AI when the trusted curriculum changes, preserving the other deployed services', () => {
+    const result = check('deploy-ai')
+    expect(result.process.exitCode).toBe(0)
+    const deploys = result.calls.filter(args => args.includes('deploy'))
+    expect(deploys).toHaveLength(1)
+    expect(deploys[0]!.slice(deploys[0]!.indexOf('deploy'), deploys[0]!.indexOf('deploy') + 2)).toEqual(['deploy', 'ai'])
+    expect(deploys[0]).toContain(ref)
+    expect(result.calls.flat()).not.toContain('push')
+    expect(result.calls.flat()).not.toContain('reset')
+  })
+  it.each(['other-app-preview', 'unrelated'])('refuses AI-only deployment into %s before mutation', name => {
+    const result = check('deploy-ai', name)
+    expect(result.process.exitCode).toBe(1)
+    expect(result.calls).toHaveLength(1)
+    expect(result.calls.flat()).not.toContain('deploy')
+  })
   it('rejects unsupported modes without invoking the CLI', () => {
     const result = check('reset')
     expect(result.process.exitCode).toBe(1); expect(result.calls).toHaveLength(0)

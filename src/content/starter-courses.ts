@@ -1,3 +1,6 @@
+import { englishContinuingLessons } from './starter-english'
+import { japaneseContinuingLessons } from './starter-japanese'
+
 /**
  * Original starter material for a Chinese-native absolute beginner.
  * These editorial fixtures are test expectations, not provider accuracy results.
@@ -18,6 +21,12 @@ export interface StarterLesson {
   expression: { promptZh: string; reference: string; accepted: string[]; errors: { input: string; feedbackZh: string; corrected: string }[] }
   transfer: { id: string; promptZh: string; reference: string; accepted: string[]; meaningZh: string; explanationZh: string; romaji?: string }[]
   sound: { sourceLabel: string; sourceUrl?: string; audioPath?: string; status: 'pending-review' | 'reviewed'; notesZh: string }
+  /** Original, small, script/sound teaching. Its check is not spoken mastery. */
+  foundation?: {
+    titleZh: string; explanationZh: string; examples: { text: string; meaningZh: string }[]
+    sourceUrl: string; sourceInstructionZh: string
+    check: { promptZh: string; choices: { id: string; textZh: string }[]; answerId: string; explanationZh: string }
+  }
 }
 
 export type StarterFeedbackVerdict = 'accept' | 'repair' | 'clarify'
@@ -63,7 +72,7 @@ function pendingSound(language: 'en' | 'ja', id: string): StarterLesson['sound']
   }
 }
 
-export const starterLessons: readonly StarterLesson[] = freezeContent<StarterLesson[]>([
+export const starterEntryLessons: readonly StarterLesson[] = freezeContent<StarterLesson[]>([
   {
     id: 'en-starter-1', language: 'en', version: 1, position: 1,
     titleZh: '先打招呼，再说自己的名字',
@@ -296,6 +305,10 @@ export const starterLessons: readonly StarterLesson[] = freezeContent<StarterLes
 ])
 
 /** Unknown IDs are not silently replaced by another language's lesson. */
+export const starterLessons: readonly StarterLesson[] = freezeContent([
+  ...starterEntryLessons, ...englishContinuingLessons, ...japaneseContinuingLessons,
+])
+
 export function starterLesson(id: string): StarterLesson | undefined {
   return starterLessons.find(lesson => lesson.id === id)
 }
