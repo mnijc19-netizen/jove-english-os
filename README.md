@@ -4,6 +4,14 @@ Formerly Jove English OS. The repository, public URL, PWA scope and existing Eng
 
 A personal, local-first language trainer for a native Chinese speaker, focused on natural listening and spontaneous speaking. It connects input, comprehension, chunks, retrieval, conversation, correction, delayed review and new-context transfer. Learning estimates carry evidence; completing a page never establishes mastery.
 
+## 新课堂候选版：尚未发布
+
+10月3日文书要求的改版已实现为候选版，不能用下文旧版的“已发布”状态替代本轮验收。英语和日语各有三节原创入门课：先用中文解释、听一句短示范，再认意思、拼一句、表达自己的意思；遇到困难可缩小任务，不要求先会写或先会五十音。隔天到期后用不同场景复用，不把照着提示答对算成独立掌握。
+
+候选版从 Today／日本語的课堂主按钮开始，跟随每一步的一个主要动作；“听不懂／需要帮助”保留辅助示范，录音不可用时可点选或打字继续。原有练习在另一个可展开区域，旧记录不清空。AI 是可选的当前回答纠错，先保存原答案再请求；失败时仍能继续本地课。短示范明确标注为待人工复核的合成语音，不冒充真人发音教材。三节课不是完整语言课程；既有真人外链、阅读和复习继续保留。
+
+本轮待完成的真实模型、人工教学／音频复核、iPhone 和次日／一周试用见 [项目状态](docs/STATUS.md)。这些不能用模拟回答或程序测试代替；当前正式网站仍为先前发布版本。
+
 ## 中文使用说明
 
 1. 电脑和 iPhone 在 [Settings](https://mnijc19-netizen.github.io/jove-english-os/#/settings) 登录同一个学习账号。正常使用不需要在每台设备重新填写 AI 密钥。
@@ -25,7 +33,7 @@ AI 的用途是帮你把自己的话说清楚、写清楚，不是代替你先�
 
 Website: [Jove Language OS](https://mnijc19-netizen.github.io/jove-english-os/). Release verification is recorded in `docs/STATUS.md`.
 
-**Release boundary:** the October3,2026 English/Japanese learner-experience remediation is delivered on clean public build `b3d9e32-ee296d61b05c`, superseding the earlier October1 runtime. Concrete daily Can-do goals, Chinese procedural teaching, saved personal writing/speech, confirmed AI correction, separate retries and delayed transfer join the existing automatic plans, publisher directories, isolated language reviews and account-backed continuity. Exact-release CI and actual-public learner paths pass; see `docs/STATUS.md` for counts, declared skips and operating limits. Earlier owner-reported iPhone-to-desktop continuity covers unchanged infrastructure, not a newly retested physical device or every OS. Android compatibility remains, with physical acceptance waived. No acoustic scoring, bulk course-media hosting, unlimited content, universally best UI or guaranteed individual gains are claimed. Preserve old drafts and use Settings → 检查更新; later documentation-only commits do not alter the published runtime.
+**Release boundary:** the public manifest checked on October3,2026 reports clean build `232b424-427f2ad19aad`, revision `232b4245a7832bc1cc0c6a46a5c215acc9ee4fbd`. It is the retained prior site, not this document-led classroom candidate. Historical learner-experience releases, exact-release checks and operating limits are recorded separately in `docs/STATUS.md`; the older `b3d9e32-ee296d61b05c` record is not the latest installed-version claim. Earlier owner-reported iPhone-to-desktop continuity covers unchanged infrastructure, not a newly retested physical device or every OS. Android compatibility remains, with physical acceptance waived. No acoustic scoring, bulk course-media hosting, unlimited content, universally best UI or guaranteed individual gains are claimed. Preserve old drafts and use Settings → 检查更新; later documentation-only commits do not alter the published runtime.
 
 ### Account-enabled first use
 
