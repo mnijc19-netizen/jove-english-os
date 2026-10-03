@@ -11,6 +11,7 @@ import type { StudySession } from '../domain/types'
 const route = useRoute(), space = useJapaneseSpace(), database = createLanguageDatabase('ja'), learning = createJapaneseWorkspace(database, english)
 const state = shallowRef<Awaited<ReturnType<typeof learning.reading.read>>>(), draft = ref<JapaneseReadingDraft>()
 const busy = ref(false), dirty = ref(false), error = ref(''), notice = ref(''), retained = ref('')
+const selectedLetter = ref(0)
 const reading = computed(() => state.value?.reading), locked = computed(() => draft.value?.lockedAt !== undefined)
 const teaching = computed(() => !!reading.value?.kana && !locked.value && (state.value?.session.stage === 'teach' || !draft.value?.seen && !draft.value?.helped))
 const results = computed(() => reading.value && draft.value ? japaneseReadingResult(reading.value, draft.value) : undefined)
@@ -104,20 +105,20 @@ onBeforeUnmount(() => {
       <p class="passage" lang="ja">{{ reading.passage }}</p>
       <section v-if="teaching && reading.kana" class="support" data-testid="kana-teaching">
         <h3>先认识，不用猜，也不用写日语</h3>
-        <p>假名是记录日语声音的字。平假名和片假名是两套字形；现在只学这一小组，不必一次背完“五十音”。日语按拍组织节奏，初学先跟着一个短音一个短音听。</p>
-        <p>下面的 a、i 等只是找到原站声音的临时路标，不按英语字母名读，也不用中文谐音记发音。</p>
-        <div v-if="reading.kana.letters" class="kana-cards"><article v-for="letter in reading.kana.letters" :key="letter.glyph" class="kana-card"><span class="glyph" lang="ja">{{ letter.glyph }}</span><strong>{{ letter.label }}</strong><p>{{ letter.cue }}</p></article></div>
+        <p>假名记录日语的声音。今天只认识这一组：点一个字看提示，再到下方原站听对应声音，不必一次背完五十音。</p>
+        <a :href="reading.kana.sourceUrl" target="_blank" rel="noopener noreferrer" class="button secondary">打开原站示范</a>
+        <div v-if="reading.kana.letters" class="kana-cards"><button v-for="(letter, index) in reading.kana.letters" :key="letter.glyph" type="button" class="kana-letter" :aria-pressed="selectedLetter === index" @click="selectedLetter = index"><span class="glyph" lang="ja">{{ letter.glyph }}</span><span>{{ letter.label }}</span></button></div>
+        <p v-if="reading.kana.letters" class="letter-cue" aria-live="polite">{{ reading.kana.letters[selectedLetter]?.cue }}</p>
         <p v-else>{{ reading.meaningZh }}</p>
-        <h3>刚学的字，可以组成短词</h3>
-        <p v-for="word in reading.words" :key="word.text"><span lang="ja">{{ word.reading }}</span> · {{ word.text }} · {{ word.meaning }}。先对照着认，不要求会拼写。</p>
-        <p>接着打开下方真人示范，找到这一组（例如第一组 a、i、u、e、o），逐个听、轻轻跟读，再回来看同一个字。选“暂时无法播放”也能先学字形，声音留到能播放时补上。</p>
+        <details><summary>假名、节拍和罗马字是什么？</summary><p>平假名和片假名是两套字形。日语按拍组织节奏，先跟着一个短音一个短音听。a、i 等只是找到原站声音的临时路标，不按英语字母名读，也不用中文谐音记发音。</p></details>
+        <p>两个小例词：<span v-for="word in reading.words" :key="word.text" class="example-word"><span lang="ja">{{ word.reading }}</span>（{{ word.meaning }}）</span>。对照着认即可，不要求拼写。</p>
       </section>
       <template v-if="!state.session.completedAt">
         <p v-if="draft.seen" class="help-text">这是一次间隔后的重读，重复答对不会冒充新材料上的独立理解。</p>
         <template v-if="!locked">
           <div v-if="reading.kana" class="support">
             <h3>先听今天这一组</h3><p>{{ reading.kana.guidance }}</p>
-            <div class="row wrap"><a :href="reading.kana.sourceUrl" target="_blank" rel="noopener noreferrer" class="button secondary">打开原站示范</a><a :href="reading.kana.drillUrl" target="_blank" rel="noopener noreferrer" class="text-button">已熟悉？试原站听音选字</a></div>
+            <div v-if="!teaching" class="row wrap"><a :href="reading.kana.sourceUrl" target="_blank" rel="noopener noreferrer" class="button secondary">打开原站示范</a><a :href="reading.kana.drillUrl" target="_blank" rel="noopener noreferrer" class="text-button">已熟悉？试原站听音选字</a></div>
             <p class="help-text">来源：{{ kanaSource.publisher }}。在外部网站播放，不复制音频或原题；本站练习是原创的字形对照，不是原站听力题答案。</p>
             <fieldset :disabled="busy"><legend>这次原声练习</legend><label class="choice"><input v-model="draft.sourcePractice" type="radio" name="source-practice" value="heard" @change="changed">我实际听过示范，并尝试跟读或听音选字</label><label class="choice"><input v-model="draft.sourcePractice" type="radio" name="source-practice" value="unavailable" @change="changed">现在无法播放，先做字形练习</label></fieldset>
             <p class="help-text">这是你的自报，不是平台测得的听力或发音成绩。原站在部分手机上可能显示不便，可稍后在电脑听；不必反复刷新或等待 AI。</p>
@@ -164,10 +165,13 @@ fieldset { border: 1px solid var(--border); border-radius: 12px; padding: 16px; 
 .choice { display: flex; align-items: center; gap: 10px; min-height: 44px; }
 input[type=radio] { width: auto; }
 .word-label { display: grid; gap: 8px; margin: 20px 0; }
-.support { border-left: 3px solid var(--border); padding-left: 16px; }
-.kana-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin: 20px 0; }
-.kana-card { padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
-.kana-card .glyph { display: block; font-size: 3rem; line-height: 1.4; }
+.support { border-left: 3px solid var(--line); padding-left: 16px; }
+.kana-cards { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 10px; }
+.kana-letter { flex: 1 0 44px; min-width: 44px; padding: 8px 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); }
+.kana-letter[aria-pressed=true] { border-color: var(--accent); background: var(--tint); }
+.kana-letter .glyph { display: block; font-size: 2rem; line-height: 1.4; }
+.letter-cue { min-height: 3em; line-height: 1.7; }
+.example-word { display: inline-block; margin-right: 8px; }
 textarea { resize: vertical; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 </style>
