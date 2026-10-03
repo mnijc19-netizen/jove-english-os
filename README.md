@@ -15,9 +15,9 @@ A personal, local-first language trainer for a native Chinese speaker, focused o
 ## 中文使用说明
 
 1. 电脑和 iPhone 在 [Settings](https://mnijc19-netizen.github.io/jove-english-os/#/settings) 登录同一个学习账号。正常使用不需要在每台设备重新填写 AI 密钥。
-2. 英语从 [Today](https://mnijc19-netizen.github.io/jove-english-os/#/today) 开始；日语从 [日本語](https://mnijc19-netizen.github.io/jove-english-os/#/ja) 开始。首次按实际情况完成各自的小诊断，不会的可以跳过，不用提前准备。日语完全零基础可直接点“我是零基础，不猜题直接起步”再确认；若曾随意填写诊断，可用“起点填错了？按零基础重新起步”校正。它只调整起步安排，不产生能力分数，也不清空旧记录。
+2. 英语从 [Today](https://mnijc19-netizen.github.io/jove-english-os/#/today) 开始；日语从 [日本語](https://mnijc19-netizen.github.io/jove-english-os/#/ja) 开始。零基础直接点新课堂主按钮，从中文示范起步，不必先做诊断或会五十音。旧安排的诊断可按实际情况完成或跳过；若曾随意填写日语诊断，可用“起点填错了？按零基础重新起步”校正。它只调整起步安排，不产生能力分数，也不清空旧记录。
 3. 每天只需告诉系统可用时间、精力，跟着下一项指引学习；英语与日语共用每天的时间预算，学习记录、课程和复习分开。Library 是选看材料的地方，不需要你每天自己编课。
-4. 先看今日的“这次要会用”：例如向新朋友介绍自己。真人课程在出版社原站播放；只听指引中的一小段，不必机械完成整个视频。回来先抓大意，再核对真人文本，把一个表达用于自己的句子，录下第一遍，改一处后完整重说。英语会隔天安排不同场景的应用；日语依次安排输入、应用、延迟迁移，延迟练习先保存自己的回答，再打开参考。系统替你选下一项，不需要每天自己找视频、编课程。
+4. 新课堂先学一句的意思，再辨认、拼句、表达自己的意思；需要帮助就用示范，隔天到期后换一个场景回应。原有真人课程仍在出版社原站播放，只听指引中的一小段，再抓大意、核对文本、用于自己的句子并录音重说，不必机械完成整个视频。系统替你选下一项，不需要每天自己找视频、编课程；原答案和帮助条件始终分开记录。
 5. 换设备前等对应语言同步完成；录音可能比文字慢。离线时先留在原设备，联网后再同步。外部课程和 AI 需要网络，已保存的本地练习不会因为 AI 失败而消失。
 6. 更新网站时先保存练习，在 Settings 的“网站版本与更新”点“检查更新”，出现更新按钮再点。不要清空网站数据；能登录不等于已更新。确切发布版本、验收范围和使用边界见 [项目状态](docs/STATUS.md)。
 
@@ -25,7 +25,7 @@ AI 提供文字解释、对话和纠错，不提供可靠的自动发音／音�
 
 AI 的用途是帮你把自己的话说清楚、写清楚，不是代替你先回答。先独立尝试，需要时点开提示；核对建议确实符合自己的意思，再确认加入针对性复习。反馈和首答都会保留，下一次从已保存内容接续；已有结果不自动重复收费。日常“已练几项”只是进度，真正的目标是隔天不看答案也能在新场景写出来、说出来。
 
-首次尝试后，系统会推荐一个表达，提供简短中文讲解和本站原创例句；例句只是帮助理解，不会自动填成你的作答。你不必自己设计句型练习，也不需要逐字照抄参考；用自己的名字、地点、想法和目的写或说，才是在把语言用起来。
+新入门课堂先教再练，不要求凭空作答。原有进阶场景练习在首次尝试后推荐一个表达，提供简短中文讲解和本站原创例句；例句只是帮助理解，不会自动填成你的作答。你不必自己设计句型练习，也不需要逐字照抄参考；用自己的名字、地点、想法和目的写或说，才是在把语言用起来。
 
 日语已完成的练习可从“最近完成的练习”回看原答案、两次录音和已有 AI 反馈。回看不会自动请求 AI；未保存的反馈需明确点击取回，只有仍有效的同一次缓存结果可免于重新生成，新的请求仍可能收费。
 
@@ -33,7 +33,7 @@ AI 的用途是帮你把自己的话说清楚、写清楚，不是代替你先�
 
 Website: [Jove Language OS](https://mnijc19-netizen.github.io/jove-english-os/). Release verification is recorded in `docs/STATUS.md`.
 
-**Release boundary:** the public manifest checked on October3,2026 reports clean build `232b424-427f2ad19aad`, revision `232b4245a7832bc1cc0c6a46a5c215acc9ee4fbd`. It is the retained prior site, not this document-led classroom candidate. Historical learner-experience releases, exact-release checks and operating limits are recorded separately in `docs/STATUS.md`; the older `b3d9e32-ee296d61b05c` record is not the latest installed-version claim. Earlier owner-reported iPhone-to-desktop continuity covers unchanged infrastructure, not a newly retested physical device or every OS. Android compatibility remains, with physical acceptance waived. No acoustic scoring, bulk course-media hosting, unlimited content, universally best UI or guaranteed individual gains are claimed. Preserve old drafts and use Settings → 检查更新; later documentation-only commits do not alter the published runtime.
+**Release boundary:** the owner-approved limited classroom trial is published on clean build `64cb1c1-abcbe1736a00`, source `64cb1c1bfd2e0ad7a5bdae4c9d36ce41d03187a0`. Exact-source CI,18 actual-public desktop/mobile-WebKit learner paths and the legitimate owner's normal PWA update pass; both language syncs and all39 prior sessions,184 events/four recordings are preserved. Historical releases and operating limits are recorded separately in `docs/STATUS.md`. This is software trial acceptance, not human-language/audio review,50 live-feedback outputs per language, current physical-iPhone classroom proof or next-day/week human gains. Two synthetic real-model service diagnostics cost0.063175USD total and create no learner evidence; normal quotas/holds remain. Android compatibility remains, with physical acceptance waived. No acoustic scoring, bulk course-media hosting, unlimited content, universally best UI or guaranteed individual gains are claimed. Preserve old drafts and use Settings → 检查更新; later documentation-only commits do not alter the published runtime.
 
 ### Account-enabled first use
 
@@ -45,8 +45,8 @@ Website: [Jove Language OS](https://mnijc19-netizen.github.io/jove-english-os/).
 
 ### Local practice and advanced no-account fallback
 
-1. Open the deployed site and choose **Find my starting point**. No account or API key is needed for the bundled practice.
-2. Complete the short baseline or skip unobserved speech. Set the time and energy you have on **Today**, then follow its proposed practice path; you do not need to select a curriculum or plan each modality.
+1. Open **Today** or **日本語** and choose the new classroom's primary action. No account, API key, prior diagnostic or Japanese input method is needed for the bundled entry practice.
+2. Follow the Chinese teaching and manageable next action; optional older diagnostics still allow unknown/skipped skills. Set the time and energy you have on **Today**, then follow its proposed practice path; you do not need to select a curriculum or plan each modality.
 3. Listen before revealing the transcript. Save useful chunks, express your own meaning, and return when separate review cards are due.
 4. Normal AI uses the signed-in account's backend configuration. Browser-only OpenRouter BYOK is an optional advanced fallback, not required on each device. Never put a private key in source, Git, exports or a public build environment.
 5. Export a JSON backup regularly. Download important recordings from **Library** separately. Install through your browser's app / Add to Home Screen menu where supported.
