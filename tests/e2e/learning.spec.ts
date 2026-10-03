@@ -130,7 +130,7 @@ test("first setup measures listening, vocabulary and reading, persists the profi
   await expect(page).toHaveURL(/today/);
   await page.reload();
   await expect(
-    page.locator("main").getByText("Practice learner，不用选课。", { exact: false }),
+    page.locator("main").getByText("Practice learner，不用自己排课。", { exact: false }),
   ).toBeVisible();
   const profiles = await rows(page, "profiles");
   expect(profiles[0].onboarded).toBe(true);

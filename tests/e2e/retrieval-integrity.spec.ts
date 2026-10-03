@@ -279,6 +279,11 @@ test("Recall strips legacy hidden context from drafts, response events and sched
 
 test("Empty Learn skips without completion; only saved chunk and written responses complete its assignment", async ({ page }) => {
   await open(page, "today");
+  const legacy = page.locator("details.legacy-practice");
+  await expect(legacy).toBeVisible();
+  if (await legacy.getAttribute("open") === null) {
+    await legacy.getByText("已有基础或旧练习？展开原来的学习安排", { exact: true }).click();
+  }
   const task = page.locator('.task-row[href*="/learn?"][href*="mode=chunks"]').first();
   await expect(task).toBeVisible();
   const href = (await task.getAttribute("href"))!;
