@@ -59,11 +59,14 @@ function cleanEvents(events: readonly StudyEvent[], now: number) {
     if (!nonempty(event.id) || !validTime(event.timestamp)) { diagnostics.invalidEvents++; continue }
     if (event.timestamp > now) futureIds.add(event.id)
     // Check duplicate conflicts before time filtering: a future copy cannot hide a collision.
-    const signature = canonical(event)
-    if (signatures.has(event.id)) {
-      if (signatures.get(event.id) !== signature) conflicts.add(event.id)
+    if (records.has(event.id)) {
+      // Unique history IDs need no deep signature. Compare every duplicate to
+      // its original, including future copies; cache only within this call.
+      const originalSignature = signatures.get(event.id) ?? canonical(records.get(event.id))
+      signatures.set(event.id, originalSignature)
+      if (originalSignature !== canonical(event)) conflicts.add(event.id)
       else diagnostics.duplicateEvents++
-    } else { records.set(event.id, event); signatures.set(event.id, signature) }
+    } else records.set(event.id, event)
   }
   diagnostics.conflictingIds = conflicts.size
   diagnostics.futureEvents = futureIds.size

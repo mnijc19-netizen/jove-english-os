@@ -560,6 +560,25 @@ describe('invalid dates, clock skew and sync evidence integrity', () => {
     expect(analyzeLongitudinal([...base, reordered], NOW).diagnostics).toMatchObject({ duplicateEvents: 1, conflictingIds: 0 })
     expect(findTrend([...base, reordered]).comparableDays).toBe(8)
   })
+  it('avoids deep collision signatures for unique history IDs but still compares duplicate payloads', () => {
+    const base = comparable([0.6, 0.6, 0.6, 0.6]), expected = analyzeLongitudinal(base, NOW)
+    let enumerations = 0
+    const guarded = { ...base[0], data: new Proxy(base[0].data!, {
+      ownKeys(target) { enumerations++; return Reflect.ownKeys(target) },
+    }) }
+    expect(analyzeLongitudinal([guarded, ...base.slice(1)], NOW)).toEqual(expected)
+    expect(enumerations).toBe(0)
+    expect(analyzeLongitudinal([guarded, ...base.slice(1), { ...base[0] }], NOW).diagnostics)
+      .toMatchObject({ duplicateEvents: 1, conflictingIds: 0 })
+    expect(enumerations).toBeGreaterThan(0)
+  })
+  it('retains the original signature across identical copies and a later future collision', () => {
+    const old = practice('old', NOW - 14 * DAY), current = practice('same', NOW)
+    const events = [old, current, { ...current }, { ...current, timestamp: NOW + DAY }, { ...current }]
+    expect(analyzeLongitudinal(events, NOW).diagnostics)
+      .toEqual({ invalidEvents: 0, futureEvents: 1, duplicateEvents: 2, conflictingIds: 1 })
+    expect(planRecovery(profile, events, NOW).mode).toBe('restart-14')
+  })
   it('does not let a future conflicting copy validate the present copy', () => {
     const old = practice('old', NOW - 14 * DAY), current = practice('same', NOW)
     expect(planRecovery(profile, [old, current, { ...current, timestamp: NOW + DAY }], NOW).mode).toBe('restart-14')
