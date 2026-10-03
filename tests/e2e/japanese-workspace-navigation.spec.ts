@@ -48,7 +48,10 @@ test('all Japanese hubs are safe empty entries with visible mobile navigation an
   for (const [label, path] of entries.slice(1)) {
     await navigate(page, label)
     await waitForWorkspace(page, path.slice('/ja/'.length))
-    await expect(page.getByRole('link', { name: '从零基础开始', exact: true })).toBeVisible()
+    if (path === '/ja/literacy') {
+      await expect(page.getByRole('button', { name: '我还是零基础，接着学假名', exact: true })).toBeVisible()
+      await expect(page.getByRole('link', { name: '已有基础？查看可选起点了解', exact: true })).toHaveAttribute('href', '#/ja')
+    } else await expect(page.getByRole('link', { name: '从零基础开始', exact: true })).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   }
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('看见真实练过的内容。')
